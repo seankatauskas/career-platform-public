@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
+# Supply a reviewed, digest-pinned runpod/worker-infinity-embedding image.  This
+# derivative retains its pinned dependencies and handler while replacing only the
+# service that resolves model weights.
+ARG EMBEDDING_BASE_IMAGE
+FROM ${EMBEDDING_BASE_IMAGE}
+
+COPY --chmod=0444 deploy/runpod/exact_embedding_service.py /embedding_service.py
+
+CMD ["python", "-u", "/handler.py"]

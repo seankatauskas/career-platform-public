@@ -1,0 +1,12 @@
+{
+  "name": "career-platform-extension-checks",
+  "private": true,
+  "scripts": {
+    "test": "node test_extension.js",
+    "test:browser": "node test_browser.mjs",
+    "test:resume": "node test_resume_upload.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.62.1"
+  }
+}

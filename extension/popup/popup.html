@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job Search Autofill</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="../dashboard_connection.js" defer></script>
+  <script src="popup.js" defer></script>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">Private application tracking</p>
+    <h1>Career Platform</h1>
+    <p id="form-status">Inspecting this application form…</p>
+  </header>
+  <main>
+    <label>Dashboard
+      <input id="dashboard-base" type="url" value="http://127.0.0.1:8766" spellcheck="false">
+    </label>
+    <p class="guardrail">Use the local address or your private HTTPS dashboard. Cloud access requires your existing Tailscale connection.</p>
+    <label>Pairing code
+      <input id="pairing-code" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the dashboard code">
+    </label>
+    <button id="connect-browser" type="button">Connect browser</button>
+    <button id="disconnect-browser" type="button" class="secondary" hidden>Disconnect browser</button>
+    <p id="tracking-status" role="status">Get a browser connection code from dashboard Settings. Connect once; applications are tracked automatically.</p>
+    <button id="fill" type="button" disabled>Fill application</button>
+    <p class="guardrail">With a connected browser, Fill application also supplies your selected or preferred saved PDF resume. Existing attachments are preserved. Review the upload and answers before submitting; legal attestations and compensation remain manual.</p>
+    <hr>
+    <p id="resume-status" class="guardrail">Your saved PDF will be supplied when you fill this application with a connected browser.</p>
+    <details><summary>Legacy per-application handoff</summary>
+    <button id="mark-submitted" class="secondary" type="button" disabled>Mark submitted</button>
+    <p class="guardrail">Use this only after you personally submit the application. The extension never clicks Submit.</p>
+    </details>
+    <p id="notice" role="status"></p>
+  </main>
+</body>
+</html>

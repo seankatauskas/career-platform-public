@@ -1,0 +1,3 @@
+#!/command/with-contenv sh
+set -eu
+exec /opt/hermes/.venv/bin/python /opt/job-search-hermes/maintenance.py hermes

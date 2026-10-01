@@ -1,0 +1,15 @@
+github_repository = "seankatauskas/career-platform"
+ # Set verified IDs when GitHub reports use_immutable_subject=true:
+ # github_oidc_ids = { owner = 12345, repository = 67890 }
+alert_email       = "REPLACE-owner-email"
+state_bucket      = "REPLACE-state-bucket"
+# Explicitly authorize blank-volume initialization for the FIRST bootstrap only.
+# Set false after boot; existing ext4 disks are always verified rather than formatted.
+initialize_data_volume = true
+# Choose and checksum an exact official CloudWatch package before first apply.
+cloudwatch_agent_version = "1.300072.0b1766"
+cloudwatch_agent_sha256  = "05baeadca96c4bb8e43906ed09cf0bebd0f321ff6d41987bdc46ce681de0978d"
+# Pin the resolved ami_id output before subsequent plans.
+# ami_id = "ami-..."
+# Supply an existing account GitHub OIDC provider instead of creating a duplicate.
+# github_oidc_provider_arn = "arn:aws:iam::ACCOUNT:oidc-provider/token.actions.githubusercontent.com"

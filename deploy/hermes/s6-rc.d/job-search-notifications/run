@@ -1,0 +1,16 @@
+#!/command/with-contenv sh
+set -eu
+
+export HOME=/opt/data
+# The bridge only sends already-rendered notifications. Do not pass the MCP bearer
+# token into it or into the `hermes send` child process.
+unset JOB_SEARCH_MCP_TOKEN
+exec s6-setuidgid hermes \
+  /opt/hermes/.venv/bin/python \
+  /opt/job-search-hermes/hermes_delivery.py \
+  serve \
+  --socket /run/job-search-notifications/hermes.sock \
+  --hermes-executable /opt/hermes/.venv/bin/hermes \
+  --target "${JOB_SEARCH_NOTIFICATION_TARGET:?JOB_SEARCH_NOTIFICATION_TARGET is required}" \
+  --receipt-database /opt/data/job-search-delivery.sqlite \
+  --gateway-service /run/service/gateway-default

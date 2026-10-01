@@ -1,0 +1,23 @@
+/* Page controls remain compact; technical choices and scores are secondary. */
+.shortlist-toolbar { justify-content: flex-start; padding-bottom: 16px; gap: 16px; }
+.shortlist-toolbar label { min-width: 140px; }
+#curated-list-label { max-width: min(100%, 480px); }
+#curated-list { max-width: 100%; }
+.shortlist-filters { border-top: 1px solid var(--line); padding: 16px 0; }
+.shortlist-filters > .controls { justify-content: flex-start; gap: 16px; }
+.shortlist-advanced { margin-top: 16px; }
+.shortlist-advanced > summary, .ranking-details > summary { color: var(--secondary-ink); cursor: pointer; font-size: 12px; }
+.shortlist-advanced .controls { justify-content: flex-start; margin-top: 16px; gap: 16px; }
+.ranking-details { margin-top: 12px; }
+#shortlist-list .shortlist-score { font-size: 12px; }
+#shortlist-list .curated-explanation { max-width: 70ch; line-height: 1.6; }
+.job-preview-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; flex-shrink: 0; }
+.job-preview-header-actions a { font-size: 12px; white-space: nowrap; }
+.job-preview-source-details { margin-top: 16px; }
+.job-preview-source-details > summary { cursor: pointer; color: var(--secondary-ink); font-size: 12px; }
+@media (max-width: 600px) {
+  .shortlist-toolbar, .shortlist-filters .controls { align-items: stretch; }
+  .shortlist-toolbar > label, .shortlist-filters .controls > label { flex: 1 1 160px; }
+  .shortlist-toolbar > button { flex: 1 1 auto; }
+  .job-preview-header-actions { flex-direction: column; align-items: flex-end; gap: 8px; }
+}

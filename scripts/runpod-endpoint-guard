@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Read-back and smoke-test guard for job-search Runpod endpoints."""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import math
+import os
+import re
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}\Z")
+MODEL = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
+REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+
+
+class GuardError(RuntimeError):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def reject_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def api_key() -> str:
+    value = os.environ.get("RUNPOD_API_KEY", "")
+    if not value or len(value) > 16_384 or any(char.isspace() for char in value):
+        raise GuardError("RUNPOD_API_KEY is missing or malformed")
+    return value
+
+
+def request_json(method: str, url: str, body: dict[str, Any] | None = None) -> Any:
+    if not (
+        url.startswith(("https://rest.runpod.io/v1/", "https://api.runpod.ai/v2/",
+                        "https://api.runpod.io/v2/templates/",
+                        "https://api.runpod.io/v2/serverless/"))
+        or url == "https://api.runpod.io/graphql"
+    ):
+        raise GuardError("refusing an unexpected Runpod origin")
+    encoded = None
+    if body is not None:
+        encoded = json.dumps(body, separators=(",", ":"), allow_nan=False).encode()
+    request = urllib.request.Request(
+        url,
+        data=encoded,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+            "User-Agent": "job-search-runpod-guard/1.0",
+        },
+    )
+    opener = urllib.request.build_opener(
+        NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context())
+    )
+    try:
+        with opener.open(request, timeout=30) as response:
+            if response.geturl() != url:
+                raise GuardError("Runpod redirected a guarded request")
+            if response.headers.get_content_type() != "application/json":
+                raise GuardError("Runpod guard response is not JSON")
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except (http.client.HTTPException, OSError, urllib.error.URLError) as exc:
+        raise GuardError("Runpod guard request failed") from exc
+    if not raw or len(raw) > MAX_RESPONSE_BYTES:
+        raise GuardError("Runpod guard response is empty or too large")
+    try:
+        return json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise GuardError("Runpod guard response is not finite JSON") from exc
+
+
+def one(items: Any, *, field: str, value: str, label: str) -> dict[str, Any]:
+    if not isinstance(items, list):
+        raise GuardError(f"Runpod {label} list has an invalid shape")
+    matches = [
+        item for item in items if isinstance(item, dict) and item.get(field) == value
+    ]
+    if len(matches) != 1:
+        raise GuardError(f"expected exactly one Runpod {label} matching {field}")
+    return matches[0]
+
+
+def expected_environment(entries: list[str]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for entry in entries:
+        name, separator, value = entry.partition("=")
+        if (
+            separator != "="
+            or not ENVIRONMENT_NAME.fullmatch(name)
+            or name in expected
+            or not value
+            or len(value) > 16_384
+            or any(character in "\r\n\x00" for character in value)
+        ):
+            raise GuardError("expected template environment is invalid")
+        expected[name] = value
+    return expected
+
+
+def exact_integer(value: Any, expected: int) -> bool:
+    return type(value) is int and value == expected
+
+
+def validate_template_record(
+    selected: Any,
+    *,
+    template_id: str | None,
+    name: str,
+    image: str,
+    container_disk_gb: int,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    if not isinstance(selected, dict):
+        raise GuardError("Runpod template has an invalid shape")
+    actual_id = selected.get("id")
+    actual_env = selected.get("env")
+    # The v1 API now omits isPublic for private templates. Verify that fact via
+    # v2, matching every guarded configuration field before combining records.
+    # Absence alone is never evidence that a template is private.
+    if ("isPublic" not in selected or "imageName" not in selected) and isinstance(actual_id, str) and IDENTIFIER.fullmatch(actual_id):
+        current = request_json("GET", f"https://api.runpod.io/v2/templates/{actual_id}")
+        fields = {
+            "id": "id", "name": "name", "imageName": "image",
+            "isServerless": "serverless", "containerDiskInGb": "disk", "env": "env",
+        }
+        if not isinstance(current, dict) or any(
+            current.get(new) != selected.get(old)
+            for old, new in fields.items() if old != "imageName" or old in selected
+        ):
+            raise GuardError("template changed between API read-backs")
+        selected = {**selected, "isPublic": current.get("public"), "imageName": current.get("image")}
+    if (
+        not isinstance(actual_id, str)
+        or not IDENTIFIER.fullmatch(actual_id)
+        or (template_id is not None and actual_id != template_id)
+        or selected.get("name") != name
+        or selected.get("imageName") != image
+        or selected.get("isServerless") is not True
+        or selected.get("isPublic") is not False
+        or not exact_integer(selected.get("containerDiskInGb"), container_disk_gb)
+        or actual_env != environment
+    ):
+        raise GuardError(
+            "template failed id/name/private/image/disk/environment read-back"
+        )
+    return selected
+
+
+def verify_current_gpu_endpoint(selected: dict[str, Any], args: argparse.Namespace,
+                                expected_env: dict[str, str]) -> dict[str, Any]:
+    endpoint_id = selected.get("id")
+    if not isinstance(endpoint_id, str) or not IDENTIFIER.fullmatch(endpoint_id):
+        raise GuardError("Runpod endpoint returned an invalid id")
+    current = request_json("GET", f"https://api.runpod.io/v2/serverless/{endpoint_id}")
+    if not isinstance(current, dict):
+        raise GuardError("current endpoint has an invalid shape")
+    gpu, workers = current.get("gpu"), current.get("workers")
+    if (
+        current.get("id") != endpoint_id or current.get("name") != args.expected_name
+        or current.get("type") != "QUEUE" or current.get("cpu")
+        or current.get("image") != args.image or current.get("env") != expected_env
+        or not exact_integer(current.get("disk"), args.container_disk_gb)
+        or not isinstance(gpu, dict) or not exact_integer(gpu.get("count"), 1)
+        or not isinstance(gpu.get("pools"), list) or not gpu["pools"]
+        or not isinstance(workers, dict) or not exact_integer(workers.get("min"), 0)
+        or not exact_integer(workers.get("max"), 1)
+        or not exact_integer(workers.get("idleTimeout"), args.idle_timeout)
+        or not exact_integer(current.get("timeout"), args.execution_timeout * 1000)
+    ):
+        raise GuardError("current endpoint failed GPU/configuration/bounded-policy read-back")
+    return {**selected, "computeType": "GPU"}
+
+
+def endpoint(args: argparse.Namespace) -> None:
+    selector = args.endpoint_id or args.name
+    if not isinstance(selector, str) or not IDENTIFIER.fullmatch(selector):
+        raise GuardError("Runpod endpoint selector has an invalid shape")
+    if not IDENTIFIER.fullmatch(args.template_id) or not IDENTIFIER.fullmatch(
+        args.expected_name
+    ):
+        raise GuardError("Runpod endpoint expectation has an invalid shape")
+    expected_env = expected_environment(args.env)
+    items = request_json(
+        "GET", "https://rest.runpod.io/v1/endpoints?includeTemplate=true"
+    )
+    if args.endpoint_id:
+        selected = one(items, field="id", value=args.endpoint_id, label="endpoint")
+    else:
+        selected = one(items, field="name", value=args.name, label="endpoint")
+    if "computeType" not in selected:
+        selected = verify_current_gpu_endpoint(selected, args, expected_env)
+    embedded_template = selected.get("template")
+    validate_template_record(
+        embedded_template,
+        template_id=args.template_id,
+        name=args.template_name,
+        image=args.image,
+        container_disk_gb=args.container_disk_gb,
+        environment=expected_env,
+    )
+    if (
+        selected.get("name") != args.expected_name
+        or selected.get("templateId") != args.template_id
+        or selected.get("computeType") != "GPU"
+        or not exact_integer(selected.get("gpuCount"), 1)
+        or not exact_integer(selected.get("workersMin"), 0)
+        or not exact_integer(selected.get("workersMax"), 1)
+        or not exact_integer(selected.get("idleTimeout"), args.idle_timeout)
+        or not exact_integer(
+            selected.get("executionTimeoutMs"), args.execution_timeout * 1000
+        )
+    ):
+        raise GuardError("endpoint failed identity or bounded-policy read-back")
+    endpoint_id = selected.get("id")
+    if not isinstance(endpoint_id, str) or not IDENTIFIER.fullmatch(endpoint_id):
+        raise GuardError("Runpod endpoint returned an invalid id")
+    model_response = request_json(
+        "POST",
+        "https://api.runpod.io/graphql",
+        {
+            "query": (
+                "query EndpointModelReferences($id: String!) { "
+                "myself { endpoint(id: $id) { modelReferences } } }"
+            ),
+            "variables": {"id": endpoint_id},
+        },
+    )
+    if not isinstance(model_response, dict) or model_response.get("errors"):
+        raise GuardError("endpoint model-reference read-back failed")
+    try:
+        model_references = model_response["data"]["myself"]["endpoint"][
+            "modelReferences"
+        ]
+    except (KeyError, TypeError):
+        raise GuardError("endpoint model-reference read-back has an invalid shape")
+    if model_references != [args.model_reference]:
+        raise GuardError("endpoint model-reference read-back did not match")
+    print(endpoint_id)
+
+
+def template(args: argparse.Namespace) -> None:
+    if not IDENTIFIER.fullmatch(args.name):
+        raise GuardError("Runpod template selector has an invalid shape")
+    if args.template_id is not None and not IDENTIFIER.fullmatch(args.template_id):
+        raise GuardError("Runpod template id has an invalid shape")
+    expected_env = expected_environment(args.env)
+    if args.template_id is None:
+        url = "https://rest.runpod.io/v1/templates?includeEndpointBoundTemplates=true"
+        selected = one(
+            request_json("GET", url), field="name", value=args.name, label="template"
+        )
+    else:
+        url = (
+            f"https://rest.runpod.io/v1/templates/{args.template_id}"
+            "?includeEndpointBoundTemplates=true"
+        )
+        selected = request_json("GET", url)
+    selected = validate_template_record(
+        selected,
+        template_id=args.template_id,
+        name=args.name,
+        image=args.image,
+        container_disk_gb=args.container_disk_gb,
+        environment=expected_env,
+    )
+    template_id = selected.get("id")
+    print(template_id)
+
+
+def smoke_embedding(args: argparse.Namespace) -> None:
+    endpoint_id = args.endpoint_id
+    if (
+        not IDENTIFIER.fullmatch(endpoint_id)
+        or not MODEL.fullmatch(args.model)
+        or not REVISION.fullmatch(args.revision)
+        or not 1 <= args.dimensions <= 65_536
+    ):
+        raise GuardError("embedding smoke configuration is invalid")
+    submit = request_json(
+        "POST",
+        f"https://api.runpod.ai/v2/{endpoint_id}/run",
+        {
+            "input": {
+                "model": args.model,
+                "input": ["job search embedding smoke test"],
+            },
+            "policy": {"executionTimeout": 900_000, "ttl": 1_200_000},
+        },
+    )
+    if not isinstance(submit, dict) or not isinstance(submit.get("id"), str):
+        raise GuardError("embedding smoke submission returned no job id")
+    job_id = submit["id"]
+    if not IDENTIFIER.fullmatch(job_id):
+        raise GuardError("embedding smoke submission returned an invalid job id")
+    deadline = time.monotonic() + 900
+    result = submit
+    while result.get("status") in {"IN_QUEUE", "IN_PROGRESS"}:
+        if time.monotonic() >= deadline:
+            raise GuardError("embedding smoke job exceeded its deadline")
+        time.sleep(2)
+        result = request_json(
+            "GET", f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
+        )
+        if not isinstance(result, dict) or result.get("id") != job_id:
+            raise GuardError("embedding smoke job identity changed")
+    if result.get("status") != "COMPLETED":
+        raise GuardError("embedding smoke job did not complete")
+    output = result.get("output")
+    if isinstance(output, list) and len(output) == 1:
+        output = output[0]
+    if not isinstance(output, dict) or output.get("model") != args.model:
+        raise GuardError("embedding smoke output has an invalid model")
+    if (
+        output.get("job_search_model_revision") != args.revision
+        or output.get("job_search_worker_protocol")
+        != "job_search_infinity_exact_v1"
+    ):
+        raise GuardError("embedding smoke output did not attest the deployment")
+    data = output.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise GuardError("embedding smoke output has an invalid data shape")
+    vector = data[0].get("embedding")
+    if (
+        data[0].get("index") != 0
+        or not isinstance(vector, list)
+        or len(vector) != args.dimensions
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in vector
+        )
+    ):
+        raise GuardError("embedding smoke output failed dimension/finite checks")
+    print(f"validated_embedding_dimensions={args.dimensions}")
+
+
+def validate_vllm_smoke(args: argparse.Namespace) -> None:
+    """Validate the completed job emitted by ``runpodctl serverless run``.
+
+    worker-vLLM reports upstream vLLM errors as a normal handler output.  Runpod
+    consequently marks those jobs COMPLETED, so the CLI's exit status alone is
+    not evidence that inference worked.
+    """
+
+    if not MODEL.fullmatch(args.model):
+        raise GuardError("vLLM smoke model is invalid")
+    raw = sys.stdin.buffer.read(MAX_RESPONSE_BYTES + 1)
+    if not raw or len(raw) > MAX_RESPONSE_BYTES:
+        raise GuardError("vLLM smoke result is empty or too large")
+    try:
+        job = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise GuardError("vLLM smoke result is not finite JSON") from exc
+    if not isinstance(job, dict) or job.get("status") != "COMPLETED":
+        raise GuardError("vLLM smoke job did not complete")
+
+    output = job.get("output")
+    if isinstance(output, list):
+        if len(output) != 1:
+            raise GuardError("vLLM smoke output has an invalid envelope")
+        output = output[0]
+    if not isinstance(output, dict) or "error" in output:
+        raise GuardError("vLLM smoke worker returned an error or invalid output")
+
+    # Some worker versions wrap the proxied HTTP response.  Accept that shape
+    # only when it proves a successful status and contains one bounded JSON body.
+    if "body" in output:
+        status_code = output.get("status_code", output.get("statusCode", 200))
+        if (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 200 <= status_code < 300
+        ):
+            raise GuardError("vLLM smoke proxy request failed")
+        output = output["body"]
+        if isinstance(output, str):
+            try:
+                encoded = output.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise GuardError("vLLM smoke output is invalid") from exc
+            if len(encoded) > MAX_RESPONSE_BYTES:
+                raise GuardError("vLLM smoke output is too large")
+            try:
+                output = json.loads(encoded, parse_constant=reject_constant)
+            except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+                raise GuardError("vLLM smoke proxy body is not finite JSON") from exc
+
+    if not isinstance(output, dict) or "error" in output:
+        raise GuardError("vLLM smoke worker returned an error or invalid output")
+    if output.get("model") != args.model:
+        raise GuardError("vLLM smoke response model did not match")
+    choices = output.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise GuardError("vLLM smoke response choices are invalid")
+    choice = choices[0]
+    if not isinstance(choice, dict) or choice.get("finish_reason") == "length":
+        raise GuardError("vLLM smoke response was invalid or truncated")
+    message = choice.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise GuardError("vLLM smoke response content is empty")
+    print(f"validated_vllm_model={args.model}")
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser()
+    commands = root.add_subparsers(dest="command", required=True)
+    endpoint_parser = commands.add_parser("endpoint")
+    selector = endpoint_parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--endpoint-id")
+    selector.add_argument("--name")
+    endpoint_parser.add_argument("--expected-name", required=True)
+    endpoint_parser.add_argument("--template-id", required=True)
+    endpoint_parser.add_argument("--template-name", required=True)
+    endpoint_parser.add_argument("--image", required=True)
+    endpoint_parser.add_argument("--container-disk-gb", type=int, required=True)
+    endpoint_parser.add_argument("--idle-timeout", type=int, required=True)
+    endpoint_parser.add_argument("--execution-timeout", type=int, required=True)
+    endpoint_parser.add_argument("--model-reference", required=True)
+    endpoint_parser.add_argument("--env", action="append", default=[])
+    template_parser = commands.add_parser("template")
+    template_parser.add_argument("--name", required=True)
+    template_parser.add_argument("--template-id")
+    template_parser.add_argument("--image", required=True)
+    template_parser.add_argument("--container-disk-gb", type=int, required=True)
+    template_parser.add_argument("--env", action="append", default=[])
+    smoke = commands.add_parser("smoke-embedding")
+    smoke.add_argument("--endpoint-id", required=True)
+    smoke.add_argument("--model", required=True)
+    smoke.add_argument("--revision", required=True)
+    smoke.add_argument("--dimensions", type=int, required=True)
+    vllm_smoke = commands.add_parser("validate-vllm-smoke")
+    vllm_smoke.add_argument("--model", required=True)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "endpoint":
+            endpoint(args)
+        elif args.command == "template":
+            template(args)
+        elif args.command == "smoke-embedding":
+            smoke_embedding(args)
+        else:
+            validate_vllm_smoke(args)
+    except (GuardError, KeyError, TypeError, ValueError):
+        print("runpod endpoint guard: validation failed", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

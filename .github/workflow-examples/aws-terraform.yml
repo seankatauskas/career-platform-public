@@ -1,0 +1,89 @@
+name: Plan or apply AWS infrastructure
+
+# The initial state bucket and GitHub role must be bootstrapped with the owner's
+# AWS credentials first. This workflow never bootstraps its own trust boundary.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Plan only, or apply the saved plan created in this run'
+        type: choice
+        options: [plan, apply]
+        default: plan
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: career-platform-production
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    if: github.repository == 'seankatauskas/career-platform' && github.ref == vars.AWS_WORKFLOW_REF && github.event_name == 'workflow_dispatch' && github.actor == 'seankatauskas' && github.triggering_actor == 'seankatauskas'
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      STATE_BUCKET: ${{ vars.AWS_STATE_BUCKET }}
+      TERRAFORM_VARS_JSON: ${{ vars.AWS_TERRAFORM_VARS_JSON }}
+      TF_IN_AUTOMATION: 'true'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: '1.13.5'
+          terraform_wrapper: false
+      - name: Validate nonsecret configuration
+        run: |
+          set -euo pipefail
+          test -n "$STATE_BUCKET"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          values = json.loads(os.environ['TERRAFORM_VARS_JSON'])
+          if not isinstance(values, dict):
+              raise SystemExit('AWS_TERRAFORM_VARS_JSON must be a nonsecret JSON object')
+          protected = {'github_repository': os.environ['GITHUB_REPOSITORY'],
+                       'github_environment': 'production',
+                       'state_bucket': os.environ['STATE_BUCKET'],
+                       'region': os.environ['AWS_REGION']}
+          for key, value in protected.items():
+              if key in values and values[key] != value:
+                  raise SystemExit('Terraform config contradicts workflow identity/backend: ' + key)
+              values[key] = value
+          path = Path(os.environ['RUNNER_TEMP']) / 'aws.tfvars.json'
+          path.write_text(json.dumps(values))
+          path.chmod(0o600)
+          PY
+      - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_INFRASTRUCTURE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-terraform-${{ github.run_id }}
+      - name: Initialize locked remote state
+        run: |
+          terraform -chdir=infra/aws init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config='key=career-platform/terraform.tfstate' \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config='encrypt=true' -backend-config='use_lockfile=true'
+      - run: terraform fmt -check -recursive infra/aws
+      - run: terraform -chdir=infra/aws validate
+      - name: Create saved plan from this exact commit and configuration
+        run: |
+          terraform -chdir=infra/aws plan -input=false -lock-timeout=5m \
+            -var-file="$RUNNER_TEMP/aws.tfvars.json" -out="$RUNNER_TEMP/aws.tfplan"
+      - name: Apply the saved plan
+        if: inputs.operation == 'apply'
+        run: terraform -chdir=infra/aws apply -input=false -lock-timeout=5m "$RUNNER_TEMP/aws.tfplan"
+      - name: Clear runner state artifacts
+        if: always()
+        run: rm -f "$RUNNER_TEMP/aws.tfvars.json" "$RUNNER_TEMP/aws.tfplan"

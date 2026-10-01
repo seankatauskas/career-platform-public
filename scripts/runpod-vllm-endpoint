@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Safe, explicit lifecycle wrapper for the scale-to-zero Runpod vLLM endpoint.
+# Configuration is read from the environment so no API key or endpoint secret is
+# ever copied into the repository. Mutating and billable actions require --apply.
+
+usage() {
+  >&2 printf '%s\n' \
+    'usage: scripts/runpod-vllm-endpoint check' \
+    '       scripts/runpod-vllm-endpoint template [--apply]' \
+    '       scripts/runpod-vllm-endpoint deploy [--apply]' \
+    '       scripts/runpod-vllm-endpoint wake [--apply]' \
+    '       scripts/runpod-vllm-endpoint status' \
+    '       scripts/runpod-vllm-endpoint smoke [--apply]' \
+    '       scripts/runpod-vllm-endpoint delete [--apply]' \
+    '       scripts/runpod-vllm-endpoint delete-template [--apply]'
+}
+
+fail() {
+  >&2 printf 'runpod endpoint: %s\n' "$1"
+  exit 2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is not installed"
+}
+
+require_value() {
+  local variable_name="$1"
+  [[ -n "${!variable_name:-}" ]] || fail "$variable_name is required"
+  [[ "${!variable_name}" != -* ]] || fail "$variable_name must not begin with a dash"
+  [[ "${!variable_name}" != *$'\n'* ]] || fail "$variable_name must be one line"
+}
+
+require_apply() {
+  [[ "${2:-}" == '--apply' ]] || {
+    printf 'Dry run only. Re-run `%s %s --apply` to execute.\n' "$0" "$1"
+    return 1
+  }
+}
+
+# Runpod's list/read APIs can briefly lag a successful create. Retry only the
+# readback; never repeat the billable create operation automatically.
+verify_eventually() {
+  local attempt output
+  for attempt in 1 2 3 4 5 6; do
+    if output="$("$@" 2>/dev/null)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if (( attempt < 6 )); then
+      sleep "$((attempt * 2))"
+    fi
+  done
+  "$@"
+}
+
+check_cli() {
+  require_command runpodctl
+  require_command python3
+  local version_output major minor
+  version_output="$(runpodctl version)"
+  printf '%s\n' "$version_output"
+  [[ "$version_output" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || \
+    fail 'could not determine the runpodctl version'
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  if (( major < 2 || (major == 2 && minor < 10) )); then
+    fail 'runpodctl 2.10.0 or newer is required for reliable workers-min=0 updates'
+  fi
+  runpodctl user >/dev/null
+  local help_text template_help
+  help_text="$(runpodctl serverless create --help)"
+  template_help="$(runpodctl template create --help)"
+  grep -q -- '--model-reference' <<<"$help_text" || \
+    fail 'runpodctl lacks --model-reference; update it before deployment'
+  grep -q -- '--workers-min' <<<"$help_text" || \
+    fail 'runpodctl lacks current Serverless worker controls'
+  grep -q -- '--serverless' <<<"$template_help" || \
+    fail 'runpodctl lacks Serverless template support'
+}
+
+validate_id() {
+  local variable_name="$1"
+  require_value "$variable_name"
+  [[ "${!variable_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail "$variable_name has an invalid shape"
+}
+
+validate_endpoint_id() {
+  validate_id RUNPOD_ENDPOINT_ID
+}
+
+validate_model_name() {
+  require_value RUNPOD_MODEL_NAME
+  [[ "$RUNPOD_MODEL_NAME" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || \
+    fail 'RUNPOD_MODEL_NAME must be a Hugging Face org/repository identifier'
+}
+
+validate_common() {
+  local max_model_len="${RUNPOD_MAX_MODEL_LEN:-16384}"
+  validate_model_name
+  require_value RUNPOD_MODEL_REFERENCE
+  [[ "$RUNPOD_MODEL_REFERENCE" =~ ^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+):([0-9a-f]{40}|[0-9a-f]{64})$ ]] || \
+    fail 'RUNPOD_MODEL_REFERENCE must end in an immutable 40-64 character commit digest'
+  [[ "${BASH_REMATCH[1]}" == "$RUNPOD_MODEL_NAME" ]] || \
+    fail 'RUNPOD_MODEL_REFERENCE repository must match RUNPOD_MODEL_NAME'
+  [[ "$max_model_len" =~ ^[0-9]+$ ]] || \
+    fail 'RUNPOD_MAX_MODEL_LEN must be an integer'
+  (( max_model_len >= 2048 && max_model_len <= 131072 )) || \
+    fail 'RUNPOD_MAX_MODEL_LEN must be between 2048 and 131072'
+}
+
+validate_timeouts() {
+  local idle_timeout="${RUNPOD_IDLE_TIMEOUT:-300}"
+  local execution_timeout="${RUNPOD_EXECUTION_TIMEOUT:-900}"
+  [[ "$idle_timeout" =~ ^[0-9]+$ ]] || \
+    fail 'RUNPOD_IDLE_TIMEOUT must be an integer'
+  (( idle_timeout >= 5 && idle_timeout <= 3600 )) || \
+    fail 'RUNPOD_IDLE_TIMEOUT must be between 5 and 3600 seconds'
+  [[ "$execution_timeout" =~ ^[0-9]+$ ]] || \
+    fail 'RUNPOD_EXECUTION_TIMEOUT must be an integer'
+  (( execution_timeout >= 30 && execution_timeout <= 86400 )) || \
+    fail 'RUNPOD_EXECUTION_TIMEOUT must be between 30 and 86400 seconds'
+}
+
+validate_template_config() {
+  local disk="${RUNPOD_CONTAINER_DISK_GB:-20}"
+  validate_common
+  require_value RUNPOD_TEMPLATE_NAME
+  require_value RUNPOD_WORKER_IMAGE
+  [[ "$RUNPOD_TEMPLATE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_TEMPLATE_NAME has an invalid shape'
+  [[ "$RUNPOD_WORKER_IMAGE" =~ ^runpod/worker-v1-vllm@sha256:[0-9a-f]{64}$ ]] || \
+    fail 'RUNPOD_WORKER_IMAGE must be the official worker-vLLM image pinned by digest'
+  [[ "$disk" =~ ^[0-9]+$ ]] && (( disk >= 5 && disk <= 100 )) || \
+    fail 'RUNPOD_CONTAINER_DISK_GB must be between 5 and 100'
+}
+
+validate_deploy_config() {
+  validate_template_config
+  validate_timeouts
+  validate_id RUNPOD_TEMPLATE_ID
+  require_value RUNPOD_ENDPOINT_NAME
+  require_value RUNPOD_GPU_ID
+  [[ "$RUNPOD_ENDPOINT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_ENDPOINT_NAME has an invalid shape'
+}
+
+validate_runtime_config() {
+  validate_template_config
+  validate_timeouts
+  validate_id RUNPOD_TEMPLATE_ID
+  validate_endpoint_id
+  require_value RUNPOD_ENDPOINT_NAME
+  [[ "$RUNPOD_ENDPOINT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_ENDPOINT_NAME has an invalid shape'
+}
+
+guard="$(cd "$(dirname "$0")" && pwd)/runpod-endpoint-guard"
+
+verify_template() {
+  local template_id="${1:-}"
+  local arguments=(
+    template
+    --name "$RUNPOD_TEMPLATE_NAME"
+    --image "$RUNPOD_WORKER_IMAGE"
+    --container-disk-gb "${RUNPOD_CONTAINER_DISK_GB:-20}"
+    --env "MODEL_NAME=$RUNPOD_MODEL_NAME"
+    --env "MODEL_REVISION=${RUNPOD_MODEL_REFERENCE##*:}"
+    --env "TOKENIZER_REVISION=${RUNPOD_MODEL_REFERENCE##*:}"
+    --env 'HF_HUB_OFFLINE=1'
+    --env 'TRANSFORMERS_OFFLINE=1'
+    --env "MAX_MODEL_LEN=${RUNPOD_MAX_MODEL_LEN:-16384}"
+    --env 'MAX_NUM_SEQS=1'
+    --env 'MAX_CONCURRENCY=1'
+    --env 'ENABLE_LOG_REQUESTS=false'
+    --env 'DISABLE_LOG_REQUESTS=true'
+    --env 'ENABLE_AUTO_TOOL_CHOICE=false'
+  )
+  if [[ -n "$template_id" ]]; then
+    arguments+=(--template-id "$template_id")
+  fi
+  "$guard" "${arguments[@]}"
+}
+
+verify_endpoint() {
+  local selector="$1"
+  local value="$2"
+  "$guard" endpoint \
+    "$selector" "$value" \
+    --expected-name "$RUNPOD_ENDPOINT_NAME" \
+    --template-id "$RUNPOD_TEMPLATE_ID" \
+    --template-name "$RUNPOD_TEMPLATE_NAME" \
+    --image "$RUNPOD_WORKER_IMAGE" \
+    --container-disk-gb "${RUNPOD_CONTAINER_DISK_GB:-20}" \
+    --idle-timeout "${RUNPOD_IDLE_TIMEOUT:-300}" \
+    --execution-timeout "${RUNPOD_EXECUTION_TIMEOUT:-900}" \
+    --model-reference "$RUNPOD_MODEL_REFERENCE" \
+    --env "MODEL_NAME=$RUNPOD_MODEL_NAME" \
+    --env "MODEL_REVISION=${RUNPOD_MODEL_REFERENCE##*:}" \
+    --env "TOKENIZER_REVISION=${RUNPOD_MODEL_REFERENCE##*:}" \
+    --env 'HF_HUB_OFFLINE=1' \
+    --env 'TRANSFORMERS_OFFLINE=1' \
+    --env "MAX_MODEL_LEN=${RUNPOD_MAX_MODEL_LEN:-16384}" \
+    --env 'MAX_NUM_SEQS=1' \
+    --env 'MAX_CONCURRENCY=1' \
+    --env 'ENABLE_LOG_REQUESTS=false' \
+    --env 'DISABLE_LOG_REQUESTS=true' \
+    --env 'ENABLE_AUTO_TOOL_CHOICE=false'
+}
+
+print_deploy_plan() {
+  printf '%s\n' \
+    "endpoint_name=$RUNPOD_ENDPOINT_NAME" \
+    "template_id=$RUNPOD_TEMPLATE_ID" \
+    "worker_image=$RUNPOD_WORKER_IMAGE" \
+    "model_name=$RUNPOD_MODEL_NAME" \
+    "model_reference=$RUNPOD_MODEL_REFERENCE" \
+    "gpu_id=$RUNPOD_GPU_ID" \
+    'workers_min=0' \
+    'workers_max=1' \
+    "idle_timeout=${RUNPOD_IDLE_TIMEOUT:-300}" \
+    "execution_timeout=${RUNPOD_EXECUTION_TIMEOUT:-900}" \
+    "max_model_len=${RUNPOD_MAX_MODEL_LEN:-16384}" \
+    'max_concurrency=1'
+}
+
+action="${1:-}"
+case "$action" in
+  check)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    check_cli
+    printf 'Runpod CLI and credentials are ready.\n'
+    ;;
+  template)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_template_config
+    printf '%s\n' \
+      "template_name=$RUNPOD_TEMPLATE_NAME" \
+      "worker_image=$RUNPOD_WORKER_IMAGE" \
+      "model=$RUNPOD_MODEL_NAME" \
+      "model_reference=$RUNPOD_MODEL_REFERENCE" \
+      "max_model_len=${RUNPOD_MAX_MODEL_LEN:-16384}" \
+      'max_concurrency=1'
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    printf -v template_env '%s' \
+      '{"MODEL_NAME":"'"$RUNPOD_MODEL_NAME"'","MODEL_REVISION":"'"${RUNPOD_MODEL_REFERENCE##*:}"'","TOKENIZER_REVISION":"'"${RUNPOD_MODEL_REFERENCE##*:}"'","HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1","MAX_MODEL_LEN":"'"${RUNPOD_MAX_MODEL_LEN:-16384}"'","MAX_NUM_SEQS":"1","MAX_CONCURRENCY":"1","ENABLE_LOG_REQUESTS":"false","DISABLE_LOG_REQUESTS":"true","ENABLE_AUTO_TOOL_CHOICE":"false"}'
+    create_status=0
+    runpodctl template create \
+      --name "$RUNPOD_TEMPLATE_NAME" \
+      --image "$RUNPOD_WORKER_IMAGE" \
+      --container-disk-in-gb "${RUNPOD_CONTAINER_DISK_GB:-20}" \
+      --env "$template_env" \
+      --serverless || create_status=$?
+    if (( create_status != 0 )); then
+      >&2 printf 'Create returned status %s; reconciling by exact readback before any retry.\n' \
+        "$create_status"
+    fi
+    if ! template_id="$(verify_eventually verify_template)"; then
+      fail 'template create outcome is unresolved; inspect Runpod and reconcile the exact ID before rerunning'
+    fi
+    printf 'Verified template id: %s\n' "$template_id"
+    ;;
+  deploy)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_deploy_config
+    print_deploy_plan
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    create_status=0
+    runpodctl serverless create \
+      --name "$RUNPOD_ENDPOINT_NAME" \
+      --template-id "$RUNPOD_TEMPLATE_ID" \
+      --gpu-id "$RUNPOD_GPU_ID" \
+      --model-reference "$RUNPOD_MODEL_REFERENCE" \
+      --workers-min 0 \
+      --workers-max 1 \
+      --idle-timeout "${RUNPOD_IDLE_TIMEOUT:-300}" \
+      --execution-timeout "${RUNPOD_EXECUTION_TIMEOUT:-900}" || create_status=$?
+    if (( create_status != 0 )); then
+      >&2 printf 'Create returned status %s; reconciling by exact readback before any retry.\n' \
+        "$create_status"
+    fi
+    if ! verified_id="$(verify_eventually verify_endpoint --name "$RUNPOD_ENDPOINT_NAME")"; then
+      fail 'endpoint create outcome is unresolved; inspect Runpod and reconcile the exact ID before rerunning'
+    fi
+    printf 'Verified endpoint id: %s\n' "$verified_id"
+    ;;
+  wake)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime_config
+    printf 'endpoint_id=%s workers_min=0 workers_max=1 idle_timeout=%s execution_timeout=%s\n' \
+      "$RUNPOD_ENDPOINT_ID" "${RUNPOD_IDLE_TIMEOUT:-300}" \
+      "${RUNPOD_EXECUTION_TIMEOUT:-900}"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    runpodctl serverless update "$RUNPOD_ENDPOINT_ID" \
+      --workers-min 0 \
+      --workers-max 1 \
+      --idle-timeout "${RUNPOD_IDLE_TIMEOUT:-300}"
+    verify_endpoint --endpoint-id "$RUNPOD_ENDPOINT_ID" >/dev/null
+    printf 'Verified workers_min=0 and workers_max=1.\n'
+    ;;
+  status)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    validate_runtime_config
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_ENDPOINT_ID" >/dev/null
+    runpodctl serverless get "$RUNPOD_ENDPOINT_ID"
+    runpodctl serverless health "$RUNPOD_ENDPOINT_ID"
+    ;;
+  smoke)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime_config
+    printf 'A synthetic request will be submitted to endpoint %s.\n' "$RUNPOD_ENDPOINT_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_ENDPOINT_ID" >/dev/null
+    printf -v smoke_input '%s' \
+      '{"route":"/v1/chat/completions","method":"POST","body":{"model":"'"$RUNPOD_MODEL_NAME"'","messages":[{"role":"system","content":"Return JSON only."},{"role":"user","content":"Return {\"ok\":true}."}],"temperature":0,"max_tokens":32,"stream":false}}'
+    runpodctl serverless run "$RUNPOD_ENDPOINT_ID" \
+      --input "$smoke_input" \
+      --wait 15m \
+      --output json | \
+      "$guard" validate-vllm-smoke --model "$RUNPOD_MODEL_NAME"
+    ;;
+  delete)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime_config
+    printf 'Endpoint %s will be permanently deleted.\n' "$RUNPOD_ENDPOINT_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_ENDPOINT_ID" >/dev/null
+    runpodctl serverless delete "$RUNPOD_ENDPOINT_ID"
+    ;;
+  delete-template)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_template_config
+    validate_id RUNPOD_TEMPLATE_ID
+    printf 'Template %s will be permanently deleted.\n' "$RUNPOD_TEMPLATE_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_TEMPLATE_ID" >/dev/null
+    runpodctl template delete "$RUNPOD_TEMPLATE_ID"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

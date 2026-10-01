@@ -1,0 +1,67 @@
+name: Publish daily public snapshot
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+      timezone: America/Chicago
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-snapshot
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'seankatauskas/career-platform' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.8.4'
+      - name: Export only the pinned source commit
+        run: python3 scripts/prepare-public-showcase.py --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/public-export"
+      - name: Validate the exported source without publishing credentials
+        working-directory: ${{ runner.temp }}/public-export
+        run: |
+          set -euo pipefail
+          git init --initial-branch=main
+          git add --force --all
+          git -c user.name=validation -c user.email=validation@example.test commit --quiet -m 'Validate exported source'
+          npm ci --prefix extension
+          npx --prefix extension playwright-core install --with-deps chromium
+          uv run --python 3.12 --with cryptography --with pypdf --with reportlab python scripts/check-system.py --browser
+      - name: Create at most one snapshot commit for this Chicago date
+        run: |
+          set -euo pipefail
+          git clone --single-branch --branch main https://github.com/seankatauskas/career-platform-public.git "$RUNNER_TEMP/public-repo"
+          git -C "$RUNNER_TEMP/public-repo" config user.name 'github-actions[bot]'
+          git -C "$RUNNER_TEMP/public-repo" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 scripts/publish-public-snapshot.py --revision "$GITHUB_SHA" --public-checkout "$RUNNER_TEMP/public-repo" | tee "$RUNNER_TEMP/publication.json"
+      - name: Push the public snapshot
+        env:
+          PUBLIC_MIRROR_SSH_KEY: ${{ secrets.PUBLIC_MIRROR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/publication.json"))["status"])')" != committed ]; then
+            echo 'No additional public commit needed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/public-mirror-key"
+          known="$RUNNER_TEMP/public-mirror-known-hosts"
+          trap 'rm -f "$key" "$known"' EXIT
+          umask 077
+          printf '%s\n' "$PUBLIC_MIRROR_SSH_KEY" > "$key"
+          curl --fail --silent --show-error https://api.github.com/meta | python3 -c 'import json,sys; print("\n".join("github.com "+key for key in json.load(sys.stdin)["ssh_keys"]))' > "$known"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known"
+          git -C "$RUNNER_TEMP/public-repo" push git@github.com:seankatauskas/career-platform-public.git HEAD:refs/heads/main
+          echo 'Published one snapshot to career-platform-public/main.' >> "$GITHUB_STEP_SUMMARY"

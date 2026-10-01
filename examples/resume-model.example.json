@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "producer_version": "local-resume-gguf-v1",
+  "model_sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_GGUF_SHA256",
+  "command": [
+    "/ABSOLUTE/PRIVATE/resume-model-venv/bin/python3",
+    "-I",
+    "/ABSOLUTE/PROJECT/job-search-integration/job_search/resume_lab/local_model_driver.py",
+    "--backend",
+    "llama-cpp-python",
+    "--model-path",
+    "/ABSOLUTE/PRIVATE/models/resume-model.gguf",
+    "--context-size",
+    "32768",
+    "--max-tokens",
+    "8192"
+  ],
+  "allowed_read_paths": [
+    "/ABSOLUTE/PRIVATE/resume-model-venv",
+    "/ABSOLUTE/PROJECT/job-search-integration/job_search/resume_lab/local_model_driver.py",
+    "/ABSOLUTE/PRIVATE/models/resume-model.gguf"
+  ],
+  "timeout_seconds": 120
+}

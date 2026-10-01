@@ -1,0 +1,4 @@
+# Offline browser/demo fixtures only; not production image dependencies.
+cryptography>=44,<51
+pypdf>=5,<7
+reportlab>=4,<5

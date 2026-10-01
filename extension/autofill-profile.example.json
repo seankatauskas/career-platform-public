@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "contact": {
+    "first_name": "Example",
+    "last_name": "Candidate",
+    "full_name": "Example Candidate",
+    "email": "candidate@example.test",
+    "phone": "+1 555 010 0100",
+    "city": "Example City",
+    "state": "Illinois",
+    "postal_code": "00000",
+    "country": "United States",
+    "linkedin_url": "https://www.linkedin.com/in/example-candidate",
+    "portfolio_url": "https://example.test"
+  },
+  "work_history": [
+    {
+      "employer": "Example Labs",
+      "title": "Software Engineer",
+      "start_month": "January",
+      "start_year": "2022",
+      "summary": "Built reliable data systems."
+    }
+  ],
+  "approved_answers": [
+    {
+      "answer_id": "why-role",
+      "prompt": "Why are you interested in this role?",
+      "value": "The product and engineering scope are compelling.",
+      "ats": ["ashby", "greenhouse", "lever"]
+    }
+  ]
+}

@@ -1,0 +1,286 @@
+name: job-search
+
+x-control-plane: &control-plane
+  platform: "${JOB_SEARCH_PLATFORM:-linux/amd64}"
+  image: "${JOB_SEARCH_IMAGE:-job-search-control-plane:local}"
+  build:
+    context: .
+    args:
+      PYTHON_BASE_IMAGE: "${JOB_SEARCH_PYTHON_IMAGE:-python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254}"
+      JOB_SEARCH_UID: "${JOB_SEARCH_UID:-10001}"
+      JOB_SEARCH_GID: "${JOB_SEARCH_GID:-10001}"
+  user: "${JOB_SEARCH_UID:-10001}:${JOB_SEARCH_GID:-10001}"
+  init: true
+  read_only: true
+  environment: &control-environment
+    JOB_SEARCH_MAINTENANCE_GATE: /run/job-search-maintenance/gate.json
+    HOME: /var/lib/job-search/home
+    XDG_DATA_HOME: /var/lib/job-search/private-state
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+# Individual mounts are intentionally assigned per service below. In particular,
+# the core worker and authenticated dashboard recovery boundary receive the
+# notification socket. No service receives the whole private directory.
+x-maintenance-volume: &maintenance-volume
+  type: bind
+  source: "${JOB_SEARCH_MAINTENANCE_DIR:?set JOB_SEARCH_MAINTENANCE_DIR}"
+  target: /run/job-search-maintenance
+  read_only: true
+x-state-volume: &state-volume
+  type: bind
+  source: "${JOB_SEARCH_STATE_DIR:?set JOB_SEARCH_STATE_DIR}"
+  target: /var/lib/job-search
+x-config-volume: &config-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/config.json"
+  target: /run/job-search/config.json
+  read_only: true
+x-mcp-token-volume: &mcp-token-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/mcp-token"
+  target: /run/job-search/mcp-token
+  read_only: true
+x-portable-key-volume: &portable-key-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/portable-master-key"
+  target: /run/job-search/portable-master-key
+  read_only: true
+x-inference-config-volume: &inference-config-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/inference.json"
+  target: /run/job-search/inference.json
+  read_only: true
+x-runpod-key-volume: &runpod-key-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/runpod-api-key"
+  target: /run/job-search/runpod-api-key
+  read_only: true
+x-resume-model-volume: &resume-model-volume
+  type: bind
+  source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/resume-model.json"
+  target: /run/job-search/resume-model.json
+  read_only: true
+x-tool-socket-volume: &tool-socket-volume
+  type: bind
+  source: "${JOB_SEARCH_TOOL_RUNTIME_DIR:?set JOB_SEARCH_TOOL_RUNTIME_DIR}"
+  target: /run/job-search-tools
+  read_only: true
+x-notification-socket-volume: &notification-socket-volume
+  type: bind
+  source: "${JOB_SEARCH_NOTIFICATION_RUNTIME_DIR:?set JOB_SEARCH_NOTIFICATION_RUNTIME_DIR}"
+  target: /run/job-search-notifications
+  read_only: true
+
+services:
+  tools:
+    platform: "${JOB_SEARCH_PLATFORM:-linux/amd64}"
+    image: "${JOB_SEARCH_IMAGE:-job-search-control-plane:local}"
+    build:
+      context: .
+      args:
+        PYTHON_BASE_IMAGE: "${JOB_SEARCH_PYTHON_IMAGE:-python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254}"
+        JOB_SEARCH_UID: "${JOB_SEARCH_UID:-10001}"
+        JOB_SEARCH_GID: "${JOB_SEARCH_GID:-10001}"
+    user: "${JOB_SEARCH_UID:-10001}:${JOB_SEARCH_GID:-10001}"
+    init: true
+    entrypoint: ["python", "-m", "job_search.tool_service"]
+    command:
+      - serve
+      - --socket
+      - /run/job-search-tools/tools.sock
+      - --tectonic-executable
+      - /opt/job-search-toolchain/tectonic
+      - --tectonic-bundle
+      - /opt/job-search-toolchain/tectonic.bundle
+      - --tectonic-version
+      - "${JOB_SEARCH_TECTONIC_VERSION:?set JOB_SEARCH_TECTONIC_VERSION}"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    network_mode: none
+    read_only: true
+    environment:
+      HOME: /tmp
+      JOB_SEARCH_NETWORKLESS_TOOL_CONTAINER: "1"
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_TOOL_RUNTIME_DIR:?set JOB_SEARCH_TOOL_RUNTIME_DIR}"
+        target: /run/job-search-tools
+      - type: bind
+        source: "${JOB_SEARCH_TOOLCHAIN_DIR:?set JOB_SEARCH_TOOLCHAIN_DIR}"
+        target: /opt/job-search-toolchain
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.tool_service", "healthcheck", "--socket", "/run/job-search-tools/tools.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+
+  initialize:
+    <<: *control-plane
+    environment:
+      <<: *control-environment
+      JOB_SEARCH_INITIALIZE_OPERATION: "${JOB_SEARCH_INITIALIZE_OPERATION:-}"
+    entrypoint: ["python", "-m", "job_search.maintenance", "initialize", "python", "-m", "job_search"]
+    command: ["--config", "/run/job-search/config.json", "init"]
+    network_mode: none
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+    restart: "no"
+
+  dashboard:
+    <<: *control-plane
+    network_mode: host
+    command:
+      ["--config", "/run/job-search/config.json", "serve", "dashboard"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *portable-key-volume
+      - *runpod-key-volume
+      - *resume-model-volume
+      - *tool-socket-volume
+      - *notification-socket-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "--config", "/run/job-search/config.json", "healthcheck", "dashboard"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+
+  mcp:
+    <<: *control-plane
+    command:
+      - --config
+      - /run/job-search/config.json
+      - serve
+      - mcp
+      - --bind-host
+      - 0.0.0.0
+      - --allowed-host
+      - 127.0.0.1
+      - --allowed-host
+      - mcp
+    networks:
+      - agent-boundary
+    restart: unless-stopped
+    stop_grace_period: 30s
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *mcp-token-volume
+      - *portable-key-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "--config", "/run/job-search/config.json", "healthcheck", "mcp"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+
+  core:
+    <<: *control-plane
+    network_mode: host
+    command:
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "core", "--interval-seconds", "300"]
+    restart: unless-stopped
+    stop_grace_period: 70m
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *portable-key-volume
+      - *inference-config-volume
+      - *runpod-key-volume
+      # The core image does not invoke the resume model, but the documented one-shot
+      # aggregate status command runs here and must validate every configured provider.
+      - *resume-model-volume
+      - *tool-socket-volume
+      - *notification-socket-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "healthcheck", "core"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 1
+
+  model:
+    <<: *control-plane
+    network_mode: host
+    command:
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "model", "--interval-seconds", "300", "--max-outbox", "0"]
+    restart: unless-stopped
+    stop_grace_period: 70m
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *inference-config-volume
+      - *runpod-key-volume
+      - *resume-model-volume
+      - *tool-socket-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "healthcheck", "model"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 1
+
+networks:
+  agent-boundary:
+    driver: bridge

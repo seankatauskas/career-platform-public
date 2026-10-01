@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Salary parser audit · Career Platform</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">CAREER PLATFORM</p>
+      <h1>Salary parser audit</h1>
+    </div>
+    <div id="progress">Loading…</div>
+  </header>
+  <main>
+    <section class="review">
+      <div id="empty" hidden>
+        <h2>Queue complete</h2>
+        <p>You have reviewed every sampled job.</p>
+      </div>
+      <div id="item" hidden>
+        <div class="audit-line">
+          <span id="auditBadge" class="badge"></span>
+          <span id="source"></span>
+          <span id="weight"></span>
+        </div>
+        <h2 id="title"></h2>
+        <p id="meta" class="meta"></p>
+        <div id="ranges" class="ranges"></div>
+        <div class="actions" id="actions"></div>
+        <label for="note">Optional note · number shortcuts pause while the cursor is here</label>
+        <textarea id="note" rows="2" placeholder="Why was the parser wrong or unclear?"></textarea>
+        <div class="utility">
+          <button id="undo" class="quiet">Undo last <kbd>Z</kbd></button>
+          <a id="original" target="_blank" rel="noreferrer">Open original posting</a>
+        </div>
+        <p id="error" class="error" role="alert"></p>
+      </div>
+    </section>
+    <aside class="description-panel">
+      <div class="panel-title">Full stored description</div>
+      <div id="description" class="description"></div>
+    </aside>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

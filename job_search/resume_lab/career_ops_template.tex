@@ -1,0 +1,26 @@
+% Adapted from Career Ops v1.30.0 at commit
+% 1c866a9761f141bf341b10fadb38d1e5dc4c3b7d. See CAREER_OPS_MIT.txt.
+% Deliberately single-column, icon-free, and table-free for ATS extraction.
+\documentclass[letterpaper,10pt]{article}
+\usepackage[margin=0.58in]{geometry}
+\usepackage{enumitem}
+\usepackage[unicode,hidelinks]{hyperref}
+\usepackage{titlesec}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setlist[itemize]{leftmargin=0.18in,itemsep=1pt,topsep=2pt,parsep=0pt}
+\titleformat{\section}{\large\bfseries}{}{0pt}{}[\titlerule]
+\titlespacing*{\section}{0pt}{7pt}{3pt}
+\begin{document}
+\begin{center}
+{\LARGE\bfseries {{NAME}}}\\
+{{CONTACT}}
+\end{center}
+{{NOTICE}}
+{{SUMMARY_SECTION}}
+{{EXPERIENCE_SECTION}}
+{{PROJECTS_SECTION}}
+{{EDUCATION_SECTION}}
+{{SKILLS_SECTION}}
+\end{document}

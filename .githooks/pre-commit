@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+# Git exports this worktree's index/directory into hooks. Release tests create
+# temporary repositories; do not let their git commands use the caller's index.
+for git_local_variable in $(git rev-parse --local-env-vars); do
+    unset "$git_local_variable"
+done
+python3 -m tests.test_job_search_aws_ops
+python3 scripts/check-system.py --match release --output .cache/pre-commit-release.json

@@ -1,0 +1,69 @@
+/* Settings, profile, and operations share the app's type and graphite/brass tokens. */
+#settings .settings-groups { max-width: 960px; display: grid; gap: 16px; }
+#settings .settings-group { padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+#settings .settings-group h3 { margin-bottom: 8px; }
+#settings .settings-link-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 0; color: var(--ink); text-decoration: none; }
+#settings .settings-link-row + .settings-link-row { border-top: 1px solid var(--line); }
+#settings .settings-link-row .meta { display: block; margin-top: 4px; }
+#settings .settings-link-row:hover strong { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+#settings .settings-device { display: flex; justify-content: space-between; align-items: start; gap: 24px; padding: 16px 0; }
+#settings .settings-device p { margin: 4px 0; }
+#settings .settings-device-controls { text-align: right; }
+#settings .settings-device-controls button { margin-top: 8px; }
+#settings summary, #career summary, #ops summary { cursor: pointer; color: var(--secondary-ink); }
+#settings .settings-diagnostics { border-top: 1px solid var(--line); padding-top: 16px; }
+#settings .settings-list { margin-top: 16px; }
+#settings .settings-list dd { overflow-wrap: anywhere; }
+#settings #browser-code-notice:empty, #settings #browser-connection-code:empty { display: none; }
+#settings #browser-code-notice { margin: 16px 0 8px; }
+#settings #browser-connection-code { display: block; font-size: 20px; letter-spacing: .08em; margin-bottom: 16px; }
+#settings .settings-resume-record, #settings .settings-stored-record { padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+#settings .settings-stored-record > a { font-weight: 600; }
+#settings .settings-stored-record p { margin: 8px 0 0; }
+#career .career-summary-section { padding: 24px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+#career .career-saved-summary { overflow-wrap: anywhere; }
+#career .career-background { white-space: pre-wrap; }
+#career .career-summary-entry + .career-summary-entry { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+#career .career-summary-entry p { margin: 4px 0; }
+#career .career-summary-entry ul { padding-left: 20px; }
+#career .career-section-editor { margin-top: 16px; }
+#career .career-section-editor > summary { color: var(--accent); }
+#career .career-section { margin-top: 16px; padding: 16px 0 0; min-width: 0; }
+#career .career-section legend { padding: 0 8px 0 0; }
+#career .career-entry { padding: 16px; }
+#career .career-import-options { padding: 24px; margin-top: 24px; border: 1px solid var(--line); border-radius: 8px; }
+#career .career-import-options > p { margin: 16px 0; }
+#career .career-save-bar { padding: 16px 0; }
+#career .career-save-bar .review-confirm { max-width: 100%; }
+#career .career-import { grid-template-columns: minmax(0, 1fr); }
+#career .career-upload { padding: 16px; }
+#ops > section { margin-top: 24px; }
+#ops .readiness-summary { padding: 16px 24px; }
+#ops .readiness-summary h3 { margin-bottom: 4px; }
+#ops .readiness-list { overflow: hidden; }
+#ops .readiness-row { display: block; padding: 16px 24px; }
+#ops .readiness-identity { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+#ops .readiness-identity h4 { font-size: 14px; margin: 0; }
+#ops .readiness-row > .meta { margin: 8px 0; }
+#ops .readiness-row .ops-next-action { margin: 8px 0; }
+#ops .readiness-evidence { display: flex; flex-wrap: wrap; gap: 24px; font-size: 12px; margin: 16px 0; }
+#ops .readiness-evidence dd { margin-bottom: 0; }
+#ops .ops-service-details > summary { font-size: 12px; }
+#ops .ops-passive-group { list-style: none; border-top: 1px solid var(--line); }
+#ops .ops-passive-group > details > summary { padding: 16px 24px; }
+#ops .ops-passive-group .readiness-list { border: 0; border-top: 1px solid var(--line); border-radius: 0; margin: 0; }
+#ops .ops-badge { font-size: 12px; }
+#ops .ops-activity { border-top: 1px solid var(--line); padding-top: 16px; }
+#ops .ops-activity > .ops-grid { margin-top: 16px; }
+#ops #automation-controls .stack-item { padding: 16px 24px; }
+#ops #automation-controls h3 { font-size: 14px; margin-bottom: 4px; }
+@media (max-width: 600px) {
+  #settings .settings-group, #settings .settings-resume-record, #settings .settings-stored-record,
+  #career .career-summary-section, #career .career-import-options { padding: 16px; }
+  #settings .settings-device { flex-direction: column; gap: 8px; }
+  #settings .settings-device-controls { text-align: left; }
+  #career .career-entry { padding: 12px; }
+  #career .career-fact { grid-template-columns: minmax(0, 1fr); }
+  #career .career-fact button { justify-self: start; }
+  #ops .readiness-row, #ops .readiness-summary, #ops .ops-passive-group > details > summary { padding: 16px; }
+}

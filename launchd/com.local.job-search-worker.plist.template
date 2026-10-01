@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.job-search-worker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON_EXECUTABLE__</string>
+        <string>-m</string>
+        <string>job_search.worker</string>
+        <string>--db</string>
+        <string>__JOB_SEARCH_DB__</string>
+        <string>--project-root</string>
+        <string>__PROJECT_ROOT__</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>JOB_SCRAPER_CONTACT</key>
+        <string>__JOB_SCRAPER_CONTACT__</string>
+        <key>OUTLOOK_CLIENT_ID</key>
+        <string>__OUTLOOK_CLIENT_ID__</string>
+        <key>OUTLOOK_ACCOUNT_ID</key>
+        <string>__OUTLOOK_ACCOUNT_ID__</string>
+        <key>JOB_SEARCH_MAIL_CLASSIFIER_CONFIG</key>
+        <string>__MAIL_CLASSIFIER_CONFIG__</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIRECTORY__/job-search-worker.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIRECTORY__/job-search-worker.stderr.log</string>
+</dict>
+</plist>

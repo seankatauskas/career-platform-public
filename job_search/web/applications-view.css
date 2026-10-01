@@ -1,0 +1,35 @@
+/* Applications share one reading column; a record is a destination at every width. */
+#applications .application-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+#applications.record-open > .section-heading,
+#applications.record-open > .section-note,
+#applications.record-open > .application-filters,
+#applications.record-open #application-list { display: none; }
+#applications:not(.record-open) #application-workspace { display: none; }
+#applications.record-open .workspace-back { display: block; width: fit-content; text-decoration: none; }
+#applications .workspace-back:hover { text-decoration: underline; }
+#applications .application-filters { align-items: end; }
+#applications .application-filters :is(input[type="search"], select) { min-height: 40px; }
+#applications .application-review-filter { display: flex; flex-direction: row; align-items: center; align-self: end; min-height: 40px; gap: 8px; white-space: nowrap; }
+#applications .application-review-filter input { width: 16px; height: 16px; margin: 0; }
+#applications .workspace-heading { padding: 24px; gap: 8px 16px; }
+#applications .workspace-heading h3 { font-size: 24px; line-height: 1.25; font-weight: 600; }
+#applications .workspace-tabs { overflow-x: auto; flex-wrap: nowrap; }
+#applications #workspace-job-history { padding: 16px 0 0; }
+#applications .workspace-tabs a { white-space: nowrap; }
+#applications #workspace-documents { padding: 24px; }
+#applications #workspace-review-notices:empty,
+#applications #workspace-interviews:empty { display: none; }
+#applications #workspace-review-notices { margin-bottom: 24px; }
+#applications #workspace-review-notices .pending-note { display: block; width: fit-content; margin: 8px 0; }
+#applications #workspace-interviews { margin-bottom: 24px; }
+#applications #workspace-posting-history { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+#applications #workspace-posting-history > summary { cursor: pointer; font-weight: 600; }
+#applications .application-document { border-top: 1px solid var(--line); padding: 16px 0; }
+#applications .application-document h5 { margin: 0 0 8px; font-size: 16px; }
+#applications .application-document .actions { margin-top: 16px; }
+@media (max-width: 600px) {
+  #applications .application-filters { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #applications .workspace-heading, #applications #workspace-documents { padding: 16px; }
+  #applications .workspace-heading h3 { font-size: 22px; }
+  #applications .workspace-tabs { gap: 16px; }
+}

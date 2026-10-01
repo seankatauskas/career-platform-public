@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Host operations entrypoint; execute from a verified installed release."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from job_search.aws_ops import main
+raise SystemExit(main())

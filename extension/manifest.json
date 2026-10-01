@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "Job Search Desk Autofill",
+  "version": "1.2.1",
+  "description": "Recognizes applications and tracks submission evidence automatically; optional private autofill.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "webNavigation",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://boards.greenhouse.io/*",
+    "https://job-boards.greenhouse.io/*",
+    "https://job-boards.eu.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://jobs.eu.lever.co/*",
+    "https://boards-api.greenhouse.io/*"
+  ],
+  "optional_host_permissions": [
+    "https://*.ts.net/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Job Search Desk Autofill",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://jobs.ashbyhq.com/*",
+        "https://boards.greenhouse.io/*",
+        "https://job-boards.greenhouse.io/*",
+        "https://job-boards.eu.greenhouse.io/*",
+        "https://jobs.lever.co/*",
+        "https://jobs.eu.lever.co/*"
+      ],
+      "js": [
+        "adapters/common.js",
+        "adapters/greenhouse.js",
+        "adapters/ashby.js",
+        "adapters/lever.js",
+        "resume_upload.js",
+        "content.js",
+        "tracking.js",
+        "tracking_content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'"
+  },
+  "minimum_chrome_version": "106"
+}

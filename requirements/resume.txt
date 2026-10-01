@@ -1,0 +1,3 @@
+# Optional local resume generation/evaluation dependency. The TeX compiler itself is
+# the separately installed Tectonic executable plus a pinned local bundle.
+pypdf==6.16.2

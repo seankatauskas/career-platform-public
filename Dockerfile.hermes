@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+ARG HERMES_BASE_IMAGE
+FROM ${HERMES_BASE_IMAGE}
+
+ARG HERMES_BASE_IMAGE
+ENV JOB_SEARCH_BUILT_HERMES_BASE_IMAGE="${HERMES_BASE_IMAGE}"
+
+USER root
+RUN base_ref="${HERMES_BASE_IMAGE%@sha256:*}" && \
+    digest="${HERMES_BASE_IMAGE##*@sha256:}" && \
+    test -n "$base_ref" && \
+    test "$HERMES_BASE_IMAGE" = "$base_ref@sha256:$digest" && \
+    test "${#digest}" -eq 64 && \
+    case "$digest" in *[!0-9a-f]*) exit 1 ;; esac && \
+    test -x /init && \
+    test -x /command/s6-setuidgid && \
+    test -x /opt/hermes/.venv/bin/python && \
+    test -x /opt/hermes/.venv/bin/hermes && \
+    test -d /etc/cont-init.d && \
+    test -d /etc/s6-overlay/s6-rc.d/user/contents.d && \
+    getent passwd hermes >/dev/null
+COPY --chown=root:root job_search/maintenance.py /opt/job-search-hermes/maintenance.py
+COPY --chown=root:root deploy/hermes/cont-init.d/001-job-search-maintenance /etc/cont-init.d/001-job-search-maintenance
+COPY --chown=root:root job_search/hermes_delivery.py \
+  /opt/job-search-hermes/hermes_delivery.py
+COPY --chown=root:root deploy/hermes/s6-rc.d/ \
+  /etc/s6-overlay/s6-rc.d/
+COPY --chown=root:root deploy/hermes/cont-init.d/018-job-search-mcp-token \
+  /etc/cont-init.d/018-job-search-mcp-token
+COPY --chown=root:root deploy/hermes/cont-init.d/017-job-search-private-config \
+  /etc/cont-init.d/017-job-search-private-config
+RUN chmod 0755 /etc/cont-init.d/001-job-search-maintenance && \
+    chmod 0555 /opt/job-search-hermes/maintenance.py /opt/job-search-hermes/hermes_delivery.py && \
+    chmod 0755 \
+      /etc/cont-init.d/017-job-search-private-config \
+      /etc/cont-init.d/018-job-search-mcp-token \
+      /etc/s6-overlay/s6-rc.d/job-search-notifications/run && \
+    chmod 0444 \
+      /etc/s6-overlay/s6-rc.d/job-search-notifications/type \
+      /etc/s6-overlay/s6-rc.d/user/contents.d/job-search-notifications
+
+# Deliberately preserve the upstream root init path, entrypoint dispatcher, and s6
+# supervision tree. The image's normal `gateway run` command remains the main program.
+CMD ["gateway", "run"]

@@ -1,0 +1,24 @@
+#!/command/with-contenv sh
+set -eu
+
+# Upstream 01-hermes-setup explicitly sets config.yaml to 0640. This deployment
+# requires owner-only files. Run after that hook and before profile reconciliation.
+# Open metadata only, refuse links/non-regular files, and preserve all file bytes.
+exec /opt/hermes/.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+import pwd
+import stat
+
+home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+owner = pwd.getpwnam("hermes")
+for name in ("config.yaml", ".env"):
+    fd = os.open(home / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner.pw_uid:
+            raise RuntimeError("Hermes private configuration has unsafe type or owner")
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+PY

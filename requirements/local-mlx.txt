@@ -1,0 +1,5 @@
+# Local Apple-Silicon salary-model evaluation runtime.
+mlx==0.32.2
+mlx-vlm==0.6.17
+# Required by the NuExtract chat template but not pulled in by mlx-vlm.
+jinja2==3.1.6

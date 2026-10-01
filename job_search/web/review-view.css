@@ -1,0 +1,18 @@
+/* Review uses the same normalized queue as application notices and navigation. */
+#attention .section-heading { margin-bottom: 16px; }
+#review-summary { margin: 0 0 16px; }
+#attention-list .stack-item { padding: 24px; gap: 24px; align-items: start; }
+#attention-list h3 { margin-top: 0; }
+#attention-list .actions { flex-wrap: wrap; align-content: start; }
+#attention-list .technical-details { margin: 16px 0; }
+#attention-list .review-selected { border-color: var(--line-strong); box-shadow: inset 3px 0 0 var(--accent); }
+.review-history { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.review-history > summary { cursor: pointer; font-weight: 600; }
+.review-history #action-list { margin-top: 16px; }
+#attention :is(.message-body, .payload-preview) { overflow-wrap: anywhere; white-space: pre-wrap; }
+#attention .review-context-link { display: block; width: fit-content; margin: 8px 12px 8px 0; }
+@media (max-width: 768px) {
+  #attention-list .stack-item { display: flex; flex-direction: column; padding: 16px; }
+  #attention-list .actions { width: 100%; }
+  #attention-list .actions > :is(button, select) { max-width: 100%; white-space: normal; }
+}

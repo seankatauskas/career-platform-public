@@ -1,0 +1,72 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+
+# Owner-managed runtime credentials are extensionless in the documented setup.
+mcp-token
+portable-master-key
+runpod-api-key
+*-api-key
+*.secret
+*.token
+job-search-private/
+secrets/
+
+# Nothing this tool writes belongs in the repo, and --out lets you name the output
+# anything, so deny by default and allow the one file that is genuinely source.
+#
+# boards.json in particular: a full --refresh-boards crawl discovers ~3,400 slugs,
+# which is effectively Ashby's customer list. Committing it would turn a scraping
+# tool into published competitive intelligence.
+*.csv
+*.json
+*.jsonl
+!job_search/collection/boards.seed.json
+!examples/job-search-config.example.json
+!examples/preference-profile.example.json
+!examples/mail-classifier.example.json
+!examples/resume-model.example.json
+!examples/resume-model.runpod.example.json
+!examples/inference-profile.example.json
+
+# Scrape database.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.pdf
+*.tex
+!job_search/resume_lab/jake_template.tex
+!job_search/resume_lab/career_ops_template.tex
+*.tar
+*.tar.gz
+*.zip
+*.bak
+private/
+backups/
+resume-artifacts/
+resume-content.*
+resume-provenance.*
+Sean_Katauskas_Resume.*
+.venv/
+salary-archives/
+
+# Local-model runtimes, model weights, and package caches.
+.models/
+.venv-local-*/
+.cache/
+.local-evals/
+
+# OpenWiki scratch: a per-run planning file, not documentation.
+openwiki/_plan.md
+
+!deploy/release-policy.json
+
+# macOS workspace metadata is never application source.
+.DS_Store

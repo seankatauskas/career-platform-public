@@ -1,0 +1,39 @@
+{
+  "profile_id": "software-engineer-v1",
+  "experience_years": 2,
+  "current_employer": "Software engineer in a production technology environment",
+  "education": "Undergraduate degree in Computer Science",
+  "capability_assumption": "Top percentile at the current experience level; rapid learner across adjacent software stacks without invented senior leadership experience",
+  "role_scope": [
+    "backend",
+    "frontend",
+    "full-stack",
+    "mobile",
+    "platform",
+    "infrastructure",
+    "site reliability",
+    "security",
+    "data engineering",
+    "AI engineering",
+    "machine learning engineering",
+    "developer tools",
+    "embedded software"
+  ],
+  "max_seniority": "senior",
+  "country_required": "US",
+  "preferred_metros": [
+    "sf_bay_area",
+    "new_york_city",
+    "seattle",
+    "boston",
+    "austin",
+    "los_angeles",
+    "chicago"
+  ],
+  "remote_policy": "city_preferred",
+  "missing_salary_policy": "neutral",
+  "compensation": {
+    "low_usd": 120000,
+    "high_usd": 220000
+  }
+}

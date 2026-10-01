@@ -1,0 +1,5 @@
+# CPU-side preference training/scoring. Embeddings may come from a remote provider;
+# keep sentence-transformers and its large local-model stack out of cloud images.
+numpy>=1.26,<3
+scipy>=1.12,<2
+scikit-learn>=1.5,<2

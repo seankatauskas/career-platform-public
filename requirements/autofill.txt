@@ -1,0 +1,2 @@
+# Optional Keychain-backed private autofill persistence.
+msal-extensions

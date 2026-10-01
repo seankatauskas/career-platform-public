@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "producer_version": "local-mail-model-v1",
+  "command": [
+    "/absolute/path/to/local-mail-classifier"
+  ],
+  "allowed_read_paths": [],
+  "timeout_seconds": 120
+}

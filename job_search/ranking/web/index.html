@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Ranking lab · Career Platform</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Ranking lab home">
+      <span class="brand-mark">CP</span>
+      <span>
+        <strong>Career Platform</strong>
+        <small>Ranking lab</small>
+      </span>
+    </a>
+    <div class="progress" aria-label="Labeling totals">
+      <span><strong id="decisive-count">0</strong> / 1,000 decisions</span>
+      <span class="positive"><strong id="interested-count">0</strong> Pursue</span>
+      <span><strong id="pass-count">0</strong> Pass</span>
+    </div>
+  </header>
+
+  <nav class="view-tabs" aria-label="Ranking lab views">
+    <button id="show-labeling" class="active" type="button">Labeling</button>
+    <button id="show-recommendations" type="button">Recommendations</button>
+  </nav>
+
+  <main>
+    <section id="labeling-view">
+    <section id="program-card" class="program-card" aria-live="polite">
+      <div class="program-heading">
+        <div>
+          <span id="stage-number" class="stage-badge">Stage 1 of 5</span>
+          <h2 id="stage-name">Calibration</h2>
+          <p id="stage-description"></p>
+        </div>
+        <div class="stage-count">
+          <strong><span id="stage-completed">0</span> / <span id="stage-total">50</span></strong>
+          <span>decisive jobs</span>
+        </div>
+      </div>
+      <div class="progress-track" aria-label="Current stage progress">
+        <span id="stage-progress-bar"></span>
+      </div>
+      <div class="program-meta">
+        <span><strong id="stage-remaining">50</strong> left in this stage</span>
+        <span><strong id="overall-remaining">1,000</strong> left overall</span>
+        <span>Unsure and Skip are saved but do not advance the quota.</span>
+      </div>
+      <ol id="stage-list" class="stage-list" aria-label="Labeling stages"></ol>
+    </section>
+
+    <section id="notice" class="notice" hidden></section>
+
+    <article id="job-card" class="job-card" aria-live="polite">
+      <div id="loading" class="empty-state">Finding an unlabeled job…</div>
+      <div id="job-content" hidden>
+        <div class="job-heading">
+          <div>
+            <div class="eyebrow">
+              <span id="published-at"></span>
+            </div>
+            <h1 id="job-title"></h1>
+            <p id="company" class="company"></p>
+          </div>
+          <a id="job-link" class="view-link" target="_blank" rel="noopener noreferrer">
+            View posting <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+
+        <div id="job-facts" class="job-facts"></div>
+        <section id="job-description" class="job-description" hidden></section>
+
+        <div class="decision-prompt">
+          <strong>Would you seriously consider pursuing this job?</strong>
+          <span>Ignore whether your résumé is currently competitive. Assume location, compensation, authorization, and other practical constraints are workable.</span>
+        </div>
+
+        <div class="actions">
+          <button id="not-interested" class="decision negative" type="button">
+            <span class="key">N</span> Pass
+          </button>
+          <button id="maybe" class="decision maybe" type="button">
+            <span class="key">M</span> Unsure / mixed
+          </button>
+          <button id="interested" class="decision positive" type="button">
+            <span class="key">I</span> Pursue
+          </button>
+          <button id="skip" class="decision skip" type="button">
+            <span class="key">S</span> Skip unusable
+          </button>
+        </div>
+
+        <details id="optional-context" class="optional-context">
+          <summary>Add optional context <span>only when useful</span></summary>
+
+          <fieldset>
+            <legend>Strongest reason <span>choose at most one</span></legend>
+            <div id="primary-reason-options" class="chips compact">
+              <button type="button" data-value="role_work">Role &amp; work</button>
+              <button type="button" data-value="domain">Domain</button>
+              <button type="button" data-value="skills">Skills</button>
+              <button type="button" data-value="growth_scope">Growth &amp; scope</button>
+              <button type="button" data-value="company">Company</button>
+              <button type="button" data-value="location">Location</button>
+              <button type="button" data-value="employment_terms">Job type</button>
+              <button type="button" data-value="compensation">Compensation</button>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Hard blockers <span>choose any that apply</span></legend>
+            <div id="hard-blocker-options" class="chips compact">
+              <button type="button" data-value="location">Location</button>
+              <button type="button" data-value="compensation">Compensation</button>
+              <button type="button" data-value="work_authorization">Work authorization</button>
+              <button type="button" data-value="clearance">Clearance</button>
+              <button type="button" data-value="travel">Travel</button>
+              <button type="button" data-value="schedule">Schedule</button>
+              <button type="button" data-value="employment_terms">Job type</button>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Qualification fit <span>separate from preference · choose one</span></legend>
+            <div id="qualification-options" class="chips">
+              <button type="button" data-value="strong">Strong</button>
+              <button type="button" data-value="plausible">Plausible</button>
+              <button type="button" data-value="stretch">Stretch</button>
+              <button type="button" data-value="unlikely">Unlikely</button>
+              <button type="button" data-value="unclear">Unclear</button>
+            </div>
+          </fieldset>
+
+          <label class="skip-reason-label" for="skip-reason">
+            <span>Skip reason</span>
+            <select id="skip-reason">
+              <option value="other">Other / unusable</option>
+              <option value="insufficient_information">Insufficient information</option>
+              <option value="duplicate">Duplicate posting</option>
+              <option value="not_a_job">Not a real job</option>
+              <option value="wrong_language">Wrong language</option>
+            </select>
+          </label>
+
+          <label class="note-area" for="note">
+            <span>Note <small>only for an important nuance the tags miss</small></span>
+            <textarea id="note" maxlength="1000" rows="3"></textarea>
+          </label>
+        </details>
+      </div>
+    </article>
+
+    <footer class="footer-actions">
+      <button id="undo" class="text-button" type="button">Undo last <span class="key">U</span></button>
+      <span>Press <kbd>I</kbd> Pursue, <kbd>N</kbd> Pass, <kbd>M</kbd> Unsure, or <kbd>S</kbd> Skip.</span>
+    </footer>
+    </section>
+
+    <section id="recommendations-view" hidden>
+      <section class="recommendation-header">
+        <div>
+          <span class="stage-badge">Personal shortlist</span>
+          <h1>Jobs worth your attention</h1>
+          <p id="model-summary">Checking for a trained preference model…</p>
+        </div>
+        <button id="refresh-recommendations" class="quiet-button" type="button">Refresh</button>
+      </section>
+
+      <form id="recommendation-controls" class="recommendation-controls">
+        <label>
+          <span>Preference mode</span>
+          <select id="recommendation-policy">
+            <option value="selective">Selective</option>
+            <option value="broad">Broad</option>
+            <option value="compare">Compare both</option>
+            <option value="champion">Legacy champion</option>
+          </select>
+        </label>
+        <label>
+          <span>Jobs</span>
+          <input id="recommendation-limit" type="number" min="1" max="100" value="20">
+        </label>
+        <label>
+          <span>Minimum annual USD</span>
+          <input id="salary-floor" type="number" min="0" step="1000" placeholder="No floor">
+        </label>
+        <label class="toggle-label">
+          <input id="remote-only" type="checkbox">
+          <span>Remote only</span>
+        </label>
+        <button class="quiet-button" type="submit">Update shortlist</button>
+      </form>
+
+      <section id="recommendation-notice" class="notice" hidden></section>
+      <section id="recommendation-list" class="recommendation-list" aria-live="polite">
+        <div class="empty-state">Loading recommendations…</div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

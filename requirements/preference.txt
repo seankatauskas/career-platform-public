@@ -1,0 +1,4 @@
+# Optional local preference-model runtime. The scraper and its core tests remain
+# dependency-free; job_search/ranking/model.py imports these only for modeling commands.
+-r preference-core.txt
+sentence-transformers>=3.4,<6

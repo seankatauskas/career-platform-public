@@ -1,0 +1,158 @@
+name: Deploy prepared AWS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Exact release ID from the Prepare AWS release receipt'
+        required: true
+        type: string
+      manifest_sha256:
+        description: 'Manifest SHA-256 from the same prepared release receipt'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: career-platform-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'seankatauskas/career-platform' && github.ref == vars.AWS_WORKFLOW_REF && github.event_name == 'workflow_dispatch' && github.actor == 'seankatauskas' && github.triggering_actor == 'seankatauskas'
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      RELEASE_BUCKET: ${{ vars.AWS_RELEASE_BUCKET }}
+      INSTANCE_ID: ${{ vars.AWS_INSTANCE_ID }}
+      DEPLOY_DOCUMENT: ${{ vars.AWS_DEPLOY_DOCUMENT }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      MANIFEST_SHA: ${{ inputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Validate the selected release before accessing AWS
+        run: |
+          python3 scripts/prepared-release.py selection --release-id "$RELEASE_ID" --sha256 "$MANIFEST_SHA"
+      - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-verify-${{ github.run_id }}
+      - name: Verify the published manifest and its test evidence
+        run: |
+          set -euo pipefail
+          aws s3api get-object --bucket "$RELEASE_BUCKET" --key "releases/$RELEASE_ID/manifest.json" "$RUNNER_TEMP/manifest.json" > /dev/null
+          python3 scripts/prepared-release.py verify --release-id "$RELEASE_ID" --sha256 "$MANIFEST_SHA" \
+            --manifest "$RUNNER_TEMP/manifest.json" --output .cache/prepared-release.json
+      - name: Refresh deployment credentials
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-install-${{ github.run_id }}
+      - name: Install through the constrained SSM document
+        run: |
+          set -euo pipefail
+          parameters=$(jq -n --arg release "$RELEASE_ID" --arg sha "$MANIFEST_SHA" '{ReleaseId:[$release],ManifestSha256:[$sha]}')
+          command_id=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "$DEPLOY_DOCUMENT" \
+            --parameters "$parameters" --query Command.CommandId --output text)
+          echo "SSM command: $command_id"
+          echo "COMMAND_ID=$command_id" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/wait-ssm.sh" <<'SH'
+          set -euo pipefail
+          deadline=$((SECONDS + 2400))
+          while ((SECONDS < deadline)); do
+            if status=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query Status --output text 2> "$RUNNER_TEMP/ssm-error"); then
+              :
+            elif grep -q InvocationDoesNotExist "$RUNNER_TEMP/ssm-error"; then
+              status=Pending
+            else
+              echo 'Unable to read deployment status; inspect the existing SSM command before retrying.'
+              exit 1
+            fi
+            case "$status" in
+              Success) echo "DEPLOY_COMPLETE=true" >> "$GITHUB_ENV"; echo "Deployment succeeded: $RELEASE_ID"; exit 0 ;;
+              Failed|Cancelled|TimedOut|Cancelling) echo "Deployment failed: $status; inspect SSM command $COMMAND_ID"; exit 1 ;;
+              Pending|InProgress|Delayed) ;;
+              *) echo 'Unrecognized deployment status'; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo 'Deployment is still running; refreshing credentials before the next polling window.'
+          SH
+      - name: Await deployment (first 40 minutes)
+        run: bash "$RUNNER_TEMP/wait-ssm.sh"
+      - name: Refresh credentials for polling window 2
+        if: env.DEPLOY_COMPLETE != 'true'
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-poll-2-${{ github.run_id }}
+      - name: Await deployment (window 2, up to 40 minutes)
+        if: env.DEPLOY_COMPLETE != 'true'
+        run: bash "$RUNNER_TEMP/wait-ssm.sh"
+      - name: Refresh credentials for polling window 3
+        if: env.DEPLOY_COMPLETE != 'true'
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-poll-3-${{ github.run_id }}
+      - name: Await deployment (window 3, up to 40 minutes)
+        if: env.DEPLOY_COMPLETE != 'true'
+        run: bash "$RUNNER_TEMP/wait-ssm.sh"
+      - name: Refresh credentials for polling window 4
+        if: env.DEPLOY_COMPLETE != 'true'
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-poll-4-${{ github.run_id }}
+      - name: Await deployment (window 4, up to 40 minutes)
+        if: env.DEPLOY_COMPLETE != 'true'
+        run: bash "$RUNNER_TEMP/wait-ssm.sh"
+      - name: Refresh credentials for polling window 5
+        if: env.DEPLOY_COMPLETE != 'true'
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: career-poll-5-${{ github.run_id }}
+      - name: Await deployment (window 5, up to 40 minutes)
+        if: env.DEPLOY_COMPLETE != 'true'
+        run: bash "$RUNNER_TEMP/wait-ssm.sh"
+      - name: Require a completed deployment
+        run: |
+          if [ "${DEPLOY_COMPLETE:-false}" != true ]; then
+            echo "Deployment status timed out; inspect SSM command $COMMAND_ID before retrying."
+            exit 1
+          fi
+      - name: Summarize deployment outcome
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 scripts/release-summary.py --output .cache/deployment-summary.json
+      - name: Preserve deployment receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deployment-result-${{ env.RELEASE_ID }}
+          path: |
+            .cache/deployment-summary.json
+            .cache/prepared-release.json
+          if-no-files-found: warn
+          retention-days: 14

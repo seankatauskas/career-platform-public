@@ -1,0 +1,4 @@
+# Optional secure mail archive and attachment extraction dependencies.
+cryptography
+msal-extensions
+pypdf

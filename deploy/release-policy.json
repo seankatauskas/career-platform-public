@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "schema_compatibility": "career-state-12-v1",
+  "test_baseline_sha": "7a876a4a25f7f2db6a32951c4355a97bbc7de1b6",
+  "predecessor": {
+    "release_id": "7a876a4a25f7f2db6a32951c4355a97bbc7de1b6-11",
+    "source_sha": "7a876a4a25f7f2db6a32951c4355a97bbc7de1b6"
+  }
+}

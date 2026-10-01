@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Salary review · Career Platform</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Salary review</h1>
+      <p id="progress">Loading…</p>
+    </div>
+    <div class="shortcuts">1 Fireworks · 2 OpenAI · E edit · U undo</div>
+  </header>
+  <main>
+    <section class="job card">
+      <div id="job-meta"></div>
+      <div id="description" class="description"></div>
+    </section>
+    <section class="review">
+      <div id="message" aria-live="polite"></div>
+      <div id="predictions" class="predictions"></div>
+      <label for="editor">Gold label JSON</label>
+      <textarea id="editor" spellcheck="false"></textarea>
+      <label for="note">Optional note</label>
+      <input id="note" type="text" placeholder="What did the model get wrong?">
+      <div class="actions">
+        <button id="save" class="primary">Save edited label</button>
+        <button id="undo">Undo last</button>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

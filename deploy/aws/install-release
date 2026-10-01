@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Install an immutable release selected by SSM's release ID and manifest SHA.
+
+Root-owned host configuration determines bucket authority. The verified code is
+staged before setup checks so a fresh host can use its operations commands even
+when secrets or the compiler have not been provisioned yet. Never activate jobs.
+"""
+import hashlib
+from contextlib import contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+
+DEPLOY_TIMEOUT = 10920  # SSM's 10800-second overall timeout remains authoritative.
+IMAGE = re.compile(r'[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}')
+
+
+def call(*args, timeout=1800):
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('release download or deployment failed') from None
+
+
+def sha(path):
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def validate_manifest(manifest, rid):
+    if not isinstance(manifest, dict) or manifest.get('version') != 1 or manifest.get('release_id') != rid:
+        raise RuntimeError('manifest identity mismatch')
+    if manifest.get('source_sha') != rid[:40]:
+        raise RuntimeError('manifest source mismatch')
+    if not re.fullmatch(r'[a-f0-9]{64}', str(manifest.get('bundle_sha256', ''))):
+        raise RuntimeError('invalid bundle checksum')
+    policy = manifest.get('release_policy', {})
+    evidence = manifest.get('transition_validation', {})
+    if (manifest.get('operations_protocol') != 1 or policy.get('version') != 1 or
+            evidence.get('passed') is not True or evidence.get('runtime') != 'docker' or
+            evidence.get('working_tree_dirty', False) is not False or
+            evidence.get('source_sha') != manifest.get('source_sha') or
+            evidence.get('baseline_sha') != policy.get('test_baseline_sha') or
+            policy.get('schema_compatibility') != manifest.get('schema_compatibility')):
+        raise RuntimeError('release has no matching durable-recovery transition evidence')
+    for name in ('app_image', 'hermes_image', 'hermes_base_image'):
+        if not IMAGE.fullmatch(str(manifest.get(name, ''))):
+            raise RuntimeError('release images must be pinned by digest')
+    for name in ('app_image', 'hermes_image'):
+        registry = manifest[name].split('/')[0]
+        if not re.fullmatch(r'\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com', registry):
+            raise RuntimeError('only private ECR application images permitted')
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,100}', str(manifest.get('schema_compatibility', ''))):
+        raise RuntimeError('missing reviewed schema compatibility')
+    if not re.fullmatch(r'[A-Za-z0-9 ._-]{1,100}', str(manifest.get('tectonic_version', ''))):
+        raise RuntimeError('missing Tectonic version')
+
+
+def extract_release(bundle, payload):
+    payload.mkdir(mode=0o755)
+    seen = set()
+    total = 0
+    with tarfile.open(bundle, 'r:gz') as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            if (path.is_absolute() or '..' in path.parts or not path.parts
+                    or str(path) in seen or not (member.isfile() or member.isdir())):
+                raise RuntimeError('unsafe release member')
+            seen.add(str(path))
+            total += member.size
+            if total > 256 * 1024 * 1024 or len(seen) > 20000:
+                raise RuntimeError('release too large')
+            target = payload.joinpath(*path.parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True, mode=0o755)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise RuntimeError('missing release member')
+                with target.open('xb') as out:
+                    shutil.copyfileobj(stream, out)
+                target.chmod(0o755 if member.mode & 0o111 else 0o644)
+
+
+def operations(destination, config_path, action, *args, timeout=1800):
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(destination / 'scripts/job-search-ops'), '--config', str(config_path), action, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('operations command failed; inspect host status before retrying') from None
+    try:
+        value = json.loads(completed.stdout)
+        if not isinstance(value, dict):
+            raise ValueError()
+    except ValueError:
+        value = {'status': 'error'}
+    return completed.returncode, value
+
+
+@contextmanager
+def installation_lock(root):
+    fd = os.open(root / '.install.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError('invalid installation lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('another release installation is active') from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def install(config_path, c, rid, expected):
+    root = Path(c['release_root'])
+    if not root.is_absolute() or root == Path('/') or root.resolve() != root:
+        raise RuntimeError('invalid release root')
+    root.mkdir(parents=True, exist_ok=True, mode=0o755)
+    with installation_lock(root):
+        return install_locked(config_path, c, rid, expected)
+
+
+def install_locked(config_path, c, rid, expected):
+    root = Path(c['release_root'])
+    releases = root / 'releases'
+    if releases.is_symlink():
+        raise RuntimeError('invalid releases directory')
+    releases.mkdir(parents=True, exist_ok=True, mode=0o755)
+    with tempfile.TemporaryDirectory(prefix='.install-', dir=releases) as temp:
+        stage = Path(temp)
+
+        def download(name):
+            call('aws', '--region', c['aws_region'], '--no-cli-pager', 's3', 'cp',
+                 f"s3://{c['release_bucket']}/releases/{rid}/{name}", str(stage / name), '--only-show-errors')
+
+        download('manifest.json')
+        if sha(stage / 'manifest.json') != expected:
+            raise RuntimeError('manifest checksum mismatch')
+        manifest = json.loads((stage / 'manifest.json').read_text())
+        validate_manifest(manifest, rid)
+        download('release.tar.gz')
+        if sha(stage / 'release.tar.gz') != manifest['bundle_sha256']:
+            raise RuntimeError('release checksum mismatch')
+        payload = stage / 'payload'
+        extract_release(stage / 'release.tar.gz', payload)
+        inside = json.loads((payload / 'release.json').read_text())
+        if inside != {k: v for k, v in manifest.items() if k != 'bundle_sha256'}:
+            raise RuntimeError('embedded release manifest mismatch')
+        if not (payload / 'scripts/job-search-ops').is_file():
+            raise RuntimeError('release is missing operations entrypoint')
+        destination = releases / rid
+        if destination.is_symlink():
+            raise RuntimeError('invalid installed release path')
+        if destination.exists():
+            if (destination / 'release.json').read_bytes() != (payload / 'release.json').read_bytes():
+                raise RuntimeError('release ID already belongs to different content')
+            if (destination / '.bundle-sha256').read_text() != manifest['bundle_sha256']:
+                raise RuntimeError('installed release digest mismatch')
+        else:
+            (payload / '.bundle-sha256').write_text(manifest['bundle_sha256'])
+            os.replace(payload, destination)
+
+    # A missing secret version is expected on a freshly provisioned host. Keep
+    # verified tools available without switching current or starting any service.
+    current = root / 'current'
+    if not (current.exists() or current.is_symlink()):
+        code, _ = operations(destination, config_path, 'secrets')
+        if code:
+            return {'status': 'blocked_setup', 'release_id': rid, 'staged_path': str(destination),
+                    'issues': ['secret_setup_failed'],
+                    'next_step': 'Populate the referenced Secrets Manager values, then rerun this release installation.'}
+        code, check = operations(destination, config_path, 'preflight', timeout=60)
+        if code or check.get('status') != 'configuration_ready':
+            issues = [value for value in check.get('issues', [])
+                      if isinstance(value, str) and re.fullmatch(r'(?:persistent_volume|missing_[a-z0-9_.-]+)', value)]
+            return {'status': 'blocked_setup', 'release_id': rid, 'staged_path': str(destination),
+                    'issues': issues or ['preflight_failed'],
+                    'next_step': 'Complete staged job-search-ops preflight, including the pinned compiler, then rerun this release installation.'}
+    # Existing deployments handle secret refresh inside their own stop/backup
+    # transaction; changing credentials here could invalidate the old backup.
+
+    for image in {manifest['app_image'], manifest['hermes_image']}:
+        registry = image.split('/')[0]
+        password = call('aws', '--region', c['aws_region'], 'ecr', 'get-login-password')
+        completed = subprocess.run(['docker', 'login', '--username', 'AWS', '--password-stdin', registry],
+                                   input=password, text=True, capture_output=True, timeout=60)
+        if completed.returncode:
+            raise RuntimeError('registry authentication failed')
+    code, result = operations(destination, config_path, 'deploy', '--release', rid, timeout=DEPLOY_TIMEOUT)
+    if code or result.get('status') not in {'deployed', 'deployed_paused'}:
+        raise RuntimeError('deployment failed; inspect staged job-search-ops status before retrying')
+    return result
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 3:
+        raise RuntimeError('root, release ID, and manifest SHA required')
+    rid, expected = sys.argv[1:]
+    if not re.fullmatch(r'[a-f0-9]{40}(?:-[0-9]+)?', rid) or not re.fullmatch(r'[a-f0-9]{64}', expected):
+        raise RuntimeError('invalid release identity')
+    config = Path('/etc/job-search/operations.json')
+    info = config.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise RuntimeError('invalid host configuration permissions')
+    result = install(config, json.loads(config.read_text()), rid, expected)
+    print(json.dumps(result, sort_keys=True))
+    return 2 if result['status'] == 'blocked_setup' else 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, ValueError, OSError, KeyError, TypeError, tarfile.TarError, subprocess.SubprocessError) as exc:
+        print(json.dumps({'status': 'error', 'reason': str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__}), file=sys.stderr)
+        raise SystemExit(2)

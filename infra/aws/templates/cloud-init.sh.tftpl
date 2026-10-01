@@ -1,0 +1,244 @@
+#!/bin/bash
+# Cloud-init runs once as root. Never echo secrets or enable shell xtrace here.
+set -euo pipefail
+umask 077
+export DEBIAN_FRONTEND=noninteractive
+export AWS_DEFAULT_REGION='${region}'
+export AWS_PAGER=''
+apt-get update
+apt-get install -y ca-certificates curl gnupg jq unzip python3 python3-venv iptables nvme-cli docker.io docker-compose-v2
+# No application service may start before metadata filtering is installed.
+systemctl stop docker.service docker.socket || true
+# Ubuntu 24.04 does not provide awscli in every archive snapshot. Use AWS's
+# officially supported, signed Snap package and expose it to systemd's PATH.
+if ! snap list aws-cli >/dev/null 2>&1; then snap install aws-cli --classic --channel=v2/stable; fi
+ln -sfn /snap/bin/aws /usr/local/bin/aws
+/usr/local/bin/aws --version
+install -d -m 0755 /etc/job-search /usr/local/sbin /opt/job-search /etc/systemd/system/docker.service.d
+install -d -m 0700 /var/log/job-search
+
+cat > /usr/local/sbin/job-search-metadata-firewall <<'FIREWALL'
+#!/bin/bash
+set -euo pipefail
+# Block host-networked application processes; root host agents retain IMDSv2.
+iptables -C OUTPUT -d 169.254.169.254/32 -m owner --uid-owner 10001 -j REJECT 2>/dev/null || iptables -I OUTPUT 1 -d 169.254.169.254/32 -m owner --uid-owner 10001 -j REJECT
+ip6tables -C OUTPUT -d fd00:ec2::254/128 -m owner --uid-owner 10001 -j REJECT 2>/dev/null || ip6tables -I OUTPUT 1 -d fd00:ec2::254/128 -m owner --uid-owner 10001 -j REJECT
+# Pre-create Docker's filter chain and drop metadata even for container root.
+iptables -N DOCKER-USER 2>/dev/null || true
+iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -d 169.254.169.254/32 -j DROP
+iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -I FORWARD 1 -j DOCKER-USER
+ip6tables -N DOCKER-USER 2>/dev/null || true
+ip6tables -C DOCKER-USER -d fd00:ec2::254/128 -j DROP 2>/dev/null || ip6tables -I DOCKER-USER 1 -d fd00:ec2::254/128 -j DROP
+ip6tables -C FORWARD -j DOCKER-USER 2>/dev/null || ip6tables -I FORWARD 1 -j DOCKER-USER
+FIREWALL
+chmod 0755 /usr/local/sbin/job-search-metadata-firewall
+cat > /etc/systemd/system/job-search-metadata-firewall.service <<'UNIT'
+[Unit]
+Description=Block application and container access to instance credentials
+Before=docker.service
+After=network-pre.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/job-search-metadata-firewall
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system/docker.service.d/job-search.conf <<'UNIT'
+[Unit]
+Requires=job-search-metadata-firewall.service job-search-data.service
+After=job-search-metadata-firewall.service job-search-data.service
+[Service]
+ExecStartPre=/usr/local/sbin/job-search-metadata-firewall
+UNIT
+
+# Signed Tailscale archive; package verification remains enforced by apt.
+curl --fail --silent --show-error --location https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+chmod 0644 /usr/share/keyrings/tailscale-archive-keyring.gpg
+printf '%s\n' 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu noble main' > /etc/apt/sources.list.d/tailscale.list
+chmod 0644 /etc/apt/sources.list.d/tailscale.list
+apt-get update
+apt-get install -y tailscale
+systemctl enable --now tailscaled
+# Canonical's Ubuntu EC2 image carries the signed snap; install only if missing.
+if ! snap list amazon-ssm-agent >/dev/null 2>&1; then snap install amazon-ssm-agent --classic; fi
+snap start --enable amazon-ssm-agent
+
+cat > /etc/job-search/operations.json <<'JSON'
+${operations_json}
+JSON
+# InstanceId is runtime metadata, avoiding a Terraform self-reference.
+imds_token=$(curl --fail --silent --show-error --connect-timeout 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)
+instance_id=$(curl --fail --silent --show-error --connect-timeout 5 -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/instance-id)
+jq --arg id "$instance_id" '. + {instance_id: $id}' /etc/job-search/operations.json > /etc/job-search/operations.json.tmp
+mv /etc/job-search/operations.json.tmp /etc/job-search/operations.json
+unset imds_token
+chmod 0600 /etc/job-search/operations.json
+cat > /usr/local/sbin/job-search-install-release <<'INSTALLER'
+${installer}
+INSTALLER
+chmod 0755 /usr/local/sbin/job-search-install-release
+
+# Resolve the EBS serial rather than trusting an unstable /dev/nvmeXn1 name.
+cat > /usr/local/sbin/job-search-mount-data <<'MOUNT'
+#!/bin/bash
+set -euo pipefail
+umask 077
+expected='${volume_id}'
+serial="$${expected//-/}"
+device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$serial"
+for attempt in $(seq 1 180); do
+  [ -b "$device" ] && break
+  sleep 5
+done
+[ -b "$device" ] || { echo 'Expected EBS volume is missing; refusing to start.' >&2; exit 1; }
+actual=$(lsblk -dn -o SERIAL "$(readlink -f "$device")" | tr -d '[:space:]-')
+[ "$actual" = "$serial" ] || { echo 'Volume identity mismatch.' >&2; exit 1; }
+kind=$(blkid -s TYPE -o value "$device" || true)
+new_volume=no
+if [ -z "$kind" ]; then
+  [ '${initialize_volume}' = yes ] || { echo 'Blank volume requires explicit first-boot initialization authorization.' >&2; exit 1; }
+  # Any partition or signature makes automatic formatting unsafe.
+  [ "$(lsblk -nr -o TYPE "$device" | wc -l)" -eq 1 ] || exit 1
+  signatures=$(wipefs --no-act --noheadings --output TYPE "$device") || { echo 'Unable to inspect volume signatures; refusing format.' >&2; exit 1; }
+  [ -z "$signatures" ] || exit 1
+  # Nonzero bytes alone do not prove prior use: AWS may present new EBS blocks
+  # as cryptographically pseudorandom data. Still fail closed unless an operator
+  # verified creation provenance and supplied a short-lived, exact-volume grant.
+  bytes=$(blockdev --getsize64 "$device")
+  if cmp -n "$bytes" "$device" /dev/zero >/dev/null; then
+    :
+  else
+    comparison_status=$?
+    [ "$comparison_status" -eq 1 ] || { echo 'Volume read failed; refusing format.' >&2; exit 1; }
+    authorization=/etc/job-search/initialize-empty-volume
+    [ -f "$authorization" ] && [ ! -L "$authorization" ] &&
+      [ "$(stat -c '%u:%a:%h' "$authorization")" = '0:600:1' ] || {
+        echo 'Unrecognized bytes require verified new-volume provenance and operator authorization.' >&2; exit 1;
+      }
+    read -r authorized_volume expires extra < "$authorization"
+    [ "$authorized_volume" = "$expected" ] && [ -z "$extra" ] &&
+      [[ "$expires" =~ ^[0-9]{10}$ ]] || { echo 'Invalid volume authorization.' >&2; exit 1; }
+    now=$(date +%s)
+    [ "$expires" -gt "$now" ] && [ "$expires" -le "$((now + 3600))" ] || {
+      echo 'Volume authorization expired or exceeds one hour.' >&2; exit 1;
+    }
+    [ ! -e "$authorization.used" ] || { echo 'Volume authorization already consumed.' >&2; exit 1; }
+    # Consume before mkfs, even if formatting subsequently fails. Never retry an
+    # interrupted initialization automatically. Persist the rename on the root disk.
+    mv -T -- "$authorization" "$authorization.used"
+    sync -f /etc/job-search
+  fi
+  mkfs.ext4 -L job-search-data "$device"
+  new_volume=yes
+elif [ "$kind" != ext4 ]; then
+  echo 'Unexpected filesystem; refusing to format existing data.' >&2; exit 1
+fi
+install -d -m 0700 /var/lib/job-search
+if ! mountpoint -q /var/lib/job-search; then mount -o nosuid,nodev "$device" /var/lib/job-search; fi
+mounted=$(findmnt -n -o SOURCE --target /var/lib/job-search)
+[ "$(readlink -f "$mounted")" = "$(readlink -f "$device")" ] || { echo 'Wrong device mounted.' >&2; exit 1; }
+marker=/var/lib/job-search/.job-search-volume-id
+if [ "$new_volume" = yes ]; then
+  printf '%s\n' "$expected" > "$marker"
+fi
+[ -f "$marker" ] && [ "$(cat "$marker")" = "$expected" ] || { echo 'Volume marker missing or mismatched; explicit recovery required.' >&2; exit 1; }
+chown root:root /var/lib/job-search "$marker"
+chmod 0711 /var/lib/job-search
+chmod 0600 "$marker"
+for name in state hermes toolchain runtime; do
+  install -d -o 10001 -g 10001 -m 0700 "/var/lib/job-search/$name"
+done
+install -d -o root -g 10001 -m 0710 /var/lib/job-search/private
+MOUNT
+chmod 0755 /usr/local/sbin/job-search-mount-data
+cat > /etc/systemd/system/job-search-data.service <<'UNIT'
+[Unit]
+Description=Verify and mount retained Career Platform data volume
+Before=docker.service
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/job-search-mount-data
+RemainAfterExit=yes
+TimeoutStartSec=3600
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Pin executable bytes. Package retrieval cannot silently change the agent.
+curl --fail --silent --show-error --location 'https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/${cw_version}/amazon-cloudwatch-agent.deb' -o /tmp/job-search-cloudwatch.deb
+printf '%s  %s\n' '${cw_sha256}' /tmp/job-search-cloudwatch.deb | sha256sum -c -
+dpkg -i /tmp/job-search-cloudwatch.deb
+rm /tmp/job-search-cloudwatch.deb
+cat > /opt/aws/amazon-cloudwatch-agent/etc/job-search.json <<'JSON'
+${cw_json}
+JSON
+
+cat > /etc/systemd/system/job-search-status.service <<'UNIT'
+[Unit]
+Description=Publish redacted Career Platform health
+After=docker.service
+Requires=job-search-data.service
+ConditionPathIsExecutable=/opt/job-search/current/scripts/job-search-ops
+[Service]
+Type=oneshot
+ExecStart=/opt/job-search/current/scripts/job-search-ops --config /etc/job-search/operations.json status --publish
+StandardOutput=append:/var/log/job-search/operations.log
+StandardError=journal
+TimeoutStartSec=240
+UNIT
+cat > /etc/systemd/system/job-search-status.timer <<'UNIT'
+[Unit]
+Description=Check Career Platform every five minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+cat > /etc/systemd/system/job-search-backup.service <<'UNIT'
+[Unit]
+Description=Create consistent encrypted-at-rest Career Platform backup
+After=docker.service
+Requires=job-search-data.service
+ConditionPathIsExecutable=/opt/job-search/current/scripts/job-search-ops
+[Service]
+Type=oneshot
+ExecStart=/opt/job-search/current/scripts/job-search-ops --config /etc/job-search/operations.json backup --scheduled
+StandardOutput=append:/var/log/job-search/operations.log
+StandardError=journal
+TimeoutStartSec=10800
+UNIT
+cat > /etc/systemd/system/job-search-backup.timer <<'UNIT'
+[Unit]
+Description=Daily Career Platform backup
+[Timer]
+OnCalendar=*-*-* *:00,30:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+cat > /etc/logrotate.d/job-search <<'ROTATE'
+/var/log/job-search/operations.log {
+  daily
+  rotate 14
+  compress
+  missingok
+  notifempty
+  copytruncate
+  create 0600 root root
+}
+ROTATE
+systemctl daemon-reload
+systemctl enable --now job-search-metadata-firewall.service job-search-data.service
+systemctl is-active --quiet job-search-metadata-firewall.service
+systemctl is-active --quiet job-search-data.service
+systemctl enable --now docker.service
+systemctl is-active --quiet docker.service
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/job-search.json -s
+systemctl enable --now job-search-status.timer job-search-backup.timer
+# Deliberately no tailscale login, app start, or secret retrieval before enrollment.

@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "provider": "runpod_serverless_vllm",
+  "producer_version": "runpod-resume-qwen-v1",
+  "endpoint_id": "REPLACE_WITH_RUNPOD_ENDPOINT_ID",
+  "model_id": "Qwen/Qwen2.5-7B-Instruct",
+  "model_revision": "REPLACE_WITH_40_OR_64_CHARACTER_LOWERCASE_HF_COMMIT",
+  "worker_image_digest": "sha256:REPLACE_WITH_64_CHARACTER_LOWERCASE_IMAGE_DIGEST",
+  "api_key_file": "/ABSOLUTE/PRIVATE/runpod-api-key",
+  "request_timeout_seconds": 30,
+  "timeout_seconds": 900,
+  "poll_interval_seconds": 1,
+  "context_size": 32768,
+  "max_tokens": 8192,
+  "temperature": 0.1,
+  "top_p": 0.95
+}

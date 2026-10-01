@@ -1,0 +1,83 @@
+name: job-search
+
+# Optional overlay for the conversational chief of staff and phone delivery. Start it
+# together with compose.cloud.yaml only after the owner-only Hermes data directory has
+# been initialized. Hermes receives no job-search database or private-state mount. Its
+# upstream entrypoint remains PID 1 so official s6 gateway supervision stays intact.
+services:
+  hermes:
+    platform: "${JOB_SEARCH_HERMES_PLATFORM:-linux/amd64}"
+    image: "${JOB_SEARCH_HERMES_BRIDGE_IMAGE:-job-search-hermes-bridge:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes
+      args:
+        HERMES_BASE_IMAGE: "${JOB_SEARCH_HERMES_BASE_IMAGE:?set JOB_SEARCH_HERMES_BASE_IMAGE to a reviewed Hermes image digest}"
+    networks:
+      - agent-boundary
+    environment:
+      JOB_SEARCH_MAINTENANCE_GATE: /run/job-search-maintenance/gate.json
+      S6_BEHAVIOUR_IF_STAGE2_FAILS: "2"
+      HERMES_UID: "${JOB_SEARCH_UID:-10001}"
+      HERMES_GID: "${JOB_SEARCH_GID:-10001}"
+      JOB_SEARCH_NOTIFICATION_TARGET: "${JOB_SEARCH_NOTIFICATION_TARGET:?set JOB_SEARCH_NOTIFICATION_TARGET}"
+      JOB_SEARCH_EXPECTED_HERMES_BASE_IMAGE: "${JOB_SEARCH_HERMES_BASE_IMAGE:?set JOB_SEARCH_HERMES_BASE_IMAGE to a reviewed Hermes image digest}"
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_MAINTENANCE_DIR:?set JOB_SEARCH_MAINTENANCE_DIR}"
+        target: /run/job-search-maintenance
+        read_only: true
+      - type: bind
+        source: "${JOB_SEARCH_HERMES_DATA_DIR:?set JOB_SEARCH_HERMES_DATA_DIR}"
+        target: /opt/data
+      - type: bind
+        source: "${JOB_SEARCH_NOTIFICATION_RUNTIME_DIR:?set JOB_SEARCH_NOTIFICATION_RUNTIME_DIR}"
+        target: /run/job-search-notifications
+      - type: bind
+        source: "${JOB_SEARCH_MCP_TOKEN_FILE:?set JOB_SEARCH_MCP_TOKEN_FILE}"
+        target: /run/job-search-mcp-token
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
+      # s6 generates and executes its supervisor under /run/s6. Docker tmpfs
+      # defaults to noexec unless exec is explicit; /tmp remains non-executable.
+      - /run:rw,exec,nosuid,nodev,mode=0755
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+      # s6 must signal its child processes after they drop to the Hermes UID.
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: 2.0
+    command: ["gateway", "run"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      mcp:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        # Docker health checks do not inherit the PATH installed by /init.
+        - /command/s6-setuidgid
+        - hermes
+        - /opt/hermes/.venv/bin/python
+        - /opt/job-search-hermes/hermes_delivery.py
+        - healthcheck
+        - --socket
+        - /run/job-search-notifications/hermes.sock
+        - --require-gateway
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      replicas: 1

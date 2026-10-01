@@ -1,0 +1,3 @@
+# Optional live Outlook connector dependencies. Offline tests do not require these.
+msal
+msal-extensions

@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Dry-run-first lifecycle for the repo's exact-revision Infinity derivative. A
+# private template pins the custom worker image digest; a separate model reference
+# preloads the exact BGE snapshot downloaded by Runpod.
+
+usage() {
+  >&2 printf '%s\n' \
+    'usage: scripts/runpod-embedding-endpoint check' \
+    '       scripts/runpod-embedding-endpoint template [--apply]' \
+    '       scripts/runpod-embedding-endpoint deploy [--apply]' \
+    '       scripts/runpod-embedding-endpoint wake [--apply]' \
+    '       scripts/runpod-embedding-endpoint status' \
+    '       scripts/runpod-embedding-endpoint smoke [--apply]' \
+    '       scripts/runpod-embedding-endpoint delete [--apply]' \
+    '       scripts/runpod-embedding-endpoint delete-template [--apply]'
+}
+
+fail() {
+  >&2 printf 'runpod embedding endpoint: %s\n' "$1"
+  exit 2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is not installed"
+}
+
+require_value() {
+  local variable_name="$1"
+  [[ -n "${!variable_name:-}" ]] || fail "$variable_name is required"
+  [[ "${!variable_name}" != -* ]] || fail "$variable_name must not begin with a dash"
+  [[ "${!variable_name}" != *$'\n'* ]] || fail "$variable_name must be one line"
+}
+
+require_apply() {
+  [[ "${2:-}" == '--apply' ]] || {
+    printf 'Dry run only. Re-run `%s %s --apply` to execute.\n' "$0" "$1"
+    return 1
+  }
+}
+
+# Runpod's list/read APIs can briefly lag a successful create. Retry only the
+# readback; never repeat the billable create operation automatically.
+verify_eventually() {
+  local attempt output
+  for attempt in 1 2 3 4 5 6; do
+    if output="$("$@" 2>/dev/null)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if (( attempt < 6 )); then
+      sleep "$((attempt * 2))"
+    fi
+  done
+  "$@"
+}
+
+check_cli() {
+  require_command runpodctl
+  require_command python3
+  local version_output major minor
+  version_output="$(runpodctl version)"
+  printf '%s\n' "$version_output"
+  [[ "$version_output" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || \
+    fail 'could not determine the runpodctl version'
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  if (( major < 2 || (major == 2 && minor < 10) )); then
+    fail 'runpodctl 2.10.0 or newer is required for reliable workers-min=0 updates'
+  fi
+  runpodctl user >/dev/null
+  local serverless_help template_help
+  serverless_help="$(runpodctl serverless create --help)"
+  template_help="$(runpodctl template create --help)"
+  grep -q -- '--model-reference' <<<"$serverless_help" || \
+    fail 'runpodctl lacks --model-reference; update it before deployment'
+  grep -q -- '--workers-min' <<<"$serverless_help" || \
+    fail 'runpodctl lacks current Serverless worker controls'
+  grep -q -- '--serverless' <<<"$template_help" || \
+    fail 'runpodctl lacks Serverless template support'
+}
+
+validate_id() {
+  local variable_name="$1"
+  require_value "$variable_name"
+  [[ "${!variable_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail "$variable_name has an invalid shape"
+}
+
+validate_common() {
+  local batch_size="${RUNPOD_EMBEDDING_BATCH_SIZE:-32}"
+  local dimensions="${RUNPOD_EMBEDDING_DIMENSIONS:-768}"
+  require_value RUNPOD_EMBEDDING_MODEL
+  require_value RUNPOD_EMBEDDING_MODEL_REFERENCE
+  [[ "$RUNPOD_EMBEDDING_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || \
+    fail 'RUNPOD_EMBEDDING_MODEL must be a Hugging Face org/repository identifier'
+  [[ "$RUNPOD_EMBEDDING_MODEL_REFERENCE" =~ ^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+):([0-9a-f]{40}|[0-9a-f]{64})$ ]] || \
+    fail 'RUNPOD_EMBEDDING_MODEL_REFERENCE must end in an immutable commit digest'
+  [[ "${BASH_REMATCH[1]}" == "$RUNPOD_EMBEDDING_MODEL" ]] || \
+    fail 'RUNPOD_EMBEDDING_MODEL_REFERENCE repository must match the model'
+  [[ "$batch_size" =~ ^[0-9]+$ ]] && (( batch_size >= 1 && batch_size <= 128 )) || \
+    fail 'RUNPOD_EMBEDDING_BATCH_SIZE must be between 1 and 128'
+  [[ "$dimensions" =~ ^[0-9]+$ ]] && (( dimensions >= 1 && dimensions <= 65536 )) || \
+    fail 'RUNPOD_EMBEDDING_DIMENSIONS must be between 1 and 65536'
+}
+
+validate_timeouts() {
+  local idle="${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}"
+  local execution="${RUNPOD_EMBEDDING_EXECUTION_TIMEOUT:-900}"
+  [[ "$idle" =~ ^[0-9]+$ ]] && (( idle >= 5 && idle <= 3600 )) || \
+    fail 'RUNPOD_EMBEDDING_IDLE_TIMEOUT must be between 5 and 3600'
+  [[ "$execution" =~ ^[0-9]+$ ]] && (( execution >= 30 && execution <= 86400 )) || \
+    fail 'RUNPOD_EMBEDDING_EXECUTION_TIMEOUT must be between 30 and 86400'
+}
+
+validate_template() {
+  local disk="${RUNPOD_EMBEDDING_CONTAINER_DISK_GB:-20}"
+  validate_common
+  require_value RUNPOD_EMBEDDING_TEMPLATE_NAME
+  require_value RUNPOD_EMBEDDING_WORKER_IMAGE
+  [[ "$RUNPOD_EMBEDDING_TEMPLATE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_EMBEDDING_TEMPLATE_NAME has an invalid shape'
+  [[ "$RUNPOD_EMBEDDING_WORKER_IMAGE" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || \
+    fail 'RUNPOD_EMBEDDING_WORKER_IMAGE must be a custom image pinned by digest'
+  [[ "$RUNPOD_EMBEDDING_WORKER_IMAGE" != runpod/worker-infinity-embedding@* ]] || \
+    fail 'the stock embedding worker cannot attest or reliably resolve an exact revision'
+  [[ "$disk" =~ ^[0-9]+$ ]] && (( disk >= 5 && disk <= 100 )) || \
+    fail 'RUNPOD_EMBEDDING_CONTAINER_DISK_GB must be between 5 and 100'
+}
+
+validate_deploy() {
+  validate_template
+  validate_timeouts
+  validate_id RUNPOD_EMBEDDING_TEMPLATE_ID
+  require_value RUNPOD_EMBEDDING_ENDPOINT_NAME
+  require_value RUNPOD_EMBEDDING_GPU_ID
+  [[ "$RUNPOD_EMBEDDING_ENDPOINT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_EMBEDDING_ENDPOINT_NAME has an invalid shape'
+}
+
+validate_runtime() {
+  validate_template
+  validate_timeouts
+  validate_id RUNPOD_EMBEDDING_TEMPLATE_ID
+  validate_id RUNPOD_EMBEDDING_ENDPOINT_ID
+  require_value RUNPOD_EMBEDDING_ENDPOINT_NAME
+  [[ "$RUNPOD_EMBEDDING_ENDPOINT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$ ]] || \
+    fail 'RUNPOD_EMBEDDING_ENDPOINT_NAME has an invalid shape'
+}
+
+guard="$(cd "$(dirname "$0")" && pwd)/runpod-endpoint-guard"
+
+verify_template() {
+  local template_id="${1:-}"
+  local revision="${RUNPOD_EMBEDDING_MODEL_REFERENCE##*:}"
+  local arguments=(
+    template
+    --name "$RUNPOD_EMBEDDING_TEMPLATE_NAME"
+    --image "$RUNPOD_EMBEDDING_WORKER_IMAGE"
+    --container-disk-gb "${RUNPOD_EMBEDDING_CONTAINER_DISK_GB:-20}"
+    --env "MODEL_NAMES=$RUNPOD_EMBEDDING_MODEL"
+    --env "MODEL_REVISION=$revision"
+    --env "BATCH_SIZES=${RUNPOD_EMBEDDING_BATCH_SIZE:-32}"
+    --env 'BACKEND=torch'
+    --env 'DTYPES=auto'
+    --env 'RUNPOD_MAX_CONCURRENCY=1'
+    --env 'JOB_SEARCH_EMBEDDING_PROTOCOL=job_search_infinity_exact_v1'
+    --env 'HF_HOME=/runpod-volume/huggingface-cache'
+    --env 'HF_HUB_CACHE=/runpod-volume/huggingface-cache/hub'
+    --env 'HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface-cache/hub'
+    --env 'HF_HUB_OFFLINE=1'
+    --env 'TRANSFORMERS_OFFLINE=1'
+    --env 'INFINITY_TRUST_REMOTE_CODE=false'
+    --env "INFINITY_SERVED_MODEL_NAME=$RUNPOD_EMBEDDING_MODEL"
+    --env 'INFINITY_ANONYMOUS_USAGE_STATS=0'
+    --env 'DO_NOT_TRACK=1'
+  )
+  if [[ -n "$template_id" ]]; then
+    arguments+=(--template-id "$template_id")
+  fi
+  "$guard" "${arguments[@]}"
+}
+
+verify_endpoint() {
+  local selector="$1"
+  local value="$2"
+  local revision="${RUNPOD_EMBEDDING_MODEL_REFERENCE##*:}"
+  "$guard" endpoint \
+    "$selector" "$value" \
+    --expected-name "$RUNPOD_EMBEDDING_ENDPOINT_NAME" \
+    --template-id "$RUNPOD_EMBEDDING_TEMPLATE_ID" \
+    --template-name "$RUNPOD_EMBEDDING_TEMPLATE_NAME" \
+    --image "$RUNPOD_EMBEDDING_WORKER_IMAGE" \
+    --container-disk-gb "${RUNPOD_EMBEDDING_CONTAINER_DISK_GB:-20}" \
+    --idle-timeout "${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}" \
+    --execution-timeout "${RUNPOD_EMBEDDING_EXECUTION_TIMEOUT:-900}" \
+    --model-reference "$RUNPOD_EMBEDDING_MODEL_REFERENCE" \
+    --env "MODEL_NAMES=$RUNPOD_EMBEDDING_MODEL" \
+    --env "MODEL_REVISION=$revision" \
+    --env "BATCH_SIZES=${RUNPOD_EMBEDDING_BATCH_SIZE:-32}" \
+    --env 'BACKEND=torch' \
+    --env 'DTYPES=auto' \
+    --env 'RUNPOD_MAX_CONCURRENCY=1' \
+    --env 'JOB_SEARCH_EMBEDDING_PROTOCOL=job_search_infinity_exact_v1' \
+    --env 'HF_HOME=/runpod-volume/huggingface-cache' \
+    --env 'HF_HUB_CACHE=/runpod-volume/huggingface-cache/hub' \
+    --env 'HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface-cache/hub' \
+    --env 'HF_HUB_OFFLINE=1' \
+    --env 'TRANSFORMERS_OFFLINE=1' \
+    --env 'INFINITY_TRUST_REMOTE_CODE=false' \
+    --env "INFINITY_SERVED_MODEL_NAME=$RUNPOD_EMBEDDING_MODEL" \
+    --env 'INFINITY_ANONYMOUS_USAGE_STATS=0' \
+    --env 'DO_NOT_TRACK=1'
+}
+action="${1:-}"
+case "$action" in
+  check)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    check_cli
+    printf 'Runpod CLI and credentials are ready.\n'
+    ;;
+  template)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_template
+    printf '%s\n' \
+      "template_name=$RUNPOD_EMBEDDING_TEMPLATE_NAME" \
+      "worker_image=$RUNPOD_EMBEDDING_WORKER_IMAGE" \
+      "model=$RUNPOD_EMBEDDING_MODEL" \
+      "model_reference=$RUNPOD_EMBEDDING_MODEL_REFERENCE" \
+      "batch_size=${RUNPOD_EMBEDDING_BATCH_SIZE:-32}" \
+      'max_concurrency=1'
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    revision="${RUNPOD_EMBEDDING_MODEL_REFERENCE##*:}"
+    printf -v template_env '%s' \
+      '{"MODEL_NAMES":"'"$RUNPOD_EMBEDDING_MODEL"'","MODEL_REVISION":"'"$revision"'","BATCH_SIZES":"'"${RUNPOD_EMBEDDING_BATCH_SIZE:-32}"'","BACKEND":"torch","DTYPES":"auto","RUNPOD_MAX_CONCURRENCY":"1","JOB_SEARCH_EMBEDDING_PROTOCOL":"job_search_infinity_exact_v1","HF_HOME":"/runpod-volume/huggingface-cache","HF_HUB_CACHE":"/runpod-volume/huggingface-cache/hub","HUGGINGFACE_HUB_CACHE":"/runpod-volume/huggingface-cache/hub","HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1","INFINITY_TRUST_REMOTE_CODE":"false","INFINITY_SERVED_MODEL_NAME":"'"$RUNPOD_EMBEDDING_MODEL"'","INFINITY_ANONYMOUS_USAGE_STATS":"0","DO_NOT_TRACK":"1"}'
+    create_status=0
+    runpodctl template create \
+      --name "$RUNPOD_EMBEDDING_TEMPLATE_NAME" \
+      --image "$RUNPOD_EMBEDDING_WORKER_IMAGE" \
+      --container-disk-in-gb "${RUNPOD_EMBEDDING_CONTAINER_DISK_GB:-20}" \
+      --env "$template_env" \
+      --serverless || create_status=$?
+    if (( create_status != 0 )); then
+      >&2 printf 'Create returned status %s; reconciling by exact readback before any retry.\n' \
+        "$create_status"
+    fi
+    if ! template_id="$(verify_eventually verify_template)"; then
+      fail 'template create outcome is unresolved; inspect Runpod and reconcile the exact ID before rerunning'
+    fi
+    printf 'Verified template id: %s\n' "$template_id"
+    ;;
+  deploy)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_deploy
+    printf '%s\n' \
+      "endpoint_name=$RUNPOD_EMBEDDING_ENDPOINT_NAME" \
+      "template_id=$RUNPOD_EMBEDDING_TEMPLATE_ID" \
+      "gpu_id=$RUNPOD_EMBEDDING_GPU_ID" \
+      'workers_min=0' \
+      'workers_max=1' \
+      "idle_timeout=${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}" \
+      "execution_timeout=${RUNPOD_EMBEDDING_EXECUTION_TIMEOUT:-900}"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    create_status=0
+    runpodctl serverless create \
+      --name "$RUNPOD_EMBEDDING_ENDPOINT_NAME" \
+      --template-id "$RUNPOD_EMBEDDING_TEMPLATE_ID" \
+      --gpu-id "$RUNPOD_EMBEDDING_GPU_ID" \
+      --model-reference "$RUNPOD_EMBEDDING_MODEL_REFERENCE" \
+      --workers-min 0 \
+      --workers-max 1 \
+      --idle-timeout "${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}" \
+      --execution-timeout "${RUNPOD_EMBEDDING_EXECUTION_TIMEOUT:-900}" || create_status=$?
+    if (( create_status != 0 )); then
+      >&2 printf 'Create returned status %s; reconciling by exact readback before any retry.\n' \
+        "$create_status"
+    fi
+    if ! endpoint_id="$(verify_eventually verify_endpoint --name "$RUNPOD_EMBEDDING_ENDPOINT_NAME")"; then
+      fail 'endpoint create outcome is unresolved; inspect Runpod and reconcile the exact ID before rerunning'
+    fi
+    printf 'Verified endpoint id: %s\n' "$endpoint_id"
+    ;;
+  wake)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime
+    printf 'endpoint_id=%s workers_min=0 workers_max=1 idle_timeout=%s execution_timeout=%s\n' \
+      "$RUNPOD_EMBEDDING_ENDPOINT_ID" \
+      "${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}" \
+      "${RUNPOD_EMBEDDING_EXECUTION_TIMEOUT:-900}"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    runpodctl serverless update "$RUNPOD_EMBEDDING_ENDPOINT_ID" \
+      --workers-min 0 --workers-max 1 \
+      --idle-timeout "${RUNPOD_EMBEDDING_IDLE_TIMEOUT:-300}"
+    verify_endpoint --endpoint-id "$RUNPOD_EMBEDDING_ENDPOINT_ID" >/dev/null
+    printf 'Verified workers_min=0 and workers_max=1.\n'
+    ;;
+  status)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    validate_runtime
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_EMBEDDING_ENDPOINT_ID" >/dev/null
+    runpodctl serverless get "$RUNPOD_EMBEDDING_ENDPOINT_ID"
+    runpodctl serverless health "$RUNPOD_EMBEDDING_ENDPOINT_ID"
+    ;;
+  smoke)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime
+    printf 'A validated embedding request will be submitted to %s.\n' \
+      "$RUNPOD_EMBEDDING_ENDPOINT_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_EMBEDDING_ENDPOINT_ID" >/dev/null
+    "$guard" smoke-embedding \
+      --endpoint-id "$RUNPOD_EMBEDDING_ENDPOINT_ID" \
+      --model "$RUNPOD_EMBEDDING_MODEL" \
+      --revision "${RUNPOD_EMBEDDING_MODEL_REFERENCE##*:}" \
+      --dimensions "${RUNPOD_EMBEDDING_DIMENSIONS:-768}"
+    ;;
+  delete)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_runtime
+    printf 'Endpoint %s will be permanently deleted.\n' \
+      "$RUNPOD_EMBEDDING_ENDPOINT_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    verify_endpoint --endpoint-id "$RUNPOD_EMBEDDING_ENDPOINT_ID" >/dev/null
+    runpodctl serverless delete "$RUNPOD_EMBEDDING_ENDPOINT_ID"
+    ;;
+  delete-template)
+    [[ $# -le 2 ]] || { usage; exit 2; }
+    validate_template
+    validate_id RUNPOD_EMBEDDING_TEMPLATE_ID
+    printf 'Template %s will be permanently deleted.\n' \
+      "$RUNPOD_EMBEDDING_TEMPLATE_ID"
+    require_apply "$action" "${2:-}" || exit 0
+    check_cli
+    verify_template "$RUNPOD_EMBEDDING_TEMPLATE_ID" >/dev/null
+    runpodctl template delete "$RUNPOD_EMBEDDING_TEMPLATE_ID"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
