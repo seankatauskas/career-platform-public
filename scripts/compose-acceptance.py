@@ -85,6 +85,9 @@ def main():
     compose_file = temporary / "compose.cloud.yaml"
     shutil.copyfile(repo / "compose.cloud.yaml", compose_file)
     compose_prefix = ["docker", "compose", "--project-name", project, "--file", str(compose_file)]
+    mail_overlay = repo / "compose.mail.yaml"
+    if mail_overlay.is_file():
+        compose_prefix.extend(["--file", str(mail_overlay)])
     socket_volume = None
     state_volumes = {}
     created_volumes = []
@@ -135,12 +138,14 @@ def main():
                   "outlook_client_id": "", "scraper_contact": "", "hermes_telegram_target": "",
                   "shortlist_notifications_enabled": False, "remote_mail_inference_enabled": False}
         private_json(data / "private/config.json", config)
-        for name in ("inference.json", "resume-model.json"):
+        for name in ("inference.json", "resume-model.json", "mail-inference.json"):
             private_json(data / "private" / name, {})  # Mounted, but intentionally unconfigured.
         for name, value in (("mcp-token", secrets.token_urlsafe(48).encode()), ("portable-master-key", secrets.token_bytes(32)), ("runpod-api-key", b"unused-fixture-key")):
             (data / "private" / name).write_bytes(value)
             (data / "private" / name).chmod(0o600)
         private_json(data / "materialized-secrets.json", {})
+        (data / "private/openrouter-api-key").write_text("fictional-mail-key\n")
+        (data / "private/openrouter-api-key").chmod(0o600)
         return config
 
     def use_data(data):
@@ -277,6 +282,11 @@ print(json.dumps({'supervisor_exec':True,'temporary_exec_blocked':True}))
         compose("up", "--detach", "--no-build", *SERVICES, timeout=200)
         await_healthy()
         report["checks"].append("All five production Compose services are healthy with generated fixture configuration.")
+        if mail_overlay.is_file():
+            for service in SERVICES:
+                mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("mail-inference.json","openrouter-api-key")}))')
+                assert all(value == (service == "core") for value in mounts.values()), service
+            report["checks"].append("Only core receives the dedicated mail profile and OpenRouter key; all other service boundaries remain unchanged.")
 
         dashboard = execute("dashboard", 'import json,urllib.request; print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:28766/api/v1/ops"))))')
         assert dashboard["health"]

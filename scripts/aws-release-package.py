@@ -19,7 +19,7 @@ import tarfile
 
 
 ROOT_FILES = frozenset({
-    "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "Dockerfile", "Dockerfile.hermes", ".dockerignore", "requirements/cloud.txt",
+    "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "Dockerfile", "Dockerfile.hermes", ".dockerignore", "requirements/cloud.txt",
     "job_search/collection/boards.seed.json", "scripts/job-search-ops",
     "scripts/job-search-seed",
 })

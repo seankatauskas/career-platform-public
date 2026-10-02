@@ -169,7 +169,7 @@ function routeConsole() {
   const nextId = view === "applications" ? id : "";
   consoleState.epoch += 1;
   if (nextId !== previousId) consoleState.workspace = null;
-  Object.assign(consoleState, {view, applicationId: nextId, settingsPage, tab: ["overview", "messages", "documents"].includes(tab) ? tab : "overview"});
+  Object.assign(consoleState, {view, applicationId: nextId, settingsPage, tab: ["overview", "messages", "answers", "documents"].includes(tab) ? tab : "overview"});
   const canonical = view === "ops" || view === "career" ? `#settings/${settingsPages[view]}`
     : view === "settings" ? (settingsPage === "home" ? "#settings" : `#settings/${settingsPage}`)
     : view === "applications" ? (id ? applicationHref(id, consoleState.tab) : "#applications")

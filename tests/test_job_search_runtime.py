@@ -903,6 +903,37 @@ def test_work_item_lineage_is_immutable() -> None:
                 raise AssertionError("work lineage was mutated")
 
 
+def test_outlook_poll_interval_changes_only_mail_and_survives_reseeding() -> None:
+    from job_search.scheduler import seed_default_schedules
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        settings = {"version": 1, "project_root": str(root),
+                    "outlook_client_id": "12345678-1234-1234-1234-123456789abc"}
+        config = RuntimeConfigV1.from_mapping(settings)
+        database.prepare_database(config.application_db, "2026-09-02T12:00:00Z")
+        seed_default_schedules(config.application_db, NOW, config.environment({}))
+        slower = RuntimeConfigV1.from_mapping({**settings, "outlook_poll_interval_minutes": 15})
+        env = slower.environment({"JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES": "1"})
+        assert env["JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES"] == "15"
+        seed_default_schedules(config.application_db, NOW, env)
+        seed_default_schedules(config.application_db, NOW, env)
+        with connect(config.application_db) as con:
+            rows = {r["task_kind"]: dict(r) for r in con.execute("SELECT * FROM schedule_specs")}
+        mail = rows["outlook.mail.sync"]
+        assert mail["schedule_key"] == "outlook.mail.five_minute"
+        assert json.loads(mail["schedule_json"])["minutes"] == 15
+        assert mail["next_due_at"] == "2026-09-02T12:15:00Z"
+        assert json.loads(rows["outlook.actions.execute"]["schedule_json"])["minutes"] == 5
+        assert json.loads(rows["system.worker_tick"]["schedule_json"])["minutes"] == 5
+        for invalid in (True, 0, -1, 1441, 1.5, "15"):
+            try:
+                RuntimeConfigV1.from_mapping({**settings, "outlook_poll_interval_minutes": invalid})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid polling interval accepted")
+
+
 def main() -> None:
     tests = [
         value for name, value in sorted(globals().items()) if name.startswith("test_")

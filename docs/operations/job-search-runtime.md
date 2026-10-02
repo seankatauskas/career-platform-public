@@ -25,6 +25,26 @@ notification defaults, and optional Hermes container/image/data/workspace/execut
 delivery target. It also accepts the optional inference profile, portable encryption
 key, resume-lab database/artifact root and model config, document-tool socket, and
 pinned Tectonic executable/bundle/version documented in `docs/resumes/resume-lab-runbook.md`.
+`mail_inference_config` optionally selects a dedicated owner-only inference profile
+for mail classification and temporal extraction. It takes precedence over the shared
+`inference_config` without changing salary, preference, or embedding providers.
+An invalid dedicated profile fails closed; it never falls back to the shared model.
+NuExtract3 is rejected for mail because its extraction-template protocol is not
+compatible with the mail JSON adapter.
+
+`remote_mail_temporal_enabled` is a strict boolean (default `true` for compatibility).
+Set it to `false` for remote status classification only: no remote deadline or
+interview-time extraction calls are made. The main remote-mail opt-in still gates
+all remote mail inference. A model's classification smoke test does not establish
+correct time-zone or daylight-saving conversion; validate temporal behavior separately.
+
+`outlook_poll_interval_minutes` sets only mailbox polling (integer 1–1440, default
+5). For example, 15 checks on quarter-hour boundaries, dispatched on the next core
+worker tick. It does not slow approved actions, notifications, or other schedules.
+The historical `outlook.mail.five_minute` schedule key stays stable to preserve its
+history; the actual interval is stored in its schedule JSON. Unchanged messages are
+not reclassified on each poll, so fewer polls primarily reduce polling overhead.
+
 `remote_mail_inference_enabled` is a strict boolean and defaults to `false`: configuring
 the shared inference profile alone never permits mail or attachment text to leave the
 runtime. Set it to `true` only after approving that egress. An explicit

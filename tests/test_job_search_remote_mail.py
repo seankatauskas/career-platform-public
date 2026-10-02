@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from job_search.inference import GenerationResult
@@ -21,6 +22,7 @@ from job_search.mail.model import LocalCommandClassifier, ModelExecutionError
 from job_search.mail.remote import MAX_REMOTE_TEMPORAL_SOURCE_CHARS
 from job_search.mail.temporal import TemporalExtractionError, TemporalSource
 from job_search.runtime import RuntimeConfigV1, _configured_mail_models
+from job_search.dependency_health import dependency_health
 
 
 NOW = "2026-09-03T12:00:00Z"
@@ -408,6 +410,107 @@ def test_runtime_requires_separate_opt_in_and_keeps_local_mail_precedence() -> N
             assert "at least 4096" in str(exc)
         else:
             raise AssertionError("undersized remote mail output budget was accepted")
+
+
+def test_dedicated_mail_profile_does_not_change_shared_inference() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        shared = _inference_profile(root, "shared.json")
+        mail = _inference_profile(root, "mail.json")
+        shared_value = json.loads(shared.read_text())
+        shared_value["structured_generation"]["model"] = "numind/NuExtract3"
+        shared.write_text(json.dumps(shared_value))
+        value = json.loads(mail.read_text())
+        value["structured_generation"] = {
+            "kind": "openrouter", "model": "example/mail-model", "credential_file": "api-key",
+            "timeout_seconds": 60, "max_response_bytes": 65536,
+            "max_input_tokens": 32768, "default_max_output_tokens": 4096,
+        }
+        mail.write_text(json.dumps(value))
+        config = RuntimeConfigV1.from_mapping({
+            "version": 1, "project_root": str(root), "inference_config": str(shared),
+            "mail_inference_config": "mail.json", "remote_mail_inference_enabled": True,
+        })
+        assert config.mail_inference_config == mail.resolve()
+        classifier, _, temporal, _ = _configured_mail_models(config, {})
+        assert classifier.provenance["model"] == "example/mail-model"
+        assert temporal.provenance["model"] == "example/mail-model"
+        assert config.environment({})["JOB_SEARCH_INFERENCE_CONFIG"] == str(shared.resolve())
+        assert json.loads(shared.read_text())["structured_generation"]["model"] == "numind/NuExtract3"
+        assert dependency_health(config)["inference"]["remote_mail"]["active"]
+        assert classifier.provenance["provider"] == "openrouter"
+        status_only = replace(config, remote_mail_temporal_enabled=False)
+        classifier_only, _, no_temporal, _ = _configured_mail_models(status_only, {})
+        assert isinstance(classifier_only, RemoteMailClassifier) and no_temporal is None
+        embedded = RuntimeConfigV1.from_mapping({
+            "version": 1, "project_root": str(root), "mail_inference_config": str(mail),
+            "mail_inference_profile": value,
+        })
+        assert embedded.mail_inference_profile == value
+        assert "mail_inference_profile" not in embedded.public_mapping()
+        no_key_profile = {**value, "structured_generation": {**value["structured_generation"], "credential_file": "/missing/core-only-key"}}
+        # Non-mail containers can read runtime config without receiving this key.
+        RuntimeConfigV1.from_mapping({"version": 1, "mail_inference_config": str(mail), "mail_inference_profile": no_key_profile})
+        try:
+            RuntimeConfigV1.from_mapping({"version": 1, "mail_inference_config": str(mail), "mail_inference_profile": {"credential": "not-allowed"}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("malformed embedded profile accepted")
+        # A missing/invalid shared profile does not choose a different mail model.
+        independent = replace(config, inference_config=root / "missing-shared.json")
+        assert dependency_health(independent)["inference"]["remote_mail"]["active"]
+        assert _configured_mail_models(independent, {})[0].provenance["model"] == "example/mail-model"
+        # Explicitly selected invalid mail profiles fail closed, never use Runpod.
+        broken = replace(config, mail_inference_config=root / "missing-mail.json")
+        try:
+            _configured_mail_models(broken, {})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid mail configuration fell back to shared model")
+        health = dependency_health(broken)
+        assert not health["inference"]["remote_mail"]["active"]
+        assert "remote_mail_inference" in health["issues"]
+        assert _configured_mail_models(replace(broken, remote_mail_inference_enabled=False), {})[0] is None
+
+
+def test_remote_temporal_switch_is_a_strict_boolean() -> None:
+    for value in ("false", 0, 1, None):
+        try:
+            RuntimeConfigV1.from_mapping({"version": 1, "remote_mail_temporal_enabled": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("non-boolean temporal switch accepted")
+
+
+def test_nuextract_mail_is_rejected_before_a_request_or_ready_report() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        profile = _inference_profile(root)
+        value = json.loads(profile.read_text())
+        value["structured_generation"]["model"] = "numind/NuExtract3"
+        profile.write_text(json.dumps(value))
+        config = replace(RuntimeConfigV1.defaults(root), inference_config=profile, remote_mail_inference_enabled=True)
+        try:
+            _configured_mail_models(config, {})
+        except ValueError as exc:
+            assert "NuExtract3 is incompatible" in str(exc)
+        else:
+            raise AssertionError("NuExtract was accepted for generic mail requests")
+        health = dependency_health(config)
+        assert not health["inference"]["remote_mail"]["active"]
+        assert "remote_mail_inference" in health["issues"]
+
+
+def test_mail_prompt_distinguishes_receipt_from_recruiter_followup() -> None:
+    from job_search.mail.remote import _request_messages, REMOTE_MAIL_ADAPTER_VERSION
+    prompt = _request_messages({"task": "classify_job_application_email"})[0]["content"]
+    assert "submission_confirmed, not recruiter_contact" in prompt
+    assert "payload must always be the empty object {}" in prompt
+    assert "Other recruiter follow-ups" in prompt
+    assert REMOTE_MAIL_ADAPTER_VERSION == "remote-mail-json-v4"
 
 
 def main() -> None:

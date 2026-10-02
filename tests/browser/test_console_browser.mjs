@@ -84,7 +84,7 @@ try {
   assert.equal(await page.locator('#job-preview').getByRole('link', {name:'Open original posting'}).count(), 1);
   await page.getByRole('button', {name:'Close job preview'}).click();
   assert.equal(await page.locator('#application-list').isVisible(), false);
-  assert.deepEqual(await page.locator('.workspace-tabs a').allTextContents(), ['Overview', 'Messages', 'Documents']);
+  assert.deepEqual(await page.locator('.workspace-tabs a').allTextContents(), ['Overview', 'Messages', 'Answers', 'Documents']);
   await page.locator('.workspace-back').click();
   assert.equal(await page.locator('#application-search').inputValue(), 'Cedar');
   await page.fill('#application-search', 'Cedar');
@@ -253,7 +253,10 @@ try {
   assert.match(await applicationRole.locator('.job-location').innerText(), /Chicago, IL/);
   assert.equal(await applicationRole.locator('.job-employment').innerText(), 'Full Time');
   assert.equal(await page.locator('#workspace-job-preview').getByRole('link', {name:'Open posting'}).getAttribute('href'), 'https://example.test/jobs/1');
-  report.checks.push('Dedicated record provides only Overview, Messages and Documents; recorded PDFs remain readable/downloadable without preparation controls.');
+  await page.locator('.workspace-tabs a[data-tab="answers"]').click();
+  await page.locator('#workspace-answers').getByText(/No answers were captured/).waitFor();
+  await page.locator('.workspace-tabs a[data-tab="overview"]').click();
+  report.checks.push('Dedicated record provides Overview, Messages, Answers and Documents; old records have an honest empty answer state and PDFs remain readable/downloadable.');
   const submittedAt = await page.evaluate(() => consoleState.workspace.application.submitted_at);
   assert(submittedAt);
   assert.equal(await applicationRole.locator('time.applied-date').getAttribute('datetime'), submittedAt);

@@ -197,6 +197,9 @@ def seed_default_schedules(
     ats_enabled = has_real_scraper_contact(environment)
     outlook_enabled = has_outlook_config(environment)
     notifications_enabled = has_notification_config(environment)
+    mail_minutes = environment.get("JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES", "5")
+    if not isinstance(mail_minutes, str) or not mail_minutes.isascii() or not mail_minutes.isdecimal() or not 1 <= int(mail_minutes) <= 1440:
+        raise ValueError("Outlook poll interval must be an integer from 1 to 1440")
     with connect(db_path) as con:
         from .activation import disabled_tasks
         paused_tasks = set(disabled_tasks(con))
@@ -224,8 +227,12 @@ def seed_default_schedules(
                 enabled = 0
             if spec.task_kind in paused_tasks:
                 enabled = 0
-            schedule_json = canonical_json(spec.schedule)
-            due = utc_stamp(next_occurrence(spec.schedule, now_utc))
+            schedule = dict(spec.schedule)
+            if spec.task_kind == "outlook.mail.sync":
+                # Keep the historical schedule key and execution history.
+                schedule["minutes"] = int(mail_minutes)
+            schedule_json = canonical_json(schedule)
+            due = utc_stamp(next_occurrence(schedule, now_utc))
             con.execute(
                 "INSERT INTO schedule_specs "
                 "(schedule_key,task_kind,schedule_json,enabled,coalesce,next_due_at,updated_at,enabled_since) "
@@ -234,7 +241,8 @@ def seed_default_schedules(
                 "enabled_since=CASE WHEN excluded.enabled=0 THEN NULL "
                 "WHEN schedule_specs.enabled=0 THEN excluded.enabled_since "
                 "ELSE schedule_specs.enabled_since END,"
-                "next_due_at=CASE WHEN schedule_specs.enabled=0 AND excluded.enabled=1 "
+                "next_due_at=CASE WHEN (schedule_specs.enabled=0 AND excluded.enabled=1) "
+                "OR schedule_specs.schedule_json<>excluded.schedule_json "
                 "THEN excluded.next_due_at ELSE schedule_specs.next_due_at END,"
                 "enabled=excluded.enabled,coalesce=excluded.coalesce,updated_at=excluded.updated_at",
                 (

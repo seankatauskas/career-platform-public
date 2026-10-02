@@ -206,6 +206,12 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     dashboard = compose.split("\n  dashboard:\n", 1)[1].split("\n  mcp:\n", 1)[0]
     mcp = compose.split("\n  mcp:\n", 1)[1].split("\n  core:\n", 1)[0]
     core = compose.split("\n  core:\n", 1)[1].split("\n  model:\n", 1)[0]
+    mail = (ROOT / "compose.mail.yaml").read_text(encoding="utf-8")
+    assert "  core:" in mail
+    assert all("  " + name + ":" not in mail for name in ("dashboard", "mcp", "model", "tools", "hermes"))
+    assert mail.count("create_host_path: false") == 2
+    assert "target: /run/job-search/openrouter-api-key" in mail
+    assert "target: /run/job-search/mail-inference.json" in mail
     assert "network_mode: host" in compose and "ports:" not in compose
     assert 'JOB_SEARCH_PLATFORM:-linux/amd64' in compose
     assert compose.count("replicas: 1") == 5

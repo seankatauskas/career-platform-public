@@ -33,6 +33,7 @@ job_search/salary/web/review/*
 !job_search/salary/web/review/index.html
 !job_search/salary/web/review/styles.css
 !job_search/actions.py
+!job_search/application_answers.py
 !job_search/autofill.py
 !job_search/availability.py
 !job_search/cloud.py

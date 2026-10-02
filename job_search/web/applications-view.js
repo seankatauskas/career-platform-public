@@ -16,11 +16,12 @@ document.querySelector("#applications").innerHTML = `
         <aside id="application-workspace" aria-label="Application detail" hidden>
           <header class="workspace-heading"><p class="workspace-label">Application record</p><h3 id="workspace-title" tabindex="-1"></h3><p id="workspace-company" class="kicker"></p><div id="workspace-posting-dates"></div><div id="workspace-job-preview"></div><div id="workspace-status"></div></header>
           <nav class="workspace-tabs" aria-label="Application detail tabs">
-            <a data-tab="overview" href="#applications">Overview</a><a data-tab="messages" href="#applications">Messages</a><a data-tab="documents" href="#applications">Documents</a>
+            <a data-tab="overview" href="#applications">Overview</a><a data-tab="messages" href="#applications">Messages</a><a data-tab="answers" href="#applications">Answers</a><a data-tab="documents" href="#applications">Documents</a>
           </nav>
           <div id="workspace-feedback" role="status" hidden></div>
           <div id="workspace-overview"><div id="workspace-review-notices"></div><div id="workspace-interviews"></div><h4>Application history</h4><div id="timeline" class="timeline"></div><details id="workspace-posting-history"><summary>Posting history</summary><div id="workspace-job-history"></div></details></div>
           <div id="workspace-messages" hidden></div>
+          <div id="workspace-answers" hidden></div>
           <div id="workspace-documents" hidden></div>
         </aside>
       </div>
@@ -101,7 +102,7 @@ async function refreshApplicationWorkspace() {
   if (!consoleState.workspace || consoleState.workspace.application.application_id !== id) {
     document.querySelector("#workspace-company").textContent = "Application";
     document.querySelector("#workspace-title").textContent = "Loading…";
-    for (const selector of ["#workspace-status", "#workspace-job-preview", "#workspace-posting-dates", "#workspace-review-notices", "#workspace-interviews", "#timeline", "#workspace-messages", "#workspace-documents", "#workspace-job-history"]) document.querySelector(selector).replaceChildren();
+    for (const selector of ["#workspace-status", "#workspace-job-preview", "#workspace-posting-dates", "#workspace-review-notices", "#workspace-interviews", "#timeline", "#workspace-messages", "#workspace-answers", "#workspace-documents", "#workspace-job-history"]) document.querySelector(selector).replaceChildren();
   }
   updateWorkspaceTabs();
   try {
@@ -181,6 +182,7 @@ async function refreshApplicationWorkspace() {
       messages.append(article);
     });
     renderApplicationDocuments(data.documents || []);
+    renderApplicationAnswers(data.answer_snapshots || []);
   } catch (error) {
     if (epoch !== consoleState.epoch) return;
     const feedback = document.querySelector("#workspace-feedback"); feedback.hidden = false;
@@ -217,6 +219,38 @@ function renderApplicationDocuments(documents) {
     } else item.append(node("p", "section-note", document.reason || "The recorded document is unavailable."));
     root.append(item);
   }
+}
+
+function renderApplicationAnswers(snapshots) {
+  const root=document.querySelector('#workspace-answers');
+  root.replaceChildren(node('h4','','Saved application answers'));
+  if(!snapshots.length) {
+    root.append(node('p','empty','No answers were captured for this application. Answer capture starts with browser extension version 1.3.'));
+    return;
+  }
+  root.append(node('p','help','Captured when you attempted to submit. Earlier form steps are included; this record does not confirm which answers the employer accepted.'));
+  snapshots.forEach((saved,index)=>{
+    const history=node('details','answer-snapshot'); history.open=index===0;
+    const snapshot=saved.snapshot;
+    history.append(node('summary','',`${index===0?'Latest capture':'Earlier capture'} · ${displayDate(saved.captured_at)} · ${snapshot.fields.length} fields`));
+    if(snapshot.omitted_fields || snapshot.truncated_values) history.append(node('p','section-note',`Capture limits: ${snapshot.omitted_fields} fields omitted; ${snapshot.truncated_values} long values shortened.`));
+    const priority=field=>['textarea','richtext'].includes(field.control)?0:field.control==='text'?1:2;
+    for(const field of [...snapshot.fields].sort((a,b)=>priority(a)-priority(b))) {
+      const answer=node('article','application-answer');
+      if(field.section) answer.append(node('p','meta',field.section));
+      answer.append(node('h5','',field.prompt));
+      const value=typeof field.value==='boolean' ? (field.value?'Selected':'Not selected') : Array.isArray(field.value)?field.value.join('\n'):field.value;
+      answer.append(node('p','answer-value',value || 'Not answered'));
+      if(field.control==='file') answer.append(node('p','meta','File names recorded; file contents are not part of this snapshot.'));
+      if(value && typeof field.value!=='boolean') {
+        const copy=node('button','quiet','Copy answer'); copy.type='button';
+        copy.addEventListener('click',async()=>{try {await navigator.clipboard.writeText(value);copy.textContent='Copied';} catch(_) {copy.textContent='Select the text to copy';}});
+        answer.append(copy);
+      }
+      history.append(answer);
+    }
+    root.append(history);
+  });
 }
 
 async function loadApplications() {

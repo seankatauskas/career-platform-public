@@ -52,6 +52,14 @@ document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();
 TRACKING_FORM = b"""<!doctype html><html><head><title>Engineer</title></head><body>
 <h1>Engineer</h1><form><label>First name<input autocomplete="given-name" id="first"></label>
 <label>Email<input id="email" type="email" required></label>
+<label>Why this company?<textarea id="why" name="why"></textarea></label>
+<label>Describe your company infrastructure experience<textarea id="experience"></textarea></label>
+<span id="rich-label">Tell us about a project</span><div id="rich" role="textbox" contenteditable="true" aria-labelledby="rich-label" style="min-height:2em"></div>
+<label>Desired salary<input id="salary" type="number"></label>
+<label>Location<select id="location"><option value="">Choose</option><option value="remote">Remote</option></select></label>
+<fieldset><legend>Work authorization</legend><label>Yes<input id="authorized" name="authorization" type="radio" value="yes"></label><label>No<input name="authorization" type="radio" value="no"></label></fieldset>
+<label>I agree to the terms<input id="terms" type="checkbox"></label>
+<label>Password<input id="password" type="password"></label><input type="hidden" id="token" value="SECRET-TOKEN">
 <label>Resume<input id="resume" name="resume" type="file"></label>
 <button type="submit" id="submit">Submit application</button></form><h2 role="status" id="outcome"></h2>
 <script>window.submitCount=0;
@@ -117,7 +125,7 @@ def main() -> None:
                     self.end_headers()
                     return
                 size = int(self.headers.get("Content-Length", "0"))
-                if size > 65536:
+                if size > (2 * 1024 * 1024 + 16384 if self.path == '/api/v1/extension/answers' else 65536):
                     self.send_error(413)
                     return
                 body = self.rfile.read(size) if size else None
@@ -185,7 +193,8 @@ def main() -> None:
                     state["redirect"] = command["value"]
                     result = {"changed": True}
                 elif action == "state":
-                    result = {"requests": state["requests"], "timeline": ledger.get_application_timeline(command["application_id"])}
+                    result = {"requests": state["requests"], "timeline": ledger.get_application_timeline(command["application_id"]),
+                              "answers": controller.application_workspace(command["application_id"])["answer_snapshots"]}
                 elif action == "stop":
                     break
                 else:

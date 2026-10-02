@@ -5,6 +5,43 @@ Greenhouse, and Lever, using a local or private Tailscale dashboard. Connect the
 browser once in dashboard Settings. See **Automatic tracking (version 1.1)** below
 for the current flow, evidence states, recovery behavior, and pilot checks.
 
+## Application answer history (version 1.3)
+
+With a connected browser, manually submitting a supported application saves its
+questions and answers to the private application database. Open **Applications →
+the application → Answers** to read or copy them later. Open-text responses appear
+first, with paragraph breaks preserved. Each submission attempt has its own
+timestamped history; failed or unconfirmed attempts can also have saved answers.
+An answer snapshot is not proof that the employer accepted those values.
+
+Capture is separate from autofill: it records readable text inputs, textareas,
+rich-text editors, dropdown selections, radio buttons, checkboxes, and uploaded
+file names, including fields autofill intentionally leaves manual. Files themselves
+are not copied by this feature. Passwords, hidden fields, CAPTCHA, authentication
+codes, payment-card fields, and Social Security numbers are excluded. Supported
+ATS frames and open shadow roots are covered; closed shadow roots and custom
+controls without readable input/accessibility semantics may not be readable.
+
+Edits are captured as you type and merged across form steps. Pending drafts and
+submit snapshots are encrypted in trusted extension storage using the browser's
+pairing credential. They survive worker/browser restarts, and submit snapshots
+retry until the dashboard acknowledges saving them. Encryption is not protection
+against someone with access to the entire browser profile and its credential.
+Unsubmitted local drafts expire after seven days; queued submission snapshots do
+not expire. Disconnecting or uninstalling clears unsynced local data. Opening or
+typing into a form alone does not create an application record.
+
+Capture allows up to 400 fields, 64,000 characters per value, and 1 MiB of field
+data per snapshot, prioritizing prose over other controls. The popup and Answers
+tab warn when these limits omit fields or shorten values. Storage failures are
+reported in the popup; do not disconnect while it reports answers waiting to sync.
+No model/provider call is used. Historical applications cannot be reconstructed
+retroactively from pages that are no longer available.
+
+Deploy the matching dashboard migration/API before installing extension 1.3.
+Reload the unpacked extension and refresh already-open application pages. Existing
+browser pairing remains valid; a new pairing code is not normally needed.
+
 ## Resume attachment (version 1.2)
 
 With a connected browser, **Fill application** fills supported fields and supplies
@@ -66,8 +103,8 @@ from plaintext `approved_answers`. Private values use Keychain-backed encrypted
 persistence with no plaintext fallback. The extension receives assignments only
 for fields detected on the active form, never the full profile or vault.
 
-The extension snapshots eligible final values when you manually submit, but
-does not persist that snapshot in browser storage. Values are staged in dashboard
+The legacy handoff snapshots eligible final values when you manually submit, but
+does not persist that legacy snapshot in browser storage. Values are staged in dashboard
 memory and become durable only when you click **Mark submitted**. Private
 fixed-choice answers can be reused automatically. Custom prose is retained as
 history for a later answer assistant and is not automatically inserted.
@@ -104,6 +141,7 @@ node extension/test_extension.js
 python3 -m tests.test_job_search_extension_cloud
 npm ci --prefix extension
 npx --prefix extension playwright-core install chromium
+node extension/test_answer_capture.mjs
 node extension/test_browser.mjs
 ```
 
@@ -153,9 +191,11 @@ Tracking stores bounded job identity, timestamps and signal metadata. It does no
 read network request bodies, cookies or authorization headers. Credentials are
 restricted to trusted extension contexts. A fingerprint of an explicitly selected
 resume upload may identify an existing private artifact; an unobserved upload is
-recorded as unknown. Form answers are never persisted in browser storage. Eligible
-answers can be staged encrypted on the dashboard for up to 24 hours and are learned
-only after submission succeeds. Tracking still works if answer capture is lost.
+recorded as unknown. Version 1.3 separately preserves application answer history,
+including an encrypted browser retry queue, as described above. Eligible reusable
+autofill answers can still be staged encrypted on the dashboard for up to 24 hours
+and are learned only after submission succeeds. Saving history does not grant
+permission to autofill legal attestations, compensation, or arbitrary prose.
 
 The extension queues observations through dashboard outages and browser restarts,
 retrying with a one-to-five-minute backoff. It never retries employer requests.
@@ -165,7 +205,9 @@ supported ATS frame are outside this version's coverage.
 
 Local Chromium fixtures exercise all three platforms, an embedded form, failed
 requests, uncertain HTTP success, confirmation events, and offline replay after a
-full browser restart. These tests are not certification of every live ATS layout.
+full browser restart. They also verify exact long/multi-step answers, intentional
+blank edits, excluded secrets, and safe dashboard history rendering after reload.
+These tests are not certification of every live ATS layout.
 During the real pilot, choose one genuine application on each platform, submit it
 yourself, and compare the popup, dashboard timeline, and confirmation email. No
 live applications are submitted by automated tests.

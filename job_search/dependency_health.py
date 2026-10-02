@@ -22,7 +22,7 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
         inference_path = None
         inference_path_error = True
     issues: list[str] = []
-    local_mail_selected = config.mail_classifier_config is not None
+    local_mail_selected = bool(config.mail_classifier_config or os.environ.get("JOB_SEARCH_MAIL_CLASSIFIER_CONFIG"))
     remote_mail_requested = (
         config.remote_mail_inference_enabled and not local_mail_selected
     )
@@ -56,12 +56,8 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
     if inference_path_error:
         inference["status"] = "blocked_setup"
         issues.append("inference_configuration")
-        if remote_mail_requested:
-            issues.append("remote_mail_inference")
     elif inference_path is None:
         inference["status"] = "disabled"
-        if remote_mail_requested:
-            issues.append("remote_mail_inference")
     else:
         try:
             from job_search.inference import load_inference_config
@@ -82,20 +78,6 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
                     "embeddings": loaded.embeddings is not None,
                 }
             )
-            if remote_mail_requested:
-                from job_search.mail.remote import TEMPORAL_MAX_OUTPUT_TOKENS
-
-                if (
-                    loaded.structured_generation is None
-                    or loaded.structured_generation.default_max_output_tokens
-                    < TEMPORAL_MAX_OUTPUT_TOKENS
-                ):
-                    inference["status"] = "attention"
-                    issues.append("remote_mail_inference")
-                else:
-                    remote_mail.update(
-                        {"active": True, "status": "configuration_ready"}
-                    )
             if loaded.embeddings is not None:
                 preflight = _preference_embedding_preflight(
                     config.preference_db,
@@ -112,8 +94,19 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
         except (OSError, RuntimeError, ValueError):
             inference["status"] = "blocked_setup"
             issues.append("inference_configuration")
-            if remote_mail_requested:
-                issues.append("remote_mail_inference")
+
+    if remote_mail_requested:
+        try:
+            from .runtime import _configured_remote_mail_profile
+            from .inference.config import load_credential
+
+            mail_profile = _configured_remote_mail_profile(config, os.environ)
+            load_credential(mail_profile.structured_generation.credential_file)
+            remote_mail.update({"active": True, "status": "configuration_ready"})
+        except (OSError, RuntimeError, ValueError):
+            issues.append("remote_mail_inference")
+            if inference["status"] == "configuration_ready":
+                inference["status"] = "attention"
 
     resume_enabled = bool(config.resume_lab_db and config.resume_artifact_root)
     if resume_enabled:
@@ -274,4 +267,3 @@ def _preference_embedding_preflight(
         }
     )
     return report
-

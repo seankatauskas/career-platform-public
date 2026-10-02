@@ -406,6 +406,12 @@ version-1 runtime config must also set `remote_mail_inference_enabled` to the bo
 default is `false`. An explicit `mail_classifier_config` has precedence even when the
 remote opt-in is true and selects the existing local, sandboxed command.
 
+Set `mail_inference_config` to a separate owner-only profile to use a different
+structured-generation model for mail without changing the salary or embedding
+providers. If omitted, the shared profile remains the compatibility default.
+Invalid explicit profiles never fall back. NuExtract3 cannot serve the generic mail
+JSON adapter and is rejected during configuration/readiness checks, before a request.
+
 With that opt-in active, classification sends only the sanitized 2,048-character
 evidence excerpt. Temporal extraction sends at most the first 24,000 characters of an
 eligible archived mail or attachment plus at most twenty candidate applications. Both

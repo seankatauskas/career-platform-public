@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .application_documents import application_documents, application_document_content
 from .browser_tracking import BrowserTracking
+from .application_answers import application_snapshots, save_snapshot, exact_json, MAX_SNAPSHOT_BYTES
 from .job_preview import render_description
 from .autofill import (
     AutofillBroker,
@@ -248,6 +249,7 @@ class DashboardController:
             "job_history": self.application_job_history(application_id),
             "browser_tracking": self.browser_tracking.application_status(application_id),
             "browser_observations": self.browser_tracking.evidence(application_id),
+            "answer_snapshots": application_snapshots(self.ledger.store.db_path, application_id),
             "interviews": [item for item in self.ledger.list_interview_schedules() if item.get("application_id") == application_id],
             "actions": [item for item in self.ledger.list_actions() if item.get("application_id") == application_id],
             "reviews": [item for item in self.ledger.list_attention_items() if item.get("kind") != "action_proposal" and (item.get("application_id") == application_id or application_id in item.get("candidate_application_ids", []))],
@@ -922,6 +924,7 @@ EXTENSION_POST_PATHS = frozenset(
         "/api/v1/extension/assignments",
         "/api/v1/extension/resume",
         "/api/v1/extension/capture",
+        "/api/v1/extension/answers",
         "/api/v1/extension/status",
         "/api/v1/autofill/exchange",
         "/api/v1/autofill/capture",
@@ -1049,10 +1052,11 @@ def make_handler(
             status: int = HTTPStatus.OK,
             session: Optional[_Session] = None,
             new_session: bool = False,
+            exact_text: bool = False,
         ) -> None:
             self._send(
                 status,
-                canonical_json(value).encode("utf-8"),
+                (exact_json(value) if exact_text else canonical_json(value)).encode("utf-8"),
                 "application/json; charset=utf-8",
                 session,
                 new_session,
@@ -1079,7 +1083,8 @@ def make_handler(
                 length = int(raw_length)
             except ValueError as exc:
                 raise ContractError("invalid Content-Length") from exc
-            if length < 0 or length > MAX_REQUEST_BYTES:
+            maximum = MAX_SNAPSHOT_BYTES + 16384 if urlsplit(self.path).path == '/api/v1/extension/answers' else MAX_REQUEST_BYTES
+            if length < 0 or length > maximum:
                 raise _RequestTooLarge
             content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0]
             if content_type.strip().lower() != "application/json":
@@ -1378,7 +1383,7 @@ def make_handler(
                     return
                 match = APPLICATION_WORKSPACE_PATH.fullmatch(path)
                 if match:
-                    self._json(controller.application_workspace(match.group(1)), session=session, new_session=new_session)
+                    self._json(controller.application_workspace(match.group(1)), session=session, new_session=new_session, exact_text=True)
                     return
                 match = APPLICATION_PATH.fullmatch(path)
                 if match:
@@ -1471,6 +1476,8 @@ def make_handler(
                                 result = tracker.resume_attachment(body.get("page_url"))
                             elif path.endswith("/capture"):
                                 result = tracker.stage_capture(device, body)
+                            elif path.endswith("/answers"):
+                                result = save_snapshot(tracker.path, device, body)
                             else:
                                 tracker.maintain_captures()
                                 result = tracker.attempt_status(device, body.get("attempt_id"))

@@ -1063,6 +1063,21 @@ PRAGMA user_version = 12;
 """
 
 
+MIGRATION_013 = r"""
+CREATE TABLE application_answer_snapshots (
+ capture_id TEXT PRIMARY KEY,
+ application_id TEXT NOT NULL REFERENCES applications(application_id),
+ attempt_id TEXT NOT NULL REFERENCES browser_attempts(attempt_id),
+ captured_at TEXT NOT NULL, recorded_at TEXT NOT NULL, page_url TEXT NOT NULL,
+ request_sha256 TEXT NOT NULL, snapshot_json TEXT NOT NULL
+);
+CREATE INDEX application_answers_history ON application_answer_snapshots(application_id,captured_at);
+CREATE TRIGGER application_answers_no_update BEFORE UPDATE ON application_answer_snapshots
+BEGIN SELECT RAISE(ABORT, 'application answer snapshots are immutable'); END;
+PRAGMA user_version = 13;
+"""
+
+
 MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (1, "initial_job_search_ledger", MIGRATION_001),
     (2, "outlook_sync_state", MIGRATION_002),
@@ -1076,6 +1091,7 @@ MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (10, "browser_application_tracking", MIGRATION_010),
     (11, "curated_shortlists", MIGRATION_011),
     (12, "larger_curated_shortlists", MIGRATION_012),
+    (13, "application_answer_history", MIGRATION_013),
 )
 
 

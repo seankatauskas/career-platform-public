@@ -384,12 +384,72 @@ class OperationsTests(unittest.TestCase):
             {"configured": True, "embedding": "migration_required", "private_dashboard": True},
             {"configured": True, "embedding": "identity_mismatch", "private_dashboard": True},
             {"configured": True, "embedding": "ready", "private_dashboard": False},
+            {"configured": True, "embedding": "ready", "private_dashboard": True, "mail_ready": False},
         ]
         for report in reports:
             with self.subTest(report=report), patch.object(ops, "compose", return_value=json.dumps(report)):
                 with self.assertRaises(ops.OpsError): ops.model_readiness(self.c)
         with patch.object(ops, "compose", return_value=json.dumps({"configured": True, "embedding": "ready", "private_dashboard": True})):
             ops.model_readiness(self.c)
+
+    def mail_secret_values(self):
+        profile = {"version": 1, "profile_id": "mail", "embeddings": None,
+                   "structured_generation": {"kind": "openrouter", "model": "example/model",
+                                             "credential_file": "/run/job-search/openrouter-api-key"}}
+        return {"config.json": json.dumps({"mail_inference_config": "/run/job-search/mail-inference.json",
+                                           "mail_inference_profile": profile}),
+                "hermes.env": 'OPENROUTER_API_KEY="fictional-key"\nTELEGRAM_BOT_TOKEN=not-for-core\n'}
+
+    def test_mail_projection_exposes_only_selected_key_and_profile(self):
+        self.assertEqual(ops.mail_secret_projections({"config.json": '{"mail_inference_profile":null}'}), {})
+        self.assertEqual(ops.mail_secret_projections({"config.json": '{}'}), {})
+        values = self.mail_secret_values()
+        projected = ops.mail_secret_projections(values)
+        self.assertEqual(projected["openrouter-api-key"], "fictional-key\n")
+        self.assertEqual(set(projected), {"mail-inference.json", "openrouter-api-key"})
+        self.assertNotIn("not-for-core", json.dumps(projected))
+        self.c["secret_arns"] = {name: name + "-arn" for name in values}
+        responses = [json.dumps({"SecretString": value, "VersionId": name + "-version"}) for name, value in values.items()]
+        with patch.object(ops, "aws", side_effect=responses), patch.object(ops.os, "chown"):
+            ops.materialize_secrets(self.c)
+        for name, value in projected.items():
+            path = self.data / "private" / name
+            self.assertEqual(path.read_text(), value)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(set(ops.secret_versions(self.c)), set(values))
+
+    def test_mail_projection_rejects_missing_duplicate_and_malformed_keys(self):
+        for env in ("", "OPENROUTER_API_KEY=one\nOPENROUTER_API_KEY=two", 'OPENROUTER_API_KEY="unfinished', "OPENROUTER_API_KEY=two words", "OPENROUTER_API_KEY=\nTELEGRAM_BOT_TOKEN=not-a-model-key"):
+            with self.subTest(env=env):
+                values = self.mail_secret_values(); values["hermes.env"] = env
+                with self.assertRaisesRegex(ops.OpsError, "one valid OpenRouter"):
+                    ops.mail_secret_projections(values)
+
+    def test_secret_transaction_restores_projections(self):
+        profile = self.data / "private" / "mail-inference.json"
+        key = self.data / "private" / "openrouter-api-key"
+        profile.write_text("old-profile")
+        with self.assertRaises(RuntimeError):
+            with ops.secret_transaction(self.c):
+                profile.write_text("new-profile"); key.write_text("new-key")
+                raise RuntimeError("interrupted")
+        self.assertEqual(profile.read_text(), "old-profile")
+        self.assertFalse(key.exists())
+
+    def test_mail_overlay_is_opt_in_and_legacy_release_remains_usable(self):
+        release = ops.release_path(self.c)
+        (release / "compose.mail.yaml").write_text("services: {}")
+        config = self.data / "private" / "config.json"
+        config.write_text("{}")
+        with patch.object(ops, "run", return_value="") as run:
+            ops.compose(self.c, "config")
+            self.assertNotIn(str(release / "compose.mail.yaml"), run.call_args.args[0])
+            config.write_text(json.dumps({"mail_inference_config": "/run/job-search/mail-inference.json"}))
+            ops.compose(self.c, "config")
+            self.assertIn(str(release / "compose.mail.yaml"), run.call_args.args[0])
+            (release / "compose.mail.yaml").unlink()
+            ops.compose(self.c, "config")
+            self.assertNotIn(str(release / "compose.mail.yaml"), run.call_args.args[0])
 
     def test_model_readiness_failure_prevents_activation(self):
         with patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "model_readiness", side_effect=ops.OpsError("migration incomplete")), patch.object(ops, "compose") as compose:

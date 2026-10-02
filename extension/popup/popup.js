@@ -49,6 +49,9 @@ async function initialize() {
   if (browserConnected) {
     $("#tracking-status").textContent = tracking.error || tracking.result?.label || (tracking.supported ? "Job recognized. Submit normally; tracking is automatic." : "Connected. Open an Ashby, Greenhouse, or Lever application.");
     if (tracking.queued) $("#tracking-status").textContent += ` ${tracking.queued} observations waiting to sync.`;
+    if (tracking.answer_error) $("#tracking-status").textContent += ` ${tracking.answer_error}`;
+    else if (tracking.answers_queued) $("#tracking-status").textContent += ` ${tracking.answers_queued} answer snapshots waiting to sync.`;
+    else if (tracking.answer_status?.saved) $("#tracking-status").textContent += ` ${tracking.answer_status.field_count} application fields saved.${tracking.answer_status.incomplete ? ' Some fields exceeded capture limits; check Answers in the dashboard.' : ''}`;
     $("#form-status").textContent = tracking.job ? `${tracking.job.ats} · ${tracking.job.board}` : "Browser connected";
     $("#fill").disabled = !tracking.supported;
     $("#mark-submitted").disabled = true;

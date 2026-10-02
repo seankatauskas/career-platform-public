@@ -19,7 +19,7 @@ def private_path(name: str) -> bool:
     return (bool(set(path.parts) & PRIVATE_PARTS)
             or name.lower().endswith(PRIVATE_SUFFIXES)
             or path.name.startswith(("resume-content", "resume-provenance", "Sean_Katauskas_Resume"))
-            or path.name in {"mcp-token", "portable-master-key", "runpod-api-key"}
+            or path.name in {"mcp-token", "portable-master-key", "runpod-api-key", "openrouter-api-key"}
             or (path.name.startswith(".env") and not path.name.endswith(".example")))
 
 def inspect_index(root: Path = ROOT, revision: str | None = None) -> list[str]:

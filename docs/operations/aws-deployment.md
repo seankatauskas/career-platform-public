@@ -452,6 +452,44 @@ Keep automatic retraining and unconfigured resume generation disabled initially.
 
 ## 6. Activate only after the live gates pass
 
+### Dedicated OpenRouter mail inference
+
+Mail can use a separate provider while salary and embeddings keep their Runpod
+profile. First deploy a release supporting `mail_inference_config`, with mail
+inference still disabled. No Terraform, instance replacement, or new IAM access is
+needed when reusing the owner's existing Hermes OpenRouter key.
+
+In the existing `config.json` Secrets Manager value, set
+`mail_inference_config` to `/run/job-search/mail-inference.json` and add
+`mail_inference_profile`, containing a complete version-1 generation-only inference
+profile (`embeddings: null`, `structured_generation.kind: "openrouter"`). Its
+`credential_file` must be `/run/job-search/openrouter-api-key`. Choose the reviewed
+model explicitly and allow at least 4096 output tokens. Keep `inference_config`
+and its Runpod secret unchanged.
+Use [`examples/mail-inference.openrouter.example.json`](../../examples/mail-inference.openrouter.example.json)
+as the profile template, replacing its model placeholder before use.
+
+During `secrets`, the host projects this embedded profile into its own file and
+copies only `OPENROUTER_API_KEY` from the pinned `hermes.env` secret version into
+the dedicated key file. Both files are owner-only and covered by secret-update
+rollback. Recovery derives them from the recorded original secret versions; neither
+requires a separate secret inventory entry. The optional `compose.mail.yaml` overlay
+mounts them read-only into **core only**, not the model worker, dashboard, MCP, or
+document tools. Hermes's other environment entries are never exposed to core.
+
+Pause through the operations command, materialize secrets, and run a bounded mail
+provider smoke test before setting `remote_mail_inference_enabled: true` and
+activating. That explicit opt-in authorizes mail and eligible attachment text to the
+selected hosted model; it does not enable ranking, salary, or notifications. Model
+proposals still pass the existing policy/review gates. Configuration readiness is
+not evidence of a successful external request.
+For a status-only pilot, set `remote_mail_temporal_enabled: false`; verify temporal
+accuracy independently before enabling deadline/interview-time extraction.
+
+Before rolling back to a release without dedicated mail support, disable remote mail
+and restore the earlier runtime secret version; otherwise the old worker would use
+its shared provider. Never change the shared Runpod profile as a rollback shortcut.
+
 Run a small discovery sample with the existing concurrency and contact rules,
 produce a shortlist, and verify salary extraction with bounded requests. Verify
 Hermes can retrieve an application's context, propose a draft/hold, and persist

@@ -16,7 +16,12 @@
 #applications .workspace-tabs { overflow-x: auto; flex-wrap: nowrap; }
 #applications #workspace-job-history { padding: 16px 0 0; }
 #applications .workspace-tabs a { white-space: nowrap; }
-#applications #workspace-documents { padding: 24px; }
+#applications #workspace-documents, #applications #workspace-answers { padding: 24px; }
+#applications .answer-snapshot { margin-top: 20px; }
+#applications .answer-snapshot > summary { cursor: pointer; }
+#applications .application-answer { border-top: 1px solid var(--line); padding: 16px 0; }
+#applications .application-answer h5 { margin: 0 0 8px; font-size: 15px; }
+#applications .answer-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 #applications #workspace-review-notices:empty,
 #applications #workspace-interviews:empty { display: none; }
 #applications #workspace-review-notices { margin-bottom: 24px; }
@@ -29,7 +34,7 @@
 #applications .application-document .actions { margin-top: 16px; }
 @media (max-width: 600px) {
   #applications .application-filters { display: grid; grid-template-columns: minmax(0, 1fr); }
-  #applications .workspace-heading, #applications #workspace-documents { padding: 16px; }
+  #applications .workspace-heading, #applications #workspace-documents, #applications #workspace-answers { padding: 16px; }
   #applications .workspace-heading h3 { font-size: 22px; }
   #applications .workspace-tabs { gap: 16px; }
 }

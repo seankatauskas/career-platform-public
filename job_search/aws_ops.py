@@ -16,6 +16,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -135,8 +136,15 @@ def compose(c: dict, *args: str, release: Path | None = None) -> str:
         "JOB_SEARCH_NOTIFICATION_TARGET": "telegram", "JOB_SEARCH_UID": str(c.get("app_uid", 10001)),
         "JOB_SEARCH_GID": str(c.get("app_gid", 10001)),
     })
-    return run(["docker", "compose", "--project-name", "job-search", "-f", str(r / "compose.cloud.yaml"),
-                "-f", str(r / "compose.hermes.yaml"), *args], env=env, timeout=4500)
+    files = ["-f", str(r / "compose.cloud.yaml"), "-f", str(r / "compose.hermes.yaml")]
+    runtime_path = d / "private" / "config.json"
+    if runtime_path.is_file():
+        runtime = json.loads(runtime_path.read_text())
+        if runtime.get("mail_inference_config") and (r / "compose.mail.yaml").is_file():
+            if runtime["mail_inference_config"] != "/run/job-search/mail-inference.json":
+                raise OpsError("cloud mail inference requires the dedicated mounted profile")
+            files += ["-f", str(r / "compose.mail.yaml")]
+    return run(["docker", "compose", "--project-name", "job-search", *files, *args], env=env, timeout=4500)
 
 def running_services(c: dict, release: Path | None = None) -> list[str]:
     return [v for v in compose(c, "ps", "--services", "--status", "running", release=release).splitlines() if v in SERVICES]
@@ -361,6 +369,7 @@ def secret_transaction(c: dict):
     d = Path(c["data_root"])
     paths = [d / "private" / n for n in c["secret_arns"] if n not in {"hermes.env", "hermes.yaml"}]
     paths += [d / "hermes" / ".env", d / "hermes" / "config.yaml", d / "materialized-secrets.json"]
+    paths += [d / "private" / name for name in ("mail-inference.json", "openrouter-api-key")]
     saved = {}
     for p in paths:
         if p.is_symlink(): raise OpsError("secret path is a symlink")
@@ -391,6 +400,35 @@ def materialize_secrets(c: dict, versions: dict | None = None) -> None:
         _materialize_secrets(c, versions)
 
 
+def mail_secret_projections(values: dict[str, str]) -> dict[str, str]:
+    """Derive narrowly mounted mail files from pinned existing secret versions.
+
+    The profile lives in config.json; only OPENROUTER_API_KEY is copied from
+    hermes.env. No shell evaluation, extra AWS authority, or Telegram exposure.
+    """
+    try:
+        runtime = json.loads(values.get("config.json", "{}"))
+    except ValueError:
+        return {}  # Runtime validation remains authoritative for legacy config.
+    if not isinstance(runtime, dict) or runtime.get("mail_inference_profile") is None:
+        return {}
+    profile = runtime["mail_inference_profile"]
+    generation = profile.get("structured_generation") if isinstance(profile, dict) else None
+    if (runtime.get("mail_inference_config") != "/run/job-search/mail-inference.json"
+            or not isinstance(generation, dict) or generation.get("kind") != "openrouter"
+            or generation.get("credential_file") != "/run/job-search/openrouter-api-key"
+            or profile.get("embeddings") is not None):
+        raise OpsError("invalid dedicated OpenRouter mail profile")
+    matches = re.findall(r"^[ \t]*(?:export[ \t]+)?OPENROUTER_API_KEY[ \t]*=[ \t]*([^\r\n]*)\r?$", values.get("hermes.env", ""), re.MULTILINE)
+    try:
+        tokens = shlex.split(matches[0], comments=True) if len(matches) == 1 else []
+    except ValueError:
+        tokens = []
+    if len(tokens) != 1 or not tokens[0] or len(tokens[0]) > 4096 or any(ch.isspace() or ord(ch) < 32 for ch in tokens[0]):
+        raise OpsError("dedicated mail requires one valid OpenRouter credential")
+    return {"mail-inference.json": json.dumps(profile) + "\n", "openrouter-api-key": tokens[0] + "\n"}
+
+
 def _materialize_secrets(c: dict, versions: dict | None = None) -> None:
     d = Path(c["data_root"])
     sources = versions if versions is not None else {n: {"arn": arn} for n, arn in c["secret_arns"].items()}
@@ -415,6 +453,11 @@ def _materialize_secrets(c: dict, versions: dict | None = None) -> None:
         # The portable key must never be silently rotated under existing ciphertext.
         if name == "portable-master-key" and target.exists() and target.read_text() != value:
             raise OpsError("portable encryption key changed; explicit state migration required")
+        pending.append((name, target, value))
+    projections = mail_secret_projections({name: value for name, _target, value in pending})
+    for name, value in projections.items():
+        target = d / "private" / name
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         pending.append((name, target, value))
     for name, target, value in pending:
         fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".secret-")
@@ -739,12 +782,13 @@ def model_readiness(c: dict) -> None:
         "from job_search.cli import _dependency_health",
         "c = load_runtime_config(Path('/run/job-search/config.json'))",
         "r = _dependency_health(c)['inference']",
-        "print(json.dumps({'configured': r.get('configuration_ready', False), 'embedding': r.get('preference_embeddings', {}).get('status'), 'private_dashboard': bool(c.dashboard_https_origin and c.dashboard_allowed_tailscale_login)}))",
+        "print(json.dumps({'configured': r.get('configuration_ready', False), 'embedding': r.get('preference_embeddings', {}).get('status'), 'mail_ready': not c.remote_mail_inference_enabled or r.get('remote_mail', {}).get('status') in ('configuration_ready', 'local_classifier_selected'), 'private_dashboard': bool(c.dashboard_https_origin and c.dashboard_allowed_tailscale_login)}))",
     ])
     report = json.loads(compose(c, "run", "--rm", "--no-deps", "--entrypoint", "python", "core", "-c", probe))
     if not report.get("configured") or report.get("embedding") != "ready":
         raise OpsError("remote inference or ranking model migration is incomplete")
     if not report.get("private_dashboard"): raise OpsError("private dashboard owner is not configured")
+    if report.get("mail_ready") is False: raise OpsError("remote mail inference is not ready")
 
 
 def pause(c: dict, *, reason: str = "operator paused") -> dict:

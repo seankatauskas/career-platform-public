@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "profile_id": "mail-openrouter",
+  "structured_generation": {
+    "kind": "openrouter",
+    "model": "REPLACE_REVIEWED_MODEL_ID",
+    "credential_file": "/run/job-search/openrouter-api-key",
+    "timeout_seconds": 120,
+    "max_response_bytes": 262144,
+    "max_input_tokens": 65536,
+    "default_max_output_tokens": 4096
+  },
+  "embeddings": null
+}

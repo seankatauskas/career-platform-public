@@ -335,7 +335,55 @@ function testGreenhouseConfirmationIdentity() {
   assert.strictEqual(tracking.outcome(doc(''), original+'/confirmation', job), null);
 }
 
+async function testDurableAnswerQueue() {
+  const storage={},calls=[],accepted=new Map(); let loseAck=true;
+  const paired={device_id:'fixture-device',device_token:'fictional-pairing-token'};
+  const context=vm.createContext({crypto:require('node:crypto').webcrypto,TextEncoder,TextDecoder,Uint8Array,atob,btoa,
+    JobTracking:require('./tracking.js'),trackingConnection:async()=>paired,
+    chrome:{storage:{local:{
+      get:async key=>key ? {[key]:storage[key]} : {...storage},
+      set:async values=>Object.assign(storage,JSON.parse(JSON.stringify(values))),
+      remove:async keys=>{for(const key of Array.isArray(keys)?keys:[keys]) delete storage[key];}
+    }}},
+    trackingPost:async(path,body)=>{
+      assert.equal(path,'answers');calls.push(body);
+      accepted.set(body.capture_id,JSON.stringify(body));
+      if(loseAck) {loseAck=false;throw new Error('Response lost after server saved it');}
+      return {saved:true,field_count:body.snapshot.fields.length};
+    }
+  });
+  vm.runInContext(fs.readFileSync(path.join(root,'answer_worker.js'),'utf8'),context);
+  const page={tab_id:1,frame_id:0,attempt_id:'fixture-attempt',job:require('./tracking.js').identify('https://job-boards.greenhouse.io/acme/jobs/12345')};
+  const field=(key,value)=>({field_key:key,prompt:key,section:'',control:'textarea',value});
+  const snapshot=fields=>({version:1,fields,omitted_fields:0,truncated_values:0});
+  await context.rememberAnswers(page,snapshot([field('Earlier step','PRIVATE-PROSE'),field('Cleared','old')]));
+  await context.queueAnswers(page,snapshot([field('Cleared',''),field('Final step','final')]),'2026-10-01T00:00:00Z');
+  assert(!JSON.stringify(storage).includes('PRIVATE-PROSE'));
+  await context.flushAnswers();assert.equal(calls.length,0); // No server attempt yet.
+  storage['tracking-result-fixture-attempt']={application_id:'fixture-application'};
+  await context.flushAnswers();
+  const keys=()=>Object.keys(storage).filter(k=>k.startsWith('tracking-answer-')&&!k.startsWith('tracking-answer-result-'));
+  assert.equal(keys().length,1);assert(storage.tracking_answers_error);
+  assert.equal(calls[0].snapshot.fields.find(f=>f.field_key==='Earlier step').value,'PRIVATE-PROSE');
+  assert.equal(calls[0].snapshot.fields.find(f=>f.field_key==='Cleared').value,'');
+  storage.tracking_answers_retry_at=0;
+  await context.flushAnswers();
+  assert.equal(accepted.size,1);assert.equal(calls[0].capture_id,calls[1].capture_id);
+  assert.equal(keys().length,0);assert.equal(storage['tracking-answer-result-fixture-attempt'].field_count,3);
+  assert(!storage.tracking_answers_error);
+  const encrypted=await context.sealAnswers(paired,{value:'secret'});
+  await assert.rejects(()=>context.openAnswers({...paired,device_id:'other'},encrypted),/different browser/);
+  const other={...page,job:require('./tracking.js').identify('https://job-boards.greenhouse.io/acme/jobs/54321')};
+  const clean=await context.rememberAnswers(other,snapshot([field('Different job','unrelated')]));
+  assert.equal(clean.fields.length,1);
+  storage['tracking-draft-1-0'].updated_at=0;
+  await context.pruneAnswerDrafts();assert(!storage['tracking-draft-1-0']);
+  const crowded=context.mergeAnswers(snapshot(Array.from({length:400},(_,i)=>({...field(String(i),'x'),control:'checkbox',value:true}))),snapshot([field('Important prose','kept first')]));
+  assert.equal(crowded.fields.length,400);assert.equal(crowded.fields[0].value,'kept first');assert.equal(crowded.omitted_fields,1);
+}
+
 const tests = [
+  testDurableAnswerQueue,
   testGreenhouseConfirmationIdentity,
   testPrivateAndForbiddenGuardrails,
   testSafeInferenceAndApplication,

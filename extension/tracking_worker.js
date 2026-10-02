@@ -1,7 +1,9 @@
 'use strict';
 importScripts('tracking.js');
+importScripts('answer_worker.js');
 const trackingReady = chrome.storage.local.setAccessLevel({accessLevel: 'TRUSTED_CONTEXTS'});
 let trackingDrain = null;
+let trackingFlushAgain = false;
 const volatileCaptures = new Map();
 const trackKey = (tab, frame) => `tracking-page-${tab}-${frame}`;
 async function trackingConnection() { await trackingReady; return (await chrome.storage.local.get('browser_connection')).browser_connection; }
@@ -21,18 +23,19 @@ async function trackingQueue(page, kind, metadata = {}) {
   await chrome.storage.local.set({[`tracking-event-${item.observation_id}`]: {item, queued_at: Date.now()}});
 }
 async function flushTracking() {
-  if (trackingDrain) return trackingDrain;
+  if (trackingDrain) { trackingFlushAgain=true; return trackingDrain; }
   trackingDrain = (async () => {
     if (!await trackingConnection()) return;
     const all = await chrome.storage.local.get(null);
-    if (Number(all.tracking_retry_at || 0) > Date.now()) return;
+    if (Number(all.tracking_retry_at || 0) > Date.now()) { await flushAnswers(); return; }
     const entries = Object.entries(all).filter(([k]) => k.startsWith('tracking-event-'))
       .sort((a,b) => a[1].queued_at-b[1].queued_at || (a[1].item.kind === 'attempted' ? -1 : 1));
     for (const [key, queued] of entries) {
       try {
         const result = await trackingPost('observations', queued.item);
-        await chrome.storage.local.remove(key);
+        // Keep the observation retryable until its durable answer linkage exists.
         await chrome.storage.local.set({[`tracking-result-${result.attempt_id}`]: result});
+        await chrome.storage.local.remove(key);
         const capture = volatileCaptures.get(result.attempt_id);
         if (capture) {
           try { await trackingPost('capture', {attempt_id:result.attempt_id, ...capture}); } catch (_) { /* Tracking is independent of answer capture. */ }
@@ -45,7 +48,12 @@ async function flushTracking() {
       }
     }
     await chrome.storage.local.remove(['tracking_error','tracking_retry_at','tracking_retry_count']);
-  })().finally(() => { trackingDrain = null; });
+    await flushAnswers();
+    await pruneAnswerDrafts();
+  })().finally(() => {
+    trackingDrain = null;
+    if(trackingFlushAgain) {trackingFlushAgain=false; flushTracking().catch(()=>{});}
+  });
   return trackingDrain;
 }
 async function trackingPage(message, sender) {
@@ -64,11 +72,20 @@ async function trackingPage(message, sender) {
   if (message.type === 'trackingAttempt') {
     if (!page.attempt_id || Date.now()-(page.last_attempt || 0)>1500) {
       page.attempt_id = crypto.randomUUID(); page.last_attempt = Date.now(); page.success = false;
-      await trackingQueue(page, 'attempted', {signal:'final_submit'});
     }
+    // Persist answers before starting any network work. Submission itself remains
+    // entirely owned by the employer's page and is never delayed or prevented.
+    if(message.answer_snapshot) {
+      try { await queueAnswers(page,message.answer_snapshot,message.captured_at || new Date().toISOString()); }
+      catch(_) { await chrome.storage.local.set({tracking_answers_capture_error:'Could not save application answers in this browser. Check browser storage and try again.'}); }
+    }
+    await trackingQueue(page, 'attempted', {signal:'final_submit'});
     if (message.capture && Array.isArray(message.capture.fields) && Array.isArray(message.capture.answers))
       volatileCaptures.set(page.attempt_id, {fields:message.capture.fields, answers:message.capture.answers});
     await trackingBadge(sender.tab.id, '…');
+  } else if (message.type === 'trackingDraft') {
+    try { await rememberAnswers(page,message.answer_snapshot); }
+    catch(_) { await chrome.storage.local.set({tracking_answers_capture_error:'Could not save an application draft in this browser. Check browser storage and try again.'}); }
   } else if (message.type === 'trackingOutcome' && page.attempt_id) {
     const signal = message.signal;
     if (['success_dom','success_route'].includes(signal) && !page.success) {
@@ -80,14 +97,11 @@ async function trackingPage(message, sender) {
     }
   }
   await chrome.storage.local.set({[key]:page});
-  await flushTracking();
+  // Network retries must not block later form edits, steps, or submit captures.
+  flushTracking().catch(()=>{});
   const result = page.attempt_id && (await chrome.storage.local.get(`tracking-result-${page.attempt_id}`))[`tracking-result-${page.attempt_id}`];
   if (result && ['site_acknowledged','email_confirmed'].includes(result.status)) await trackingBadge(sender.tab.id, '✓', '#628064');
-  let resolved = null;
-  if (message.type === 'trackingPage') {
-    try { resolved = await trackingPost('resolve', {page_url:job.canonical_url}); } catch (_) {}
-  }
-  return {ok:true, connected:true, attempt_id:page.attempt_id, resolved, result};
+  return {ok:true, connected:true, attempt_id:page.attempt_id, result};
 }
 let trackingSerial = Promise.resolve();
 function serializeTracking(work) {
@@ -107,12 +121,17 @@ async function trackingPopup(message) {
   if (message.type === 'trackingDisconnect') {
     await chrome.storage.local.remove('browser_connection');
     const keys = Object.keys(await chrome.storage.local.get(null)).filter(k=>k.startsWith('tracking-') || k==='tracking_error');
-    await chrome.storage.local.remove(keys); volatileCaptures.clear();
+    await chrome.storage.local.remove([...keys,'tracking_answers_error','tracking_answers_capture_error','tracking_answers_retry_at']); volatileCaptures.clear();
     return {ok:true};
   }
   const connected = !!await trackingConnection();
   const all = await chrome.storage.local.get(null);
-  const pages = Object.entries(all).filter(([k,p])=>k.startsWith('tracking-page-') && p.tab_id===message.tab_id);
+  // A navigation can discard frames without closing the tab. Ignore their old
+  // identities so they cannot make the current application look ambiguous.
+  const frames=await chrome.webNavigation.getAllFrames({tabId:message.tab_id}).catch(()=>[]);
+  const pages = Object.entries(all).filter(([k,p])=>k.startsWith('tracking-page-') && p.tab_id===message.tab_id
+    && frames.some(frame=>frame.frameId===p.frame_id && (!frame.documentId || frame.documentId===p.document_id)
+      && JobTracking.sameJob(p.job,JobTracking.identify(frame.url))));
   // Avoid choosing between different embedded applications in one tab.
   const distinct = new Set(pages.map(([,p])=>`${p.job.ats}:${p.job.job_id}`));
   const page = distinct.size===1 ? pages[0]?.[1] : null;
@@ -140,11 +159,13 @@ async function trackingPopup(message) {
     try { result = await trackingPost('status', {attempt_id:page.attempt_id}); } catch (_) {}
   }
   return {ok:true, connected, supported:!!page, job:page?.job, result, error:all.tracking_error,
+    answer_status:page && all[`tracking-answer-result-${page.attempt_id}`], answer_error:all.tracking_answers_capture_error || all.tracking_answers_error,
+    answers_queued:Object.keys(all).filter(k=>k.startsWith('tracking-answer-') && !k.startsWith('tracking-answer-result-')).length,
     queued:Object.keys(all).filter(k=>k.startsWith('tracking-event-')).length};
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || !String(message.type).startsWith('tracking')) return false;
-  const fromPage = ['trackingPage','trackingAttempt','trackingOutcome'].includes(message.type);
+  const fromPage = ['trackingPage','trackingAttempt','trackingOutcome','trackingDraft'].includes(message.type);
   // Content scripts cannot invoke popup actions or obtain the device credential.
   if (!fromPage && (!sender.url?.startsWith(chrome.runtime.getURL('popup/')))) {
     respond({ok:false,error:'Unsupported extension caller.'}); return false;
@@ -170,7 +191,7 @@ async function networkObservation(details, phase) {
   if (details.documentId && page.document_id && details.documentId!==page.document_id) return;
   const signal = phase==='failed' ? 'network_error' : 'application_request';
   await trackingQueue(page,phase,{signal,request_status:String(details.statusCode||'')});
-  await flushTracking();
+  flushTracking().catch(()=>{});
 }
 chrome.webRequest.onBeforeRequest.addListener(d=>{serializeTracking(()=>networkObservation(d,'request_sent')).catch(()=>{});},trackingFilter);
 chrome.webRequest.onCompleted.addListener(d=>{serializeTracking(()=>networkObservation(d,d.statusCode>=400?'failed':'request_completed')).catch(()=>{});},trackingFilter);

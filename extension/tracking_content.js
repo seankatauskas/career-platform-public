@@ -1,6 +1,7 @@
 (function() {
   'use strict';
   let job = null, connected = false, attempted = false, lastSignal = '', scheduled = false, digest = '', initialOutcome = null;
+  let draftTimer=null, pendingDraft=null, pageEpoch=0, lastAttemptAt=0, lastAttemptSnapshot='';
   function describePage() {
     const title = document.querySelector('h1')?.textContent?.trim() || document.title;
     return {page_url:location.href, title:title.slice(0,500), employer:job?.board || '', resume_sha256:digest};
@@ -9,25 +10,53 @@
     try { return await chrome.runtime.sendMessage({type,...describePage(),...extra}); } catch (_) { return null; }
   }
   async function page() {
+    const epoch=++pageEpoch;
     const current = JobTracking.identify(location.href);
-    if (!current) return;
-    if (!JobTracking.sameJob(current,job)) { attempted=false; digest=''; lastSignal=''; }
+    if (!current) { job=null; pendingDraft=null; clearTimeout(draftTimer); return; }
+    if (!JobTracking.sameJob(current,job)) { attempted=false; digest=''; lastSignal=''; initialOutcome=null; pendingDraft=null; lastAttemptAt=0; lastAttemptSnapshot=''; clearTimeout(draftTimer); }
     job=current;
     const result=await send('trackingPage');
+    if(epoch!==pageEpoch) return;
     connected=!!result?.connected; attempted=attempted||!!result?.attempt_id;
     check();
   }
   function capture() {
-    const selected=[JobAutofillGreenhouse,JobAutofillAshby,JobAutofillLever].find(a=>a.supports(location.hostname));
-    if(!selected) return null;
-    const form=selected.describe(document);
-    return {fields:form.descriptors,answers:JobAutofillCommon.snapshot(form)};
+    try {
+      const selected=[JobAutofillGreenhouse,JobAutofillAshby,JobAutofillLever].find(a=>a.supports(location.hostname));
+      if(!selected) return null;
+      const form=selected.describe(document);
+      return {fields:form.descriptors,answers:JobAutofillCommon.snapshot(form)};
+    } catch (_) { return null; } // Legacy learning must not prevent answer history.
+  }
+  function snapshotDraft() {
+    if(!job || !JobTracking.sameJob(job,JobTracking.identify(location.href))) return;
+    const snapshot=JobAnswerCapture.collect(document);
+    // Merge before a step's DOM disappears; explicit blank values replace old ones.
+    const fields=new Map((pendingDraft?.fields||[]).map(field=>[field.field_key,field]));
+    for(const field of snapshot.fields) fields.set(field.field_key,field);
+    pendingDraft={...snapshot,fields:[...fields.values()]};
+  }
+  function flushDraft() {
+    clearTimeout(draftTimer); draftTimer=null;
+    if(pendingDraft?.fields.length) {
+      const snapshot=pendingDraft; pendingDraft=null;
+      send('trackingDraft',{answer_snapshot:snapshot});
+    }
+  }
+  function changed() {
+    snapshotDraft(); clearTimeout(draftTimer); draftTimer=setTimeout(flushDraft,300);
   }
   function attempt() {
-    if(!job || !connected) return;
+    if(!job) return;
+    snapshotDraft(); flushDraft();
+    const snapshot=JobAnswerCapture.collect(document), signature=JSON.stringify(snapshot);
+    // A native click is immediately followed by submit; retain only one identical
+    // snapshot, but still capture values changed by a site's submit handler.
+    if(Date.now()-lastAttemptAt<1500 && signature===lastAttemptSnapshot) return;
+    lastAttemptAt=Date.now(); lastAttemptSnapshot=signature;
     initialOutcome=JobTracking.outcome(document,location.href,job);
     attempted=true; lastSignal='';
-    send('trackingAttempt',{capture:capture()}).then(check);
+    send('trackingAttempt',{capture:capture(),answer_snapshot:snapshot,captured_at:new Date().toISOString()}).then(check);
   }
   function check() {
     if(!job || !connected || !attempted) return;
@@ -46,12 +75,15 @@
     if(!event.isTrusted) return;
     const button=event.target.closest('button,input[type="submit"],[role="button"]');
     if(isFinalButton(button)) attempt();
+    else if(button) { snapshotDraft(); flushDraft(); }
   },true);
   document.addEventListener('submit',event=>{
     const button=event.submitter || event.target.querySelector('button[type="submit"],input[type="submit"]');
     if(isFinalButton(button)) attempt();
   },true);
   document.addEventListener('invalid',()=>{if(attempted) send('trackingOutcome',{signal:'validation_error'});},true);
+  document.addEventListener('input',changed,true);
+  document.addEventListener('change',changed,true);
   document.addEventListener('change',async event=>{
     const input=event.target;
     if(input.type!=='file') return;
@@ -72,5 +104,7 @@
     if(message?.type==='trackingRouteChanged' || message?.type==='trackingRefresh') page();
   });
   window.addEventListener('pageshow',page);
+  window.addEventListener('pagehide',()=>{snapshotDraft(); flushDraft();});
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden') {snapshotDraft();flushDraft();}});
   page();
 })();

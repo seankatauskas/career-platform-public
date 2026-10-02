@@ -70,8 +70,10 @@ outage length. The deployment receipt records the measured pause.
 
 For an application submitted on an employer's site during a dashboard outage,
 the paired extension durably queues captured tracking observations and replays
-them after connectivity returns. This has browser acceptance coverage including
-browser restart. It is not a substitute for confirming submission on the employer
+them after connectivity returns. Version 1.3 also queues encrypted application
+answer snapshots for the application's Answers tab. This has browser acceptance
+coverage including multi-step prose and browser restart. It is not a substitute
+for confirming submission on the employer
 site, and it does not preserve unsaved dashboard form edits. Plan the installation
 between dashboard actions.
 

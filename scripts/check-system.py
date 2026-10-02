@@ -55,7 +55,7 @@ def main() -> int:
     suites.append(("scripts/check-private-files.py", [sys.executable, "scripts/check-private-files.py"]))
     suites.append(("extension/test_extension.js", [shutil.which("node") or "node", "extension/test_extension.js"]))
     if args.browser:
-        suites.extend((name, [shutil.which("node") or "node", name]) for name in ("extension/test_browser.mjs", "tests/browser/test_ops_browser.mjs", "tests/browser/test_console_browser.mjs", "tests/browser/test_review_queue.mjs", "tests/browser/test_settings_views.mjs"))
+        suites.extend((name, [shutil.which("node") or "node", name]) for name in ("extension/test_browser.mjs", "extension/test_answer_capture.mjs", "tests/browser/test_ops_browser.mjs", "tests/browser/test_console_browser.mjs", "tests/browser/test_review_queue.mjs", "tests/browser/test_settings_views.mjs"))
     suites = [(name, argv) for name, argv in suites if args.match in name]
     if not suites:
         parser.error("no suites match")

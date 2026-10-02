@@ -107,12 +107,17 @@ class RuntimeConfigV1:
     outlook_client_id: str = ""
     outlook_account_id: str = "outlook-personal"
     outlook_mail_folders: tuple[str, ...] = ("inbox",)
+    outlook_poll_interval_minutes: int = 5
     scraper_contact: str = ""
     board_registry_path: Optional[Path] = None
     mail_classifier_config: Optional[Path] = None
+    mail_inference_config: Optional[Path] = None
+    # Optional AWS secret projection source; never exposed in public diagnostics.
+    mail_inference_profile: Optional[Mapping[str, Any]] = field(default=None, repr=False)
     inference_config: Optional[Path] = None
     inference_usage_limits: Mapping[str, Any] = field(default_factory=dict)
     remote_mail_inference_enabled: bool = False
+    remote_mail_temporal_enabled: bool = True
     portable_encryption_key_file: Optional[Path] = field(
         default=None, repr=False, compare=False
     )
@@ -313,6 +318,7 @@ class RuntimeConfigV1:
                 128,
             ),
             outlook_mail_folders=normalized_folders,
+            outlook_poll_interval_minutes=value.get("outlook_poll_interval_minutes", 5),
             scraper_contact=_text(
                 value.get("scraper_contact", default.scraper_contact),
                 "scraper_contact",
@@ -331,7 +337,13 @@ class RuntimeConfigV1:
                 root,
                 optional=True,
             ),
+            mail_inference_config=_path(
+                value.get("mail_inference_config"), "mail_inference_config", root,
+                optional=True,
+            ),
+            mail_inference_profile=value.get("mail_inference_profile"),
             remote_mail_inference_enabled=remote_mail_inference,
+            remote_mail_temporal_enabled=value.get("remote_mail_temporal_enabled", True),
             outlook_new_messages_only=value.get("outlook_new_messages_only", False),
             mail_recruiting_only=value.get("mail_recruiting_only", False),
             inference_usage_limits=value.get("inference_usage_limits", {}),
@@ -420,6 +432,26 @@ class RuntimeConfigV1:
         return result
 
     def validate(self) -> None:
+        if not isinstance(self.remote_mail_temporal_enabled, bool):
+            raise ValueError("remote_mail_temporal_enabled must be a boolean")
+        if type(self.outlook_poll_interval_minutes) is not int or not 1 <= self.outlook_poll_interval_minutes <= 1440:
+            raise ValueError("outlook_poll_interval_minutes must be an integer from 1 to 1440")
+        if self.mail_inference_profile is not None:
+            if self.mail_inference_config is None:
+                raise ValueError("mail_inference_profile requires mail_inference_config")
+            profile = self.mail_inference_profile
+            expected = {"version", "profile_id", "structured_generation", "embeddings"}
+            generation_fields = {"kind", "model", "credential_file", "timeout_seconds",
+                                 "max_response_bytes", "max_input_tokens", "default_max_output_tokens"}
+            if (not isinstance(profile, Mapping) or set(profile) != expected
+                    or profile["version"] != 1 or profile["embeddings"] is not None
+                    or not isinstance(profile["structured_generation"], Mapping)
+                    or set(profile["structured_generation"]) != generation_fields
+                    or profile["structured_generation"]["kind"] != "openrouter"):
+                raise ValueError("mail_inference_profile must be a generation-only OpenRouter profile")
+            # This is host projection metadata. Do not load its credential here:
+            # dashboard, model, and MCP deliberately never receive the mail key.
+            # Core validates the complete materialized profile before inference.
         if self.shortlist_notification_start_at is not None:
             from .contracts import parse_utc
             parse_utc(self.shortlist_notification_start_at)
@@ -502,6 +534,7 @@ class RuntimeConfigV1:
             "JOB_SCRAPER_CONTACT": self.scraper_contact,
             "OUTLOOK_CLIENT_ID": self.outlook_client_id,
             "OUTLOOK_ACCOUNT_ID": self.outlook_account_id,
+            "JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES": str(self.outlook_poll_interval_minutes),
             "JOB_SEARCH_MAIL_CLASSIFIER_CONFIG": (
                 str(self.mail_classifier_config) if self.mail_classifier_config else ""
             ),
@@ -516,6 +549,7 @@ class RuntimeConfigV1:
                     "JOB_BOARDS_CACHE",
                     "JOB_SEARCH_MAIL_CLASSIFIER_CONFIG",
                     "JOB_SEARCH_INFERENCE_CONFIG",
+                    "JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES",
                 }:
                     # An owner-only runtime file or explicit CLI override is more
                     # specific than an inherited shell profile.
@@ -548,6 +582,7 @@ class RuntimeConfigV1:
             self.portable_encryption_key_file is not None
         )
         result.pop("portable_encryption_key_file", None)
+        result.pop("mail_inference_profile", None)
         for name, value in tuple(result.items()):
             if isinstance(value, Path):
                 result[name] = str(value)
@@ -594,6 +629,7 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
         "log_dir",
         "mcp_token_file",
         "mail_classifier_config",
+        "mail_inference_config",
         "inference_config",
         "portable_encryption_key_file",
         "autofill_profile",
@@ -619,6 +655,7 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
                 in {
                     "board_registry_path",
                     "mail_classifier_config",
+                    "mail_inference_config",
                     "inference_config",
                     "portable_encryption_key_file",
                     "autofill_profile",
@@ -678,8 +715,21 @@ def _configured_mail_models(
         )
     if not config.remote_mail_inference_enabled:
         return None, None, None, "local-mail-model-v1"
+    from .inference import build_structured_provider
+    from .mail.remote import RemoteMailClassifier, RemoteTemporalExtractor
+
+    inference = _configured_remote_mail_profile(config, environment)
+    provider = build_structured_provider(inference)
+    classifier = RemoteMailClassifier(provider)
+    temporal = RemoteTemporalExtractor(provider) if config.remote_mail_temporal_enabled else None
+    return classifier, None, temporal, classifier.producer_version
+
+
+def _configured_remote_mail_profile(config: RuntimeConfigV1, environment: Mapping[str, str]):
+    """Resolve mail independently; an invalid explicit profile never falls back."""
     configured_inference = str(
-        config.inference_config
+        config.mail_inference_config
+        or config.inference_config
         or environment.get("JOB_SEARCH_INFERENCE_CONFIG")
         or ""
     ).strip()
@@ -687,27 +737,20 @@ def _configured_mail_models(
         raise ValueError(
             "remote_mail_inference_enabled requires an inference configuration"
         )
-    from .inference import build_structured_provider, load_inference_config
-    from .mail.remote import (
-        TEMPORAL_MAX_OUTPUT_TOKENS,
-        RemoteMailClassifier,
-        RemoteTemporalExtractor,
-    )
+    from .inference import load_inference_config
+    from .mail.remote import CLASSIFIER_MAX_OUTPUT_TOKENS, TEMPORAL_MAX_OUTPUT_TOKENS
 
     inference = load_inference_config(Path(configured_inference))
     if inference.structured_generation is None:
         raise ValueError(
             "remote mail inference requires structured_generation configuration"
         )
-    if (
-        inference.structured_generation.default_max_output_tokens
-        < TEMPORAL_MAX_OUTPUT_TOKENS
-    ):
-        raise ValueError("remote mail requires at least 4096 configured output tokens")
-    provider = build_structured_provider(inference)
-    classifier = RemoteMailClassifier(provider)
-    temporal = RemoteTemporalExtractor(provider)
-    return classifier, None, temporal, classifier.producer_version
+    required_output = TEMPORAL_MAX_OUTPUT_TOKENS if config.remote_mail_temporal_enabled else CLASSIFIER_MAX_OUTPUT_TOKENS
+    if inference.structured_generation.default_max_output_tokens < required_output:
+        raise ValueError(f"remote mail requires at least {required_output} configured output tokens")
+    if inference.structured_generation.model == "numind/NuExtract3":
+        raise ValueError("NuExtract3 is incompatible with the mail JSON adapter; configure a separate mail inference profile")
+    return inference
 
 
 def _build_outlook_handlers(
