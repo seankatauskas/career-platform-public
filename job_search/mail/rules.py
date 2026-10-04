@@ -15,7 +15,7 @@ from .proposals import build_proposal
 from .sanitizer import SanitizedMail
 
 
-RULE_PRODUCER_VERSION = "mail-rules-v3-recent-submission"
+RULE_PRODUCER_VERSION = "mail-rules-v5-identity"
 SUBMISSION_CONFIRMATION_WINDOW_SECONDS = 15 * 60
 
 
@@ -45,14 +45,14 @@ def _template(
         sender_domains=domains,
         ats_values=ats_values,
         subject_pattern=re.compile(
-            r"\b(?:thank you for applying|application (?:was )?received|"
+            r"\b(?:(?:thank you|thanks) for applying|application (?:was )?received|"
             r"we (?:have )?received your application)\b",
             re.I,
         ),
         evidence_pattern=re.compile(
             r"\b(?:we (?:have )?received your application|"
             r"your application (?:has been|was) received|"
-            r"thank you for applying(?: to [^\n.!]{1,120})?)\b",
+            r"(?:thank you|thanks) for applying(?: to [^\n.!]{1,120})?)\b",
             re.I,
         ),
     )
@@ -161,10 +161,6 @@ def _select_candidate(
             "unique_strong_identity" if strong_match else "unique_employer_candidate",
             strong_match,
         )
-    # A sole ATS candidate is useful for review, but is not enough evidence for an
-    # automatic lifecycle mutation: the message may concern another employer.
-    if len(eligible) == 1:
-        return eligible[0].application_id, "sole_ats_candidate_for_review", False
     return None, "ambiguous_candidate", False
 
 
@@ -178,7 +174,8 @@ def match_known_template(
     sender_authenticated: bool = False,
     candidate_context_complete: bool = True,
 ) -> RuleMatch | None:
-    bounded = bounded_candidates(candidates)
+    from .identity import supported_candidates
+    bounded = supported_candidates(bounded_candidates(candidates), mail.subject, mail.body)
     domain = _sender_domain(sender_address)
     for template in KNOWN_TEMPLATES:
         if not _trusted_domain(domain, template.sender_domains):
@@ -191,6 +188,8 @@ def match_known_template(
         application_id, candidate_match, strong_identity = _select_candidate(
             bounded, template, mail, received_at
         )
+        if not candidate_context_complete:
+            application_id = None
         body_start = mail.body_range[0]
         quote = evidence.group(0)
         proposal = build_proposal(

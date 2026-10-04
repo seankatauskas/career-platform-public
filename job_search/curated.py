@@ -62,26 +62,33 @@ class CuratedShortlists:
 
     def publish(self, supplied: Mapping[str, Any]) -> dict:
         request = validate_publication(supplied)
-        digest = payload_sha256(request)
         with closing(connect(self.db_path)) as con, con:
             con.execute("BEGIN IMMEDIATE")
-            prior = con.execute("SELECT * FROM curated_shortlists WHERE idempotency_key=?", (request['idempotency_key'],)).fetchone()
-            if prior:
-                if prior['request_sha256'] != digest:
-                    raise ContractError("idempotency key was reused for a different shortlist")
-                return self._receipt(prior)
+            return self.publish_in_transaction(con, request)
+
+    def publish_in_transaction(self, con, supplied, *, snapshots=None):
+        """Share a caller-owned transaction for atomic multi-list review publication."""
+        request = validate_publication(supplied)
+        digest = payload_sha256(request)
+        prior = con.execute("SELECT * FROM curated_shortlists WHERE idempotency_key=?", (request['idempotency_key'],)).fetchone()
+        if prior:
+            if prior['request_sha256'] != digest:
+                raise ContractError("idempotency key was reused for a different shortlist")
+            return self._receipt(prior)
+        if snapshots is None:
             snapshots = []
             for entry in request['jobs']:
                 job = self.catalog.get_job(entry['ats'], entry['job_id'])
                 snapshots.append({key: job.get(key) for key in SNAPSHOT_FIELDS})
-            list_id = 'curated_' + secrets.token_hex(16)
-            con.execute("INSERT INTO curated_shortlists (list_id,title,window_start,window_end,idempotency_key,request_sha256,created_at,job_count) VALUES (?,?,?,?,?,?,?,?)",
-                        (list_id, request['title'], request.get('window_start'), request.get('window_end'), request['idempotency_key'], digest, utc_now(), len(snapshots)))
-            for rank, (entry, snapshot) in enumerate(zip(request['jobs'], snapshots), 1):
-                con.execute("INSERT INTO curated_shortlist_items VALUES (?,?,?,?,?,?)",
-                            (list_id, rank, entry['ats'], entry['job_id'], entry.get('explanation', ''), canonical_json(snapshot)))
-            return self._receipt(con.execute("SELECT * FROM curated_shortlists WHERE list_id=?", (list_id,)).fetchone())
-
+        if len(snapshots) != len(request['jobs']):
+            raise ContractError('publication snapshots do not match jobs')
+        list_id = 'curated_' + secrets.token_hex(16)
+        con.execute("INSERT INTO curated_shortlists (list_id,title,window_start,window_end,idempotency_key,request_sha256,created_at,job_count) VALUES (?,?,?,?,?,?,?,?)",
+                    (list_id, request['title'], request.get('window_start'), request.get('window_end'), request['idempotency_key'], digest, utc_now(), len(snapshots)))
+        for rank, (entry, snapshot) in enumerate(zip(request['jobs'], snapshots), 1):
+            con.execute("INSERT INTO curated_shortlist_items VALUES (?,?,?,?,?,?)",
+                        (list_id, rank, entry['ats'], entry['job_id'], entry.get('explanation', ''), canonical_json(snapshot)))
+        return self._receipt(con.execute("SELECT * FROM curated_shortlists WHERE list_id=?", (list_id,)).fetchone())
     @staticmethod
     def _receipt(row) -> dict:
         return {key: row[key] for key in ('list_id', 'title', 'created_at', 'job_count')} | {'dashboard_path': '#shortlist/' + row['list_id']}

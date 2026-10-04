@@ -710,6 +710,25 @@ def test_scan_endpoint_requires_csrf_and_only_accepts_fixed_scan() -> None:
         assert post(server, path, {'idempotency_key':'demo-scan'}, cookie, csrf)[0] == 400
 
 
+def test_pipeline_progress_get_is_passive_and_keeps_real_attempt_counts() -> None:
+    from .test_job_search_scanning import progress_fixture, save_progress
+    with dashboard() as (server, controller, _ledger, _preferences), progress_fixture() as config:
+        controller.automation_config = config
+        save_progress(config)
+        cookie, _csrf = session(server)
+        paths = (config.application_db, config.jobs_db, config.preference_db, config.proxy_db)
+        before = {path: path.read_bytes() for path in paths}
+        with patch('job_search.ranking.refresh.refresh_policies', side_effect=AssertionError('GET started ranking')), \
+                patch('job_search.scanning.request_scan', side_effect=AssertionError('GET started collection')):
+            for _ in range(2):
+                status, _headers, body = request(server, 'GET', '/api/v1/ops/pipeline', headers={'Cookie': cookie})
+                ranking = json.loads(body)['ranking']
+                assert status == 200 and ranking['available']
+                assert ranking['current_pass']['checked_families'] == 1
+                assert ranking['current_pass']['policies']['selective']['recomputed_families'] == 0
+        assert {path: path.read_bytes() for path in paths} == before
+
+
 def main() -> None:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:

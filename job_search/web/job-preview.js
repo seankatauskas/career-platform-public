@@ -29,7 +29,19 @@ previewDialog.addEventListener("click", event => {
 });
 window.addEventListener("hashchange", () => { if (previewDialog.open) previewDialog.close(); });
 
+// Shared previews accept posting facts only, including when opened from Model picks.
+// Scores and model explanations belong to the ranking list, never the preview.
+function previewPostingFacts(source) {
+  const fields = ["ats", "id", "job_id", "application_id", "title", "title_snapshot", "company",
+    "employer_snapshot", "jobUrl", "job_url_snapshot", "curated_list_id", "location", "isRemote",
+    "workplaceType", "employmentType", "department", "team", "last_seen", "closed_at",
+    "posted_at", "publishedAt", "source_updated_at", "first_seen"];
+  const posting = {...source, ...source.job_posting};
+  return Object.fromEntries(fields.filter(field => posting[field] !== undefined).map(field => [field, posting[field]]));
+}
+
 function jobPreviewButton(job, label) {
+  job = previewPostingFacts(job);
   const button = node("button", "role-detail-button", label || job.title || job.title_snapshot || "Untitled role");
   button.type = "button";
   button.setAttribute("aria-haspopup", "dialog");
@@ -46,6 +58,7 @@ function previewPostingLink(value) {
   } catch { return null; }
 }
 async function openJobPreview(source) {
+  source = previewPostingFacts(source);
   cancelJobPreviewRequest();
   const epoch = jobPreviewEpoch;
   jobPreviewRequest = new AbortController();
@@ -61,7 +74,7 @@ async function openJobPreview(source) {
   try {
     const result = await api(`/api/v1/jobs/preview?${query}`, {signal: jobPreviewRequest.signal});
     if (epoch !== jobPreviewEpoch || !previewDialog.open) return;
-    const job = {...source, ...result.job};
+    const job = {...source, ...previewPostingFacts(result.job || {})};
     document.querySelector("#job-preview-title").textContent = job.title || job.title_snapshot || "Job details";
     document.querySelector("#job-preview-company").textContent = job.company || job.employer_snapshot || "";
     setPreviewPostingLink(job);

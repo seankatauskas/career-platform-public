@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -16,7 +17,7 @@ from job_search.inference import GenerationResult, StructuredGenerationProvider
 
 from .context import CandidateApplication, bounded_candidates
 from .model import MAX_MODEL_OUTPUT_BYTES, ModelExecutionError
-from .proposals import MAIL_EVENT_TYPES, MODEL_OUTPUT_FIELDS
+from .proposals import MAIL_EVENT_TYPES, MAX_EVIDENCE_QUOTE_CHARS, MODEL_OUTPUT_FIELDS
 from .temporal import (
     MAX_TEMPORAL_PROPOSALS,
     TEMPORAL_OUTPUT_FIELDS,
@@ -24,7 +25,7 @@ from .temporal import (
     TemporalSource,
 )
 
-REMOTE_MAIL_ADAPTER_VERSION = "remote-mail-json-v4"
+REMOTE_MAIL_ADAPTER_VERSION = "remote-mail-json-v6-identity"
 MAX_REMOTE_TEMPORAL_SOURCE_CHARS = 24_000
 CLASSIFIER_MAX_OUTPUT_TOKENS = 1_024
 TEMPORAL_MAX_OUTPUT_TOKENS = 4_096
@@ -40,12 +41,18 @@ provided schema, with no prose or markdown.
 For email event classification, payload must always be the empty object {}.
 Do not place event details, receipt details, or explanations inside payload.
 Copy evidence_quote verbatim from the email/source, not from candidate metadata.
+Preserve line breaks, spacing, punctuation, and case in evidence_quote. Choose a
+short quote from within the subject or body; do not quote framing labels or join
+subject and body. Prefer a quote that occurs only once in the supplied source.
 Offsets are zero-based character positions in the decoded email/source string.
 Candidates are retrieved from application history using company, role, posting ID,
 and previously linked correspondence. match_context explains retrieval, not proof.
 Suggest the best supported candidate for recruiting correspondence even when its
 link needs review, with confidence reflecting uncertainty. Use application_id=null
 when candidates are tied or unsupported. Never invent a match solely from recency.
+An identical role title or shared ATS sender does not establish employer identity.
+If the named employer is absent from the candidates, use application_id=null.
+An explicit employer conflict overrides a previously linked conversation.
 An acknowledgment that an application was received, including "thanks for applying"
 or "thank you for applying", is submission_confirmed, not recruiter_contact.
 It confirms receipt only, not progress to an interview or an offer.
@@ -61,19 +68,36 @@ return an empty proposals list if the required information is absent."""
 
 
 def _align_unique_evidence(value: Mapping[str, Any], source: str) -> Mapping[str, Any]:
-    """Resolve an exact unique quote deterministically; never guess evidence.
+    """Resolve a unique source quote, allowing only whitespace layout changes.
 
-    Models are poor character counters. Only a literal, unique source substring
-    can replace their offsets. Absent/ambiguous quotes and malformed field types
-    retain their original values so the existing strict validator rejects them.
+    Models miscount offsets and flatten HTML-derived paragraph breaks. Retain the
+    actual source slice, never the model's reformatted quote. Absent/ambiguous
+    quotes and malformed field types remain subject to strict validation. Mail
+    proposal validation also rejects framing and subject/body boundary crossings.
     """
     quote = value.get("evidence_quote")
     start, end = value.get("span_start"), value.get("span_end")
-    if (isinstance(quote, str) and 0 < len(quote) <= 512
+    if (isinstance(quote, str) and 0 < len(quote) <= MAX_EVIDENCE_QUOTE_CHARS
             and type(start) is int and type(end) is int):
         position = source.find(quote)
-        if position >= 0 and source.find(quote, position + 1) == -1:
-            return {**value, "span_start": position, "span_end": position + len(quote)}
+        if position >= 0:
+            if source.find(quote, position + 1) == -1:
+                return {**value, "span_start": position, "span_end": position + len(quote)}
+            return value
+        words = quote.split()
+        if not words:
+            return value
+        # Lookahead includes overlapping occurrences in the ambiguity check.
+        pattern = re.compile(r"(?=(" + r"\s+".join(re.escape(word) for word in words) + r"))")
+        matches = pattern.finditer(source)
+        match = next(matches, None)
+        if match is not None and next(matches, None) is None:
+            start, end = match.span(1)
+            if end - start <= MAX_EVIDENCE_QUOTE_CHARS:
+                return {
+                    **value, "evidence_quote": source[start:end],
+                    "span_start": start, "span_end": end,
+                }
     return value
 
 

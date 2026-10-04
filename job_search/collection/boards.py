@@ -31,6 +31,7 @@ import csv
 import gzip
 import http.client
 from html import escape
+from io import BytesIO
 import json
 import os
 import re
@@ -243,10 +244,15 @@ def fetch(
                 time.sleep(_retry_delay(headers.get("retry-after"), attempt))
                 continue
             if status >= 400:
-                raise urllib.error.HTTPError(url, status, "client error", None, None)
+                # Bounded evidence for a caller recognizing a protocol-specific error.
+                raise urllib.error.HTTPError(url, status, "client error", headers, BytesIO(body[:4096]))
             if headers.get("content-encoding") == "gzip":
                 body = gzip.decompress(body)
             return body
+        except urllib.error.HTTPError:
+            # HTTP retry/backoff decisions were already made above. In particular,
+            # do not immediately repeat non-retryable 400s through URLError's base class.
+            raise
         except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError):
             if attempt == retries - 1:
                 raise
@@ -488,6 +494,46 @@ def _add(seen: dict[str, str], url: str) -> None:
         seen.setdefault(slug.lower(), slug)
 
 
+class DiscoveryFailed(RuntimeError):
+    """One or more discovery sources failed; the run is not complete."""
+
+
+def _archive_json(url: str, *, json_lines: bool = False, **kwargs):
+    """Retry malformed/truncated JSON locally, without repeating board probes."""
+    for attempt in range(3):
+        body = fetch(url, **kwargs)
+        try:
+            if json_lines:
+                return [json.loads(line) for line in body.decode("utf-8").splitlines() if line.strip()]
+            return json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def _commoncrawl_page_finished(error: urllib.error.HTTPError, page: int) -> bool:
+    # Generic 400s are not success. Match pywb's exact pagination response only
+    # after a successful page and with the expected final page number.
+    if error.code != 400 or page < 1:
+        return False
+    try:
+        if (error.headers or {}).get("content-encoding") == "gzip":
+            with gzip.GzipFile(fileobj=error) as stream:
+                body = stream.read(4097)
+        else:
+            body = error.read(4097)
+        if len(body) > 4096:
+            return False
+        value = json.loads(body)
+    except (ValueError, UnicodeError, OSError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    expected = f"Page {page} invalid: First Page is 0, Last Page is {page - 1}"
+    return value.get("message") == expected or value.get("error") == expected
+
+
 def candidates_from_wayback(domains: list[str], since_days: int | None = None) -> dict[str, str]:
     """The Internet Archive's CDX index. Broader than Common Crawl and far more
     reliable — it is the default for that reason.
@@ -504,9 +550,7 @@ def candidates_from_wayback(domains: list[str], since_days: int | None = None) -
     for domain in domains:
         scope = f"last {since_days}d of " if since_days else ""
         print(f"  querying the Wayback Machine for {scope}{domain}...", file=sys.stderr)
-        rows = json.loads(
-            fetch(WAYBACK_CDX.format(domain=domain) + window, timeout=300, retries=3)
-        )
+        rows = _archive_json(WAYBACK_CDX.format(domain=domain) + window, timeout=300, retries=3)
         for row in rows[1:]:  # first row is the header
             _add(seen, row[0])
         print(f"    {len(rows) - 1} archived URLs -> {len(seen)} candidates so far",
@@ -543,27 +587,30 @@ def candidates_from_urlscan(domains: list[str]) -> dict[str, str]:
 def candidates_from_commoncrawl(domains: list[str], max_pages: int = 20) -> dict[str, str]:
     """Common Crawl's CDX index. Kept as a fallback: narrower coverage, and it
     sheds requests under load often enough to fail for hours at a time."""
-    collections = json.loads(fetch(COLLINFO))
+    collections = _archive_json(COLLINFO)
     cdx = collections[0]["cdx-api"]
     print(f"  querying Common Crawl index {collections[0]['id']}...", file=sys.stderr)
     seen: dict[str, str] = {}
     for domain in domains:
         query = f"{cdx}?url={urllib.parse.quote(domain)}%2F*&output=json&fl=url"
-        # ponytail: walk pages until one comes back empty rather than asking
+        # Walk pages until empty or a verified out-of-range response rather than asking
         # showNumPages first — that query is the most expensive one CDX offers and
         # times out far more often than the pages themselves.
         for page in range(max_pages):
             if page:
                 time.sleep(1)  # Common Crawl asks for max 1 CDX request/second.
             try:
-                body = fetch(f"{query}&page={page}", timeout=120, retries=6).decode()
+                rows = _archive_json(f"{query}&page={page}", json_lines=True, timeout=120, retries=6)
             except NotFound:
                 break
-            if not body.strip():
+            except urllib.error.HTTPError as exc:
+                if _commoncrawl_page_finished(exc, page):
+                    break
+                raise
+            if not rows:
                 break
-            for line in body.splitlines():  # JSONL, not a JSON array
-                if line.strip():
-                    _add(seen, json.loads(line)["url"])
+            for row in rows:
+                _add(seen, row["url"])
     return seen
 
 
@@ -740,6 +787,7 @@ def load_boards(
                     } for slug in slugs)
             return got
     boards = _read_boards(BOARDS_CACHE)
+    failures = []
     for ats in ats_list:
         try:
             boards[ats] = discover_boards(
@@ -754,12 +802,12 @@ def load_boards(
                 "slow down, and that a repeatedly-abusive IP can be blocked for 24 "
                 "hours. Wait before retrying."
             )
-        except (urllib.error.URLError, TimeoutError) as e:
-            sys.exit(
-                f"board discovery failed for {ats}: {e}\n"
-                "Both the Wayback Machine and Common Crawl were unreachable. Retry "
-                "later; the bundled job_search/collection/boards.seed.json means this phase is optional."
-            )
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeError) as e:
+            failure = f"{ats}: {type(e).__name__}: {e}"
+            failures.append(failure)
+            print(f"  discovery incomplete for {failure}; continuing other platforms", file=sys.stderr)
+    if failures:
+        raise DiscoveryFailed("board discovery incomplete: " + "; ".join(failures))
     total = sum(len(boards.get(a, [])) for a in ats_list)
     if write_cache:
         BOARDS_CACHE.write_text(json.dumps(boards, indent=2))
@@ -1461,6 +1509,9 @@ def run_recorded_discovery(
         finish_discovery_run(
             db_path, run_id, observations, finished_at, status="failed", error=str(e)
         )
+        if isinstance(e, DiscoveryFailed):
+            # Preserve verified progress and known boards without claiming success.
+            export_boards_from_registry(db_path, ats_list)
         raise
 
     finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

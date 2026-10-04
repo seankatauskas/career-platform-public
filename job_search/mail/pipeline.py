@@ -7,7 +7,8 @@ from typing import Any, Mapping, Sequence
 from job_search.contracts import EventProposalInput
 
 from .context import CandidateApplication, bounded_candidates
-from .proposals import validate_model_output
+from .proposals import build_proposal, validate_model_output
+from .identity import supported_candidates, supported_selection
 from .rules import match_known_template
 from .sanitizer import SanitizedMail
 
@@ -39,10 +40,22 @@ def analyze_mail(
     if classifier is None:
         return None
     raw = classifier.classify(mail.text, [item.model_context() for item in bounded])
-    return validate_model_output(
+    proposal = validate_model_output(
         raw,
         evidence_id=evidence_id,
         mail=mail,
         candidates=bounded,
         producer_version=model_version,
+    )
+    # Validate the model's original IDs and quote first, then independently guard
+    # identity. Unsupported matches become durable unassigned review items.
+    return build_proposal(
+        evidence_id=evidence_id, mail=mail,
+        candidates=supported_candidates(bounded, mail.subject, mail.body),
+        application_id=supported_selection(bounded, proposal.proposed_application_id, mail.subject, mail.body)
+        if candidate_context_complete else None,
+        event_type=proposal.event_type, producer_kind=proposal.producer_kind,
+        producer_version=proposal.producer_version, confidence=proposal.confidence,
+        evidence_quote=proposal.evidence_quote, span_start=proposal.span_start,
+        span_end=proposal.span_end,
     )

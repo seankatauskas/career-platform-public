@@ -226,6 +226,75 @@ def test_known_template_can_disambiguate_by_employer_name() -> None:
     assert matched.proposal.proposed_application_id == "app-2"
 
 
+def test_thanks_for_applying_receipts_use_exact_rule_evidence_before_model() -> None:
+    class UnexpectedClassifier:
+        def classify(self, *args):
+            raise AssertionError("model ran for a known submission receipt")
+
+    for ats, sender in (
+        ("greenhouse", "no-reply@us.greenhouse-mail.io"),
+        ("ashby", "no-reply@ashbyhq.com"),
+        ("lever", "no-reply@lever.co"),
+        ("workday", "no-reply@myworkday.com"),
+    ):
+        for subject_phrase, body_phrase in (
+            ("thanks", "Thanks"),
+            ("thank you", "Thanks"),
+            ("thanks", "Thank you"),
+        ):
+            mail = sanitize_mail(
+                f"You’re on our radar — {subject_phrase} for applying to Example Labs 🚀",
+                f"<p>{body_phrase} for applying to Example Labs.</p>"
+                "<p>We will review your Software Engineer application.</p>",
+                body_kind="html",
+            )
+            proposal = analyze_mail(
+                evidence_id="thanks-receipt",
+                sender_address=sender,
+                mail=mail,
+                candidates=[candidate(ats=ats)],
+                classifier=UnexpectedClassifier(),
+                model_version="unused-model",
+                sender_authenticated=True,
+            )
+            assert proposal is not None
+            assert proposal.producer_kind is ProducerKind.RULE
+            assert proposal.event_type is ApplicationEventType.SUBMISSION_CONFIRMED
+            assert proposal.evidence_quote == f"{body_phrase} for applying to Example Labs"
+            assert mail.verifies_evidence(
+                proposal.evidence_quote, proposal.span_start, proposal.span_end,
+            )
+            assert decide_proposal(proposal).disposition is ProposalDisposition.AUTO_APPLY
+
+
+def test_thanks_for_applying_receipts_preserve_sender_identity_and_evidence_gates() -> None:
+    mail = sanitize_mail(
+        "Thanks for applying to Example Labs",
+        "Thanks for applying to Example Labs for Software Engineer.",
+    )
+
+    def matched(*, sender="no-reply@greenhouse.io", authenticated=True,
+                complete=True, items=None, message=mail):
+        return match_known_template(
+            evidence_id="thanks-guards", sender_address=sender, mail=message,
+            candidates=[candidate()] if items is None else items,
+            sender_authenticated=authenticated, candidate_context_complete=complete,
+        )
+
+    assert matched(sender="no-reply@greenhouse.io.evil.example") is None
+    assert matched(sender="no-reply@example.test") is None
+    assert matched(message=sanitize_mail(mail.subject, "Please finish your application.")) is None
+    for result in (
+        matched(authenticated=False),
+        matched(complete=False),
+        matched(items=[candidate(employer="Other Employer")]),
+        matched(items=[candidate(), candidate("app-2")]),
+    ):
+        assert result is not None
+        assert decide_proposal(result.proposal).disposition is ProposalDisposition.REVIEW
+    assert matched(items=[candidate(), candidate("app-2")]).proposal.proposed_application_id is None
+
+
 def test_rule_auto_apply_requires_authentication_strong_identity_and_complete_context() -> None:
     strong_mail = sanitize_mail(
         "Application received - Example Labs Software Engineer",

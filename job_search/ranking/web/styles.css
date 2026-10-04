@@ -139,16 +139,11 @@ legend span, summary span { color: var(--muted); font-weight: 400; }
 .recommendation-controls .toggle-label { align-self: end; }
 .recommendation-list { display: grid; gap: 14px; }
 .recommendation-card { padding: 24px 26px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: none; }
-.recommendation-card.explore { border-color: var(--line); background: var(--panel); }
-.recommendation-card.compare_broad { border-color: var(--line); background: var(--panel); }
 .recommendation-rank { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
-.recommendation-rank .explore-label { padding: 4px 6px; color: var(--amber); border-radius: 5px; background: var(--warning-bg); }
+.recommendation-rank .policy-label { padding: 4px 6px; color: var(--amber); border-radius: 5px; background: var(--warning-bg); }
 .recommendation-card h2 { margin: 10px 0 4px; font: 500 27px/1.15 "Helvetica Neue", Helvetica, Arial, sans-serif; }
 .recommendation-card .company { font-size: 17px; }
 .recommendation-card .job-facts { margin: 17px 0; }
-.score-line { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; padding: 12px 14px; color: var(--muted); border-radius: 6px; background: var(--subtle); font-size: 12px; }
-.score-line strong { color: var(--ink); }
-.recommendation-explanation { margin: 13px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .recommendation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
 .recommendation-actions button, .recommendation-actions a { padding: 8px 11px; color: var(--green-dark); border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); text-decoration: none; font-size: 13px; font-weight: 500; }
 .recommendation-actions button:hover, .recommendation-actions a:hover { background: var(--green-soft); }

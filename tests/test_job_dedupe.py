@@ -385,6 +385,176 @@ def test_prepared_reuse_rejects_stale_normalization_or_missing_templates() -> No
         assert not prepared_families_are_current(db)
 
 
+def _reference_prepare(path: Path) -> None:
+    """Original whole-catalog workflow, retained as a parity oracle for small fixtures."""
+    from job_search.collection import dedupe
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        families, members = dedupe._build_rows(con.execute(
+            "SELECT ats,id,company,title,description FROM jobs ORDER BY ats,id"))
+        templates = dedupe._stable_template_lineages(con, dedupe._template_components(families), members)
+        rows = []
+        for family in families:
+            fid = family["family_id"]
+            description = family["description_normalized"]
+            leakage = (dedupe._identifier("leak", "exact-description", [description]) if description
+                       else dedupe._identifier("leak", "empty-singleton", [fid]))
+            rows.append((fid, templates[fid], leakage, dedupe.NORMALIZATION_VERSION))
+        dedupe._upsert_derived_rows(con, families, members, rows)
+
+
+def test_block_preparation_matches_full_catalog_through_lineage_edits_and_splits() -> None:
+    from job_search.collection import dedupe
+    text = _long("Build reliable systems and carefully review services.", 30)
+    with tempfile.TemporaryDirectory() as left_dir, tempfile.TemporaryDirectory() as right_dir:
+        jobs = [("ashby", str(i), "Ａcme" if i % 2 else "acme", "Engineer", text + (" Extra." if i % 3 else ""))
+                for i in range(12)]
+        jobs += [("lever", "empty", "Elsewhere", None, ""),
+                 ("lever", "thin", "Elsewhere", "Design", "Thin"),
+                 ("ashby", "outside", "Another", "Research", text)]
+        left, right = _make_db(left_dir, jobs), _make_db(right_dir, jobs)
+        edits = [None,
+                 ("UPDATE jobs SET description=? WHERE id='1'", (_long("Independent research into fossils."),)),
+                 ("DELETE FROM jobs WHERE id IN ('0','3','6','9')", ()),
+                 ("UPDATE jobs SET company='Another' WHERE id='1'", ())]
+        for edit in edits:
+            if edit:
+                for path in (left, right):
+                    with sqlite3.connect(path) as con:
+                        con.execute(*edit)
+            _reference_prepare(left)
+            prepare_families(right)
+            assert _derived_snapshot(left) == _derived_snapshot(right)
+            with sqlite3.connect(left) as a, sqlite3.connect(right) as b:
+                sql = "SELECT * FROM job_template_cluster_lineage ORDER BY 1,2"
+                assert a.execute(sql).fetchall() == b.execute(sql).fetchall()
+                assert a.execute("SELECT * FROM jobs ORDER BY ats,id").fetchall() == b.execute("SELECT * FROM jobs ORDER BY ats,id").fetchall()
+            assert dedupe.prepared_families_are_current(right)
+
+
+def test_preparation_failure_rolls_back_derived_metadata_and_closes_connection() -> None:
+    from job_search.collection import dedupe
+    with tempfile.TemporaryDirectory() as directory:
+        db = _make_db(directory, [("ashby", "1", "acme", "Engineer", _long("Build reliable systems."))])
+        prepare_families(db)
+        before = _derived_snapshot(db)
+        with sqlite3.connect(db) as con:
+            old_lineage = con.execute("SELECT * FROM job_template_cluster_lineage ORDER BY 1").fetchall()
+            con.execute("UPDATE jobs SET title='Changed'")
+            con.execute("INSERT INTO jobs(ats,id,company,title,description) "
+                        "VALUES ('lever','new','Another','Novel','Short description')")
+        with patch.object(dedupe, "_upsert_derived_rows", side_effect=RuntimeError("injected publication failure")):
+            try:
+                prepare_families(db)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("failure did not propagate")
+        assert before == _derived_snapshot(db)
+        assert not list(Path(directory).glob(".family-preparation-*"))
+        # A fresh exclusive writer succeeds immediately after the failed call.
+        with sqlite3.connect(db, timeout=0) as con:
+            assert con.execute("SELECT * FROM job_template_cluster_lineage ORDER BY 1").fetchall() == old_lineage
+            con.execute("BEGIN EXCLUSIVE")
+            con.execute("UPDATE jobs SET title='Recovered'")
+        prepare_families(db)
+        assert dedupe.prepared_families_are_current(db)
+
+
+def test_concurrent_source_commit_prevents_stale_preparation_publication() -> None:
+    from job_search.collection import dedupe
+    with tempfile.TemporaryDirectory() as directory:
+        db = _make_db(directory, [("ashby", "1", "acme", "Engineer", _long("Build reliable systems."))])
+        with sqlite3.connect(db) as con:
+            con.execute("PRAGMA journal_mode=WAL")
+        prepare_families(db)
+        before = _derived_snapshot(db)
+        original = dedupe._template_components
+
+        def concurrent_edit(rows):
+            with sqlite3.connect(db, timeout=0) as writer:
+                writer.execute("UPDATE jobs SET title='Changed concurrently'")
+            return original(rows)
+
+        with patch.object(dedupe, "_template_components", side_effect=concurrent_edit):
+            try:
+                prepare_families(db)
+            except sqlite3.OperationalError as exc:
+                assert "locked" in str(exc)
+            else:
+                raise AssertionError("concurrent source change was silently certified")
+        assert before == _derived_snapshot(db)
+        assert not dedupe.prepared_families_are_current(db)
+        prepare_families(db)
+        assert dedupe.prepared_families_are_current(db)
+
+
+def test_currentness_uses_caller_snapshot_without_ending_transaction() -> None:
+    from job_search.collection import dedupe
+    with tempfile.TemporaryDirectory() as directory:
+        db = _make_db(directory, [("ashby", "1", "acme", "Engineer", _long("Build reliable systems."))])
+        prepare_families(db)
+        with sqlite3.connect(db) as con:
+            con.execute("BEGIN")
+            con.execute("UPDATE jobs SET description='uncommitted source change'")
+            assert not dedupe.prepared_families_are_current(db, connection=con)
+            assert con.in_transaction
+            con.rollback()
+            assert dedupe.prepared_families_are_current(db, connection=con)
+            assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_preparation_stages_privately_on_catalog_volume_and_cleans_up() -> None:
+    from job_search.collection import dedupe
+    with tempfile.TemporaryDirectory() as directory:
+        db = _make_db(directory, [("ashby", "1", "acme", "Engineer", _long("Build reliable systems."))])
+        original = dedupe._template_components
+        seen = []
+        connections = []
+        original_connect = sqlite3.connect
+
+        def track_connect(*args, **kwargs):
+            con = original_connect(*args, **kwargs)
+            connections.append(con)
+            return con
+
+        def inspect_scratch(rows):
+            scratch = list(db.parent.glob(".family-preparation-*"))
+            assert len(scratch) == 1
+            assert scratch[0].parent.resolve() == db.parent.resolve()
+            assert scratch[0].stat().st_mode & 0o777 == 0o700
+            assert (scratch[0] / "source.db").is_file()
+            databases = {row[1]: row[2] for row in connections[0].execute("PRAGMA database_list")}
+            assert Path(databases["preparation"]).resolve() == (scratch[0] / "source.db").resolve()
+            seen.append(scratch[0])
+            return original(rows)
+
+        with patch.object(dedupe.sqlite3, "connect", side_effect=track_connect), \
+                patch.object(dedupe, "_template_components", side_effect=inspect_scratch):
+            prepare_families(db)
+        assert seen and all(not path.exists() for path in seen)
+
+
+def test_block_preparation_preserves_numeric_zero_and_skips_only_missing_ids() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        paths = [Path(directory) / name for name in ("reference.db", "optimized.db")]
+        for db in paths:
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE jobs(ats,id,company,title,description)")
+                con.executemany("INSERT INTO jobs VALUES (?,?,?,?,?)", [
+                    (0, 0, "numeric", "Role", _long("Build systems.")),
+                    ("ashby", 0, "numeric", "Role", _long("Build systems.")),
+                    (None, "missing ats", None, None, None),
+                    ("ashby", None, None, None, None),
+                    ("", "blank ats", None, None, None),
+                    ("ashby", "", None, None, None),
+                ])
+        _reference_prepare(paths[0])
+        result = prepare_families(paths[1])
+        assert result["jobs"] == 2
+        assert _derived_snapshot(paths[0]) == _derived_snapshot(paths[1])
+
+
 if __name__ == "__main__":
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:

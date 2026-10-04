@@ -9,6 +9,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -183,6 +184,7 @@ class DashboardController:
         mail_source: Optional[Any] = None,
         demo_mode: bool = False,
         automation_config: Any = None,
+        cost_snapshot_path: Optional[Path] = None,
     ) -> None:
         from .curated import CuratedShortlists
         self.curated = CuratedShortlists(ledger.store.db_path, jobs)
@@ -196,6 +198,13 @@ class DashboardController:
         self.mail_source = mail_source
         self.demo_mode = demo_mode
         self.automation_config = automation_config
+        self.cost_snapshot_path = cost_snapshot_path
+        from .job_reviews.service import JobReviews
+        from .job_reviews.context import profile_context
+        from .scanning import scan_status
+        self.job_reviews = JobReviews(ledger.store.db_path, jobs, lambda: profile_context(self.resume_lab),
+            collection_provider=(lambda: scan_status(automation_config)) if automation_config else None)
+
         self.autofill = autofill or AutofillBroker(
             ledger,
             AutofillProfile.empty(),
@@ -222,6 +231,52 @@ class DashboardController:
                     'history_note': 'Posting history is unavailable for this catalog.'}
         return self.jobs.posting_history(app['ats'], app['job_id'], before)
 
+    def with_recent_company_applications(self, rows: Sequence[Mapping[str, Any]]) -> list[dict]:
+        """Refresh company history without changing saved recommendation snapshots."""
+        if not rows:
+            return []
+
+        def company_key(value: Any) -> str:
+            # Exact normalized aliases work across ATS without merging similar names.
+            return ' '.join(unicodedata.normalize('NFKC', str(value or '')).casefold().split())
+
+        latest = {}
+        for order, application in enumerate(self.ledger.recent_company_applications()):
+            metadata = {key: application[key] for key in ('application_id', 'applied_at', 'window_days')}
+            employer = company_key(application['employer_snapshot'])
+            slug = company_key(application['company_slug_snapshot'])
+            # Collector-backed applications copy the board slug into both fields.
+            # That is not evidence of a shared employer name across ATS providers.
+            if employer and employer != slug:
+                latest.setdefault(('employer', employer), (order, metadata))
+            if slug:
+                latest.setdefault(('board', company_key(application['ats']), slug), (order, metadata))
+        enriched = []
+        for row in rows:
+            displayed = {**row, **(row.get('job_posting') or {})}
+            company = company_key(displayed.get('company'))
+            matches = [latest[key] for key in (
+                ('employer', company), ('board', company_key(displayed.get('ats')), company),
+            ) if key in latest]
+            metadata = min(matches, key=lambda match: match[0])[1] if matches else None
+            enriched.append({**row, 'recent_company_application': metadata})
+        return enriched
+
+    def conversation_message(self, application_id: str, observation_id: str) -> Mapping[str, Any]:
+        observation = self.ledger.lifecycle.get_mail_observation(observation_id)
+        if application_id not in observation['application_ids']:
+            raise ContractError('message is not linked to this application')
+        result = {'subject':observation['subject'], 'sender':observation['sender'], 'excerpt':'', 'available':False}
+        if observation.get('evidence_id'):
+            result['excerpt'] = self.ledger.get_sanitized_evidence(observation['evidence_id'])['excerpt']
+        if self.mail_source is not None and observation.get('archive_id'):
+            try:
+                content = self.mail_source.get_mail_message(observation['archive_id'])
+                result.update(subject=content.get('subject',''), excerpt=content.get('excerpt',''), available=True)
+            except Exception:
+                pass  # An inaccessible archive cannot disclose key/provider errors.
+        return result
+
     def application_workspace(self, application_id: str) -> Mapping[str, Any]:
         timeline = self.ledger.get_application_timeline(application_id)
         messages = []
@@ -243,14 +298,14 @@ class DashboardController:
             except Exception:
                 resume = {"available": False, "reason": "resume_unavailable"}
         return {
-            **timeline, "resume": resume, "messages": messages,
+            **timeline, "briefing": self.ledger.lifecycle.get_application_briefing(application_id), "resume": resume, "messages": messages,
             "documents": application_documents(self.ledger, self.resume_lab, application_id),
             "application": self.with_posting_dates([timeline['application']])[0],
             "job_history": self.application_job_history(application_id),
             "browser_tracking": self.browser_tracking.application_status(application_id),
             "browser_observations": self.browser_tracking.evidence(application_id),
             "answer_snapshots": application_snapshots(self.ledger.store.db_path, application_id),
-            "interviews": [item for item in self.ledger.list_interview_schedules() if item.get("application_id") == application_id],
+            "interviews": list(self.ledger.list_interview_schedules(application_id=application_id)),
             "actions": [item for item in self.ledger.list_actions() if item.get("application_id") == application_id],
             "reviews": [item for item in self.ledger.list_attention_items() if item.get("kind") != "action_proposal" and (item.get("application_id") == application_id or application_id in item.get("candidate_application_ids", []))],
         }
@@ -314,7 +369,8 @@ class DashboardController:
             actor="dashboard",
             excluded_job_keys=self.ledger.application_keys(),
         )
-        result = {**result, 'recommendations': self.with_posting_dates(result.get('recommendations', []))}
+        result = {**result, 'recommendations': self.with_recent_company_applications(
+            self.with_posting_dates(result.get('recommendations', [])))}
         if self.automation_config is not None:
             from .ranking.refresh import inspect_policies
             config = self.automation_config
@@ -325,17 +381,20 @@ class DashboardController:
 
     def cached_shortlist(self, browser_session_id: str) -> Mapping[str, Any]:
         with self._shortlist_lock:
-            return self._shortlists.get(
+            result = self._shortlists.get(
                 browser_session_id,
                 {"recommendations": [], "model": {"ready": False}, "session_id": None},
             )
+        return {**result, 'recommendations': self.with_recent_company_applications(result.get('recommendations', []))}
 
     def curated_list(self, list_id: str) -> Mapping[str, Any]:
         result = self.curated.get(list_id)
-        rows = self.with_posting_dates(result['recommendations'])
+        rows = self.with_recent_company_applications(self.with_posting_dates(result['recommendations']))
+        ordinals = self.job_reviews.publication_ordinals(list_id)
         for row in rows:
             row['closed_at'] = row.get('job_posting', {}).get('closed_at', row.get('closed_at'))
-        return {**result, 'recommendations': rows}
+            row['review_ordinal'] = ordinals.get((row['ats'], row['id']))
+        return {**result, 'recommendations': rows, 'review': self.job_reviews.publication_summary(list_id)}
 
     def curated_job(self, list_id: str, ats: str, job_id: str) -> Mapping[str, Any]:
         self.curated.item(list_id, ats, job_id)
@@ -827,6 +886,7 @@ class DashboardController:
             "checked_at": health["checked_at"],
             "health": health,
             "readiness": self.readiness_view(),
+            "costs": self.cost_view(),
             "recovery": {"items": self.recovery_work()},
             "reminders": {
                 "counts": health.get("reminders", {}).get("counts", {}),
@@ -840,6 +900,10 @@ class DashboardController:
             },
         }
 
+    def cost_view(self) -> Mapping[str, Any]:
+        from .cost_snapshot import read_cost_snapshot
+        return read_cost_snapshot(self.cost_snapshot_path)
+
     def issue_autofill_handoff(
         self,
         browser_session_id: str,
@@ -852,6 +916,7 @@ class DashboardController:
 
 
 STATIC_ROUTES = {
+    "/assets/lifecycle-view.js": ("lifecycle-view.js", "text/javascript; charset=utf-8"),
     "/assets/applications-view.js": ("applications-view.js", "text/javascript; charset=utf-8"),
     "/assets/applications-view.css": ("applications-view.css", "text/css; charset=utf-8"),
     "/assets/shortlist-view.js": ("shortlist-view.js", "text/javascript; charset=utf-8"),
@@ -859,6 +924,7 @@ STATIC_ROUTES = {
     "/assets/review-view.js": ("review-view.js", "text/javascript; charset=utf-8"),
     "/assets/review-view.css": ("review-view.css", "text/css; charset=utf-8"),
     "/assets/settings-view.js": ("settings-view.js", "text/javascript; charset=utf-8"),
+    "/assets/chief-view.js": ("chief-view.js", "text/javascript; charset=utf-8"),
     "/assets/settings-view.css": ("settings-view.css", "text/css; charset=utf-8"),
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -1230,6 +1296,13 @@ def make_handler(
                         new_session=new_session,
                     )
                     return
+                if path == "/api/v1/job-reviews":
+                    self._json(controller.job_reviews.call('list'), session=session, new_session=new_session)
+                    return
+                if path.startswith("/api/v1/job-reviews/"):
+                    rid = path[len("/api/v1/job-reviews/"):]
+                    self._json(controller.job_reviews.call('status', {'review_id': rid}), session=session, new_session=new_session)
+                    return
                 if path == "/api/v1/curated-shortlists":
                     query = parse_qs(parsed_url.query)
                     before = query.get('before', [None])[0]
@@ -1366,6 +1439,41 @@ def make_handler(
                         headers,
                     )
                     return
+                if path.startswith('/api/v1/chief/'):
+                    from .interactions.dashboard import read
+                    self._json(read(controller.ledger,path[len('/api/v1/chief/'):],parse_qs(parsed_url.query,keep_blank_values=True)),session=session,new_session=new_session)
+                    return
+                history_match = re.fullmatch(r"/api/v1/lifecycle/history/(task|detail)/([A-Za-z0-9._:-]+)", path)
+                if history_match:
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    if set(query) - {"after_revision", "limit"} or any(len(v) != 1 for v in query.values()):
+                        raise ContractError("invalid history query")
+                    limit = controller._integer({"limit": query.get("limit", ["25"])[0]}, "limit", 25, 1, 100)
+                    after = controller._integer({"after": query.get("after_revision", ["0"])[0]}, "after", 0, 0, 100000)
+                    self._json(controller.ledger.lifecycle.get_record_history(history_match.group(1), history_match.group(2), limit=limit, after_revision=after), session=session, new_session=new_session)
+                    return
+                if path == "/api/v1/lifecycle/replays":
+                    self._json({**controller.ledger.lifecycle.list_mail_replays(), "accounts": controller.ledger.lifecycle.list_mail_replay_accounts()}, session=session, new_session=new_session)
+                    return
+                if path == "/api/v1/lifecycle/reviews":
+                    self._json({"items": controller.ledger.lifecycle.list_lifecycle_reviews()}, session=session, new_session=new_session)
+                    return
+                lifecycle_match = re.fullmatch(r"/api/v1/applications/([A-Za-z0-9._:-]+)/briefing", path)
+                if lifecycle_match:
+                    self._json(controller.ledger.lifecycle.get_application_briefing(lifecycle_match.group(1)), session=session, new_session=new_session)
+                    return
+                message_match = re.fullmatch(r"/api/v1/applications/([A-Za-z0-9._:-]+)/conversation/([A-Za-z0-9._:-]+)", path)
+                if message_match:
+                    self._json(controller.conversation_message(message_match.group(1),message_match.group(2)), session=session, new_session=new_session)
+                    return
+                conversation_match = re.fullmatch(r"/api/v1/applications/([A-Za-z0-9._:-]+)/conversation", path)
+                if conversation_match:
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    if set(query) - {"cursor", "limit"} or any(len(v) != 1 for v in query.values()):
+                        raise ContractError("invalid conversation query")
+                    limit = controller._integer({"limit": query.get("limit", ["25"])[0]}, "limit", 25, 1, 100)
+                    self._json(controller.ledger.lifecycle.list_application_conversation(conversation_match.group(1), limit=limit, cursor=query.get("cursor", [None])[0]), session=session, new_session=new_session)
+                    return
                 if path == "/api/v1/applications":
                     self._json({"applications": [{**app, "browser_tracking": controller.browser_tracking.application_status(app["application_id"])} for app in controller.with_posting_dates(controller.ledger.list_applications())]}, session=session, new_session=new_session)
                     return
@@ -1390,7 +1498,7 @@ def make_handler(
                     self._json(controller.ledger.get_application_timeline(match.group(1)), session=session, new_session=new_session)
                     return
                 if path == "/api/v1/attention":
-                    self._json({"items": controller.ledger.list_attention_items()}, session=session, new_session=new_session)
+                    self._json({"items": [*controller.ledger.list_attention_items(), *controller.ledger.lifecycle.list_lifecycle_reviews()]}, session=session, new_session=new_session)
                     return
                 if path == "/api/v1/interviews":
                     self._json(
@@ -1411,6 +1519,9 @@ def make_handler(
                     return
                 if path == "/api/v1/ops/readiness":
                     self._json(controller.readiness_view(), session=session, new_session=new_session)
+                    return
+                if path == "/api/v1/ops/costs":
+                    self._json(controller.cost_view(), session=session, new_session=new_session)
                     return
                 if path == "/api/v1/ops/pipeline":
                     self._json(controller.pipeline_view(), session=session, new_session=new_session)
@@ -1536,7 +1647,22 @@ def make_handler(
                     self._json(result, status=HTTPStatus.ACCEPTED, session=session, new_session=new_session)
                     return
                 body = self._read_json()
+                if path.startswith("/api/v1/job-reviews/"):
+                    action = path[len("/api/v1/job-reviews/"):]
+                    self._json(controller.job_reviews.call(action, body), session=session, new_session=new_session)
+                    return
                 idempotency_key = self._idempotency(body)
+                if path.startswith('/api/v1/chief/'):
+                    from .interactions.dashboard import mutate
+                    result = mutate(controller.ledger,path[len('/api/v1/chief/'):],body,self._mutation_context(idempotency_key,session,'dashboard_chief'))
+                    self._json(result,session=session,new_session=new_session)
+                    return
+                if path.startswith("/api/v1/lifecycle/"):
+                    from .lifecycle.dashboard import mutate
+                    result = mutate(controller.ledger.lifecycle, path[len("/api/v1/lifecycle/"):], body,
+                        self._mutation_context(idempotency_key, session, "dashboard_lifecycle"))
+                    self._json(result, session=session, new_session=new_session)
+                    return
                 if path == "/api/v1/ops/scan":
                     if controller.automation_config is None or controller.demo_mode:
                         raise ContractError("Job scanning is not configured in this dashboard.")

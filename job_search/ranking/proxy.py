@@ -860,7 +860,9 @@ def status(proxy_db: Path, run_id: Optional[str] = None) -> dict[str, Any]:
         audits = {
             str(row["policy_id"]): json.loads(row["audit_json"])
             for row in con.execute(
-                "SELECT policy_id,audit_json FROM proxy_student_audits WHERE run_id=?",
+                "SELECT a.policy_id,a.audit_json FROM proxy_student_audits a "
+                "JOIN proxy_students s ON s.run_id=a.run_id AND s.policy_id=a.policy_id "
+                "AND s.model_run_id=a.model_run_id WHERE a.run_id=?",
                 (selected,),
             )
         }

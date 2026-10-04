@@ -78,8 +78,8 @@ def test_confirmation_email_provenance():
         assert 'email_evidence' not in events[0]
         confirmation = events[-1]
         assert confirmation['source_kind'] == 'codex'
-        assert confirmation['occurred_at'] == confirmation['recorded_at']
-        assert confirmation['occurred_at'] != received_at
+        assert confirmation['occurred_at'] == received_at
+        assert confirmation['recorded_at'] != received_at
         assert confirmation['email_evidence'] == {
             'evidence_id': evidence, 'sender': 'no-reply@example.test',
             'subject': 'Thank you for applying', 'received_at': received_at,

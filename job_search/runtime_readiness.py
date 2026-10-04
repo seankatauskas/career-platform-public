@@ -64,7 +64,17 @@ def runtime_readiness(
         from .ranking.refresh import inspect_policies
         from .readiness import _capability
         policies=inspect_policies(config.preference_db,config.proxy_db,config.jobs_db)
-        extra=[_capability("ranking_"+name, row['status'], reason=row['reason'], action="inspect_ranking_setup" if row['status'] != 'ready' else 'none') for name,row in policies.items()]
+        ranking = next((item for item in report['capabilities'] if item['id'] == 'ranking'), None)
+        inactive = ranking if ranking and ranking['status'] in {'paused', 'disabled'} else None
+        extra = []
+        for name, row in policies.items():
+            state = 'paused' if not automation_enabled else inactive['status'] if inactive else row['status']
+            reason = 'automation_paused' if not automation_enabled else inactive['reason_code'] if inactive else row['reason']
+            action = 'review_activation' if state == 'paused' else 'none' if state == 'ready' else 'inspect_ranking_setup'
+            extra.append(_capability('ranking_' + name, state,
+                                     enabled=state not in {'paused', 'disabled'},
+                                     configured=row.get('artifact_present', False),
+                                     reason=reason, action=action))
         usage=report.get("inference_usage")
         report=_report(report['checked_at'],report['capabilities']+extra,report['metrics'])
         report['ranking_policies']=policies
@@ -76,7 +86,7 @@ def runtime_readiness(
             (config.board_registry_path is None or config.board_registry_path.is_file()),
         "ats.discovery": has_real_scraper_contact(config.environment({})),
         "outlook": bool(config.outlook_client_id),
-        "notifications": bool(config.hermes_telegram_target and config.hermes_executable),
+        "notifications": bool(config.hermes_telegram_target and (config.hermes_executable or config.hermes_notification_socket)),
         "ranking": all(row.get("artifact_present") for row in report.get("ranking_policies", {}).values())
             if report.get("ranking_policies") else config.preference_db.is_file(),
         "shortlist": config.preference_db.is_file(),
@@ -100,5 +110,12 @@ def runtime_readiness(
         "schema_version": version,
         "identity_verified": bool(re.fullmatch(r"[a-f0-9]{40}", sha)),
     }
+    try:
+        from .chief_status import chief_status
+        chief, chief_capabilities = chief_status(config)
+        report.update(_report(report["checked_at"], report["capabilities"] + chief_capabilities, report["metrics"]))
+        report["chief_of_staff"] = chief
+    except (sqlite3.Error, ValueError):
+        pass  # Existing database diagnostics explain uninitialized/older state.
     report["external_services_verified"] = False
     return report

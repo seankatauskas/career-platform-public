@@ -618,12 +618,14 @@ def test_accepted_deadline_creates_queryable_local_reminder_without_schedule() -
         proposal = TemporalProposalEngine(
             service, FixedDeadlineExtractor(), "deadline-v1"
         ).propose(source, [candidate])[0]["proposal"]
-        accepted = service.decide_temporal_proposal(
-            proposal["temporal_proposal_id"],
-            "accepted",
-            "deadline confirmed",
-            context("accept-deadline", "user"),
-        )
+        # Acceptance precedes the deadline regardless of the machine's wall clock.
+        with patch("job_search.store.utc_now", return_value=NOW):
+            accepted = service.decide_temporal_proposal(
+                proposal["temporal_proposal_id"],
+                "accepted",
+                "deadline confirmed",
+                context("accept-deadline", "user"),
+            )
         assert accepted["schedule"] is None
         assert [item["kind"] for item in accepted["reminders"]] == ["deadline"]
         assert service.list_interview_schedules() == ()

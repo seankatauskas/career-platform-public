@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import time
 
-SERVICES = ("tools", "dashboard", "mcp", "core", "model")
+SERVICES = ("tools", "dashboard", "mcp", "core", "model", "interactions")
 
 
 def run(argv, *, env=None, input=None, timeout=180):
@@ -88,6 +88,8 @@ def main():
     mail_overlay = repo / "compose.mail.yaml"
     if mail_overlay.is_file():
         compose_prefix.extend(["--file", str(mail_overlay)])
+    for overlay in ("compose.hermes.yaml", "compose.chief.yaml", "compose.briefing.yaml"):
+        compose_prefix.extend(["--file", str(repo / overlay)])
     socket_volume = None
     state_volumes = {}
     created_volumes = []
@@ -104,7 +106,7 @@ def main():
             override["services"][service] = {"volumes": [{"type": "volume", "source": "acceptance-tools", "target": "/run/job-search-tools", "read_only": service != "tools"}]}
         # Only services that already have the production state mount receive it.
         # Document tools retain their existing isolated filesystem boundary.
-        for service in ("initialize", "dashboard", "mcp", "core", "model"):
+        for service in ("initialize", "dashboard", "mcp", "core", "model", "interactions"):
             override["services"].setdefault(service, {}).setdefault("volumes", []).append(
                 {"type": "volume", "source": "acceptance-state", "target": "/var/lib/job-search", "volume": {"nocopy": True}})
         override_file = temporary / "desktop.override.json"
@@ -136,11 +138,13 @@ def main():
                   "mcp_token_file": "/run/job-search/mcp-token", "portable_encryption_key_file": "/run/job-search/portable-master-key",
                   "dashboard_port": 28766, "mcp_port": 28767, "log_dir": state + "/logs", "timezone": "America/Chicago",
                   "outlook_client_id": "", "scraper_contact": "", "hermes_telegram_target": "",
-                  "shortlist_notifications_enabled": False, "remote_mail_inference_enabled": False}
+                  "shortlist_notifications_enabled": False, "remote_mail_inference_enabled": False,
+                  "interaction_token_file": "/run/job-search/interaction-token",
+                  "telegram_bot_id": "123", "telegram_user_id": "456", "telegram_chat_id": "456"}
         private_json(data / "private/config.json", config)
-        for name in ("inference.json", "resume-model.json", "mail-inference.json"):
+        for name in ("inference.json", "resume-model.json", "mail-inference.json", "briefing-inference.json"):
             private_json(data / "private" / name, {})  # Mounted, but intentionally unconfigured.
-        for name, value in (("mcp-token", secrets.token_urlsafe(48).encode()), ("portable-master-key", secrets.token_bytes(32)), ("runpod-api-key", b"unused-fixture-key")):
+        for name, value in (("mcp-token", secrets.token_urlsafe(48).encode()), ("portable-master-key", secrets.token_bytes(32)), ("runpod-api-key", b"unused-fixture-key"), ("interaction-token", secrets.token_urlsafe(48).encode()), ("briefing-api-key", b"unused-briefing-fixture-key")):
             (data / "private" / name).write_bytes(value)
             (data / "private" / name).chmod(0o600)
         private_json(data / "materialized-secrets.json", {})
@@ -149,9 +153,17 @@ def main():
         return config
 
     def use_data(data):
+        (data / "costs").mkdir(mode=0o755, exist_ok=True)
         env.update({"JOB_SEARCH_MAINTENANCE_DIR": str(data / "maintenance"), "JOB_SEARCH_INITIALIZE_OPERATION": "acceptance", "JOB_SEARCH_STATE_DIR": str(data / "state"), "JOB_SEARCH_PRIVATE_DIR": str(data / "private"),
+                    "JOB_SEARCH_COST_DIR": str(data / "costs"),
                     "JOB_SEARCH_TOOLCHAIN_DIR": str(data / "toolchain"), "JOB_SEARCH_TOOL_RUNTIME_DIR": str(data / "runtime/tools"),
                     "JOB_SEARCH_NOTIFICATION_RUNTIME_DIR": str(data / "runtime/notifications")})
+        env.update(JOB_SEARCH_HERMES_BRIDGE_IMAGE=image,
+                   JOB_SEARCH_HERMES_BASE_IMAGE="fixture/base@sha256:" + "a" * 64,
+                   JOB_SEARCH_HERMES_DATA_DIR=str(data / "hermes"),
+                   JOB_SEARCH_MCP_TOKEN_FILE=str(data / "private/mcp-token"),
+                   JOB_SEARCH_NOTIFICATION_TARGET="fixture",
+                   JOB_SEARCH_TELEGRAM_BOT_ID="123", JOB_SEARCH_TELEGRAM_USER_ID="456", JOB_SEARCH_TELEGRAM_CHAT_ID="456")
         if state_volumes:
             env["JOB_SEARCH_ACCEPTANCE_STATE_VOLUME"] = state_volumes[data.name]
 
@@ -197,7 +209,7 @@ if not p["native_linux"]:
 if p["action"]=="backup":
  (release_root/"current").symlink_to(release)
  result=ops.backup_unlocked(c,paused=True,upload=False)
- result["bundle"]=str((data/"backups"/(result["backup_id"]+".tar.gz")).relative_to(root))
+ result["bundle"]=str(ops.local_backup_path(c,result).relative_to(root))
 elif p["action"]=="restore":
  result=ops.restore_unlocked(c,root/p["bundle"],p["sha256"])
  assert json.loads((data/"activation.json").read_text())["enabled"] is False
@@ -281,12 +293,35 @@ print(json.dumps({'supervisor_exec':True,'temporary_exec_blocked':True}))
         report["toolchain"] = {"version": version, **{name + "_sha256": hashlib.sha256((data / "toolchain" / name).read_bytes()).hexdigest() for name in ("tectonic", "tectonic.bundle")}}
         compose("up", "--detach", "--no-build", *SERVICES, timeout=200)
         await_healthy()
-        report["checks"].append("All five production Compose services are healthy with generated fixture configuration.")
+        report["checks"].append("All six application Compose services, including the interactions broker, are healthy with generated fixture configuration.")
         if mail_overlay.is_file():
             for service in SERVICES:
                 mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("mail-inference.json","openrouter-api-key")}))')
                 assert all(value == (service == "core") for value in mounts.values()), service
             report["checks"].append("Only core receives the dedicated mail profile and OpenRouter key; all other service boundaries remain unchanged.")
+
+        for service in SERVICES:
+            mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("briefing-inference.json","briefing-api-key","interaction-token")}))')
+            assert mounts['briefing-inference.json'] == (service == 'model'), service
+            assert mounts['briefing-api-key'] == (service == 'model'), service
+            assert mounts['interaction-token'] == (service == 'interactions'), service
+        interaction = execute('interactions', """
+import json,urllib.request,urllib.error
+from pathlib import Path
+url='http://127.0.0.1:8768/v1/reviews'
+try:
+    urllib.request.urlopen(url,timeout=10)
+except urllib.error.HTTPError as error:
+    assert error.code==401
+else:
+    raise AssertionError('interaction endpoint accepted unauthenticated request')
+request=urllib.request.Request(url,headers={'Authorization':'Bearer '+Path('/run/job-search/interaction-token').read_text().strip()})
+with urllib.request.urlopen(request,timeout=10) as response:
+    assert json.load(response)=={'items':[]}
+print(json.dumps({'authenticated':True,'unauthenticated_rejected':True}))
+""")
+        assert interaction['authenticated'] and interaction['unauthenticated_rejected']
+        report['checks'].append('Interactions require their separate bearer; only model receives briefing profile/key, and application services cannot read the interaction bearer except its broker.')
 
         dashboard = execute("dashboard", 'import json,urllib.request; print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:28766/api/v1/ops"))))')
         assert dashboard["health"]

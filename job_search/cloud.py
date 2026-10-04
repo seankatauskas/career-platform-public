@@ -35,6 +35,8 @@ from .worker import (
 
 
 DEFAULT_TICK_INTERVAL_SECONDS = 5 * 60
+MAX_CATCH_UP_TICKS = 3
+CATCH_UP_INTERVAL_SECONDS = 1
 DEFAULT_HTTP_POLL_SECONDS = 0.5
 DEFAULT_HEALTH_DIR = Path("/tmp/job-search-health")
 DEFAULT_IDLE_HEALTH_SECONDS = 15 * 60
@@ -145,7 +147,7 @@ def run_worker_loop(
     now_provider: Callable[[], datetime] = _utc_now,
     emit: Callable[[str], None] = print,
 ) -> int:
-    """Run one lane sequentially; wait only after the bounded tick has finished."""
+    """Run bounded sequential ticks, briefly catching up when eligible work remains."""
 
     if lane not in WORK_LANES:
         raise ValueError("lane must be core or model")
@@ -174,9 +176,11 @@ def run_worker_loop(
     )
 
     exit_code = 0
+    catch_up_ticks = 0
     with _shutdown_signals(stop_event):
         while not stop_event.is_set():
             if draining():
+                catch_up_ticks = 0
                 _write_health(health_path, _worker_health_record(lane, "drained", now_provider()))
                 stop_event.wait(1)
                 continue
@@ -227,8 +231,14 @@ def run_worker_loop(
             )
             if once:
                 break
+            delay = interval_seconds
+            if report.get("acquired") and report.get("more_due") and catch_up_ticks < MAX_CATCH_UP_TICKS:
+                catch_up_ticks += 1
+                delay = min(interval_seconds, CATCH_UP_INTERVAL_SECONDS)
+            else:
+                catch_up_ticks = 0
             # Observe maintenance promptly even while waiting between ticks.
-            until = time.monotonic() + interval_seconds
+            until = time.monotonic() + delay
             while not stop_event.is_set() and not draining() and time.monotonic() < until:
                 stop_event.wait(min(1, max(0, until - time.monotonic())))
 
@@ -254,8 +264,8 @@ def serve_http(
 ) -> int:
     """Serve dashboard or MCP while allowing SIGTERM to close its socket cleanly."""
 
-    if service not in {"dashboard", "mcp"}:
-        raise ValueError("service must be dashboard or mcp")
+    if service not in {"dashboard", "mcp", "interactions"}:
+        raise ValueError("service must be dashboard, mcp or interactions")
     if not 0.05 <= poll_seconds <= 5:
         raise ValueError("poll_seconds must be between 0.05 and 5")
     if service == "dashboard" and (
@@ -263,13 +273,14 @@ def serve_http(
     ):
         raise ValueError("dashboard binding is fixed to loopback")
     if server_factory is None:
-        from .system import make_dashboard_host, make_mcp_host
+        from .system import make_dashboard_host, make_mcp_host, make_interaction_host
 
         if service == "dashboard":
             server_factory = make_dashboard_host
         else:
             names = allowed_hosts or ("127.0.0.1", "localhost")
-            server_factory = lambda value: make_mcp_host(
+            factory = make_interaction_host if service == "interactions" else make_mcp_host
+            server_factory = lambda value: factory(
                 value,
                 bind_host=bind_host,
                 allowed_hosts=names,
@@ -277,7 +288,7 @@ def serve_http(
     server = server_factory(config)
     server.timeout = poll_seconds
     stop_event = stop or threading.Event()
-    port = config.dashboard_port if service == "dashboard" else config.mcp_port
+    port = {"dashboard": config.dashboard_port, "mcp": config.mcp_port, "interactions": config.interaction_port}[service]
     emit(f"Job-search {service} listening on http://{bind_host}:{port}")
     try:
         with _shutdown_signals(stop_event):
@@ -313,15 +324,23 @@ def check_worker_health(
 
 
 def check_http_health(config: RuntimeConfigV1, service: str, timeout: float = 3) -> bool:
-    if service not in {"dashboard", "mcp"}:
-        raise ValueError("service must be dashboard or mcp")
-    port = config.dashboard_port if service == "dashboard" else config.mcp_port
+    if service not in {"dashboard", "mcp", "interactions"}:
+        raise ValueError("service must be dashboard, mcp or interactions")
+    port = {"dashboard": config.dashboard_port, "mcp": config.mcp_port, "interactions": config.interaction_port}[service]
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         if service == "dashboard":
             connection.request(
                 "GET", "/api/v1/health", headers={"Host": f"127.0.0.1:{port}"}
             )
+        elif service == "interactions":
+            from .system import read_mcp_token
+            if config.interaction_token_file is None:
+                return False
+            connection.request("GET", "/health", headers={
+                "Host": f"127.0.0.1:{port}",
+                "Authorization": f"Bearer {read_mcp_token(config.interaction_token_file)}",
+            })
         else:
             from .hermes_mcp import MCP_PROTOCOL_VERSION
             from .system import read_mcp_token
@@ -353,6 +372,8 @@ def check_http_health(config: RuntimeConfigV1, service: str, timeout: float = 3)
                 "healthy",
                 "attention",
             }
+        if service == "interactions":
+            return parsed.get("status") in {"ok", "healthy", "ready"} or parsed.get("ok") is True
         return parsed.get("id") == "healthcheck" and isinstance(
             parsed.get("result"), Mapping
         )
@@ -380,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--once", action="store_true")
 
     serve = commands.add_parser("serve", help="run one loopback HTTP service")
-    serve.add_argument("service", choices=("dashboard", "mcp"))
+    serve.add_argument("service", choices=("dashboard", "mcp", "interactions"))
     serve.add_argument("--poll-seconds", type=float, default=DEFAULT_HTTP_POLL_SECONDS)
     serve.add_argument(
         "--bind-host",
@@ -390,7 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--allowed-host", action="append", default=[])
 
     health = commands.add_parser("healthcheck", help="probe one local component")
-    health.add_argument("component", choices=("dashboard", "mcp", "core", "model"))
+    health.add_argument("component", choices=("dashboard", "mcp", "interactions", "core", "model"))
     health.add_argument("--health-dir", type=Path, default=DEFAULT_HEALTH_DIR)
     health.add_argument(
         "--max-idle-seconds", type=int, default=DEFAULT_IDLE_HEALTH_SECONDS

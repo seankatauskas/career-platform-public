@@ -19,6 +19,22 @@ unverified until an actual operation succeeds. Mail authorization problems use
 the existing connector health observations. A successful empty scrape/mail sync
 counts as success; posting and message counts are not health thresholds.
 
+Explicitly paused ranking also pauses its per-policy health checks. Saved score
+freshness remains visible in ranking details, but does not generate a stale-work
+alarm until ranking is enabled again. A mixed ready/paused domain is not itself a
+host failure. `job-search-ops status --publish` returns success when the report and
+metrics were published, including reports of unhealthy work; failed publication
+still exits nonzero. Plain `status` retains its nonzero attention result.
+
+Discovery retries malformed archive JSON up to three times per response, retaining
+the normal request backoff and concurrency of eight. Common Crawl pagination ends
+on an empty/404 response or its exact, verified out-of-range HTTP 400 after a
+successful page; other HTTP 400s remain failures. A failed platform does not prevent
+the remaining platforms from being checked. Verified observations and previously
+known boards are retained, while the discovery run remains failed until a complete
+run succeeds. Rate limiting still stops discovery. Scraper failures retain a
+redacted error tail, and task completion/retry times include actual elapsed work.
+
 Freshness follows the existing schedule definitions, including their Chicago
 calendar timezone. Core/mail/notification schedules get a 15-minute completion
 grace after an expected occurrence; ATS schedules and downstream recommendation
@@ -61,6 +77,16 @@ than measured model tokens. Unranked jobs remain saved but are excluded from
 automatic model picks; refresh the shortlist when ranking completes.
 
 ## Work recovery
+
+The container worker processes bounded batches (10 work items by default). If
+eligible work or application-outbox deliveries remain due in its lane, it waits
+one second and runs another batch, up to three extra batches before returning to
+the configured idle interval. This lets shortlist evaluations catch up behind
+recurring tasks without waiting five minutes between every batch. Each batch
+releases and reacquires its lease; maintenance, shutdown, activation switches,
+retry due times, inference limits, and one-shot execution still apply. Paused,
+future-dated, and other-lane work do not trigger catch-up. The tick report's
+`more_due` field records eligible backlog at the end of that batch.
 
 `RecoveryService.list_work()` returns redacted dead-work summaries. The only
 mutation is `retry(work_id, expected_revision=..., command_id=..., actor_kind='user')`.

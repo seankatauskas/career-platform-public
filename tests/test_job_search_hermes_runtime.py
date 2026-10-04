@@ -427,6 +427,8 @@ def test_concrete_factory_binds_only_narrow_sources_and_public_ledger_methods():
     with tempfile.TemporaryDirectory() as directory:
         ledger = JobSearchLedger(Path(directory) / "job-search.db")
         application_id = start_application(ledger, "factory")
+        # The lifecycle read model is the injected source for upcoming interviews.
+        ledger.lifecycle.list_upcoming_interviews = lambda limit: Ledger(ledger).list_interview_schedules(limit=limit)
         capabilities = build_hermes_capabilities(
             HermesSources(Jobs(), Shortlist(), Ledger(ledger), Mail(), Proposals())
         )
@@ -577,7 +579,7 @@ def test_public_notification_boundary_requires_a_policy_evaluated_intent():
         assert ledger.list_notification_outbox() == []
 
 
-def test_notification_failure_retries_without_leaking_runner_stderr():
+def test_notification_failure_requires_reconciliation_without_leaking_runner_stderr():
     with tempfile.TemporaryDirectory() as directory:
         ledger = JobSearchLedger(Path(directory) / "job-search.db")
         publisher = DurableNotificationPublisher(ledger, now=lambda: NOW)
@@ -591,9 +593,9 @@ def test_notification_failure_retries_without_leaking_runner_stderr():
         result = NotificationOutboxHandler(
             ledger, HermesSendClient(runner), now=lambda: delivery_now
         ).handle_task({})
-        assert result == {"delivered": 0, "retried": 1, "dead": 0}
-        pending = ledger.list_notification_outbox(("pending",))[0]
-        assert pending["available_at"] == utc_text(delivery_now + timedelta(seconds=60))
+        assert result == {"delivered": 0, "retried": 0, "dead": 1}
+        pending = ledger.list_notification_outbox(("dead",))[0]
+        assert pending["last_error"] == "delivery_reconciliation_required"
         assert "token" not in pending["last_error"]
         assert "/private" not in pending["last_error"]
 
@@ -657,7 +659,7 @@ def test_unexpected_failure_at_attempt_limit_is_reported_dead():
         assert result == {"delivered": 0, "retried": 0, "dead": 1}
         dead = ledger.list_notification_outbox(("dead",))[0]
         assert dead["attempts"] == 1
-        assert dead["last_error"] == "notification sender failed"
+        assert dead["last_error"] == "delivery_reconciliation_required"
 
 
 def test_notification_claim_recovers_after_worker_lease_expires():

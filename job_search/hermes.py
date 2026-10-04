@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from itertools import islice
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
+from .lifecycle.tools import TOOL_DEFINITIONS as LIFECYCLE_DEFINITIONS, TOOL_NAMES as LIFECYCLE_TOOLS
+
 from .contracts import (
     ContractError,
     MutationContext,
@@ -23,6 +25,9 @@ from .contracts import (
     validate_identifier,
 )
 
+
+from .job_reviews.tools import TOOL_NAMES as REVIEW_TOOLS, TOOL_DEFINITIONS as REVIEW_DEFINITIONS
+from .interactions.tools import TOOL_NAMES as CHIEF_TOOLS, TOOL_DEFINITIONS as CHIEF_DEFINITIONS
 
 MAX_OUTPUT_BYTES = 64 * 1024
 MAX_OUTPUT_NODES = 400
@@ -32,7 +37,7 @@ MAX_REPLY_LENGTH = 4000
 MAX_REMINDER_NOTE_LENGTH = 500
 MAX_RESUME_CONTENT_CHARS = 12_000
 
-TOOL_NAMES: Tuple[str, ...] = (
+TOOL_NAMES: Tuple[str, ...] = REVIEW_TOOLS + LIFECYCLE_TOOLS + CHIEF_TOOLS + (
     "publish_curated_shortlist",
     "search_jobs",
     "list_shortlist",
@@ -66,6 +71,14 @@ _FORBIDDEN_OUTPUT_KEYS = frozenset(
         "body_html",
         "command",
         "conversation_id",
+        "conversation_ref",
+        "folder_ref",
+        "calendar_account_id",
+        "calendar_event_id",
+        "calendar_uid",
+        "calendar_change_key",
+        "change_key",
+        "internet_message_id",
         "database",
         "database_path",
         "db_path",
@@ -77,6 +90,9 @@ _FORBIDDEN_OUTPUT_KEYS = frozenset(
         "password",
         "path",
         "payload_json",
+        "state_json",
+        "details_json",
+        "base_state_json",
         "query",
         "raw_body",
         "refresh_token",
@@ -178,6 +194,7 @@ _TIMELINE_EVENT_FIELDS = frozenset(
         "actor_kind",
         "source_kind",
         "schema_version",
+        "email_evidence",
     }
 )
 _TIMELINE_RESUME_FIELDS = frozenset(
@@ -232,6 +249,10 @@ class HermesCapabilities:
     get_application_resume: Optional[Callable[[str], Any]] = None
     get_application_resume_content: Optional[Callable[[str], Any]] = None
     publish_curated_shortlist: Optional[Callable[[Mapping[str, Any]], Any]] = None
+    review_call: Optional[Callable[[str, Mapping[str, Any]], Any]] = None
+    lifecycle_call: Optional[Callable[[str, Mapping[str, Any]], Any]] = None
+    search_mail_page: Optional[Callable[..., Any]] = None
+    chief_call: Optional[Callable[..., Any]] = None
 
 
 class HermesJobSearch(Protocol):
@@ -316,6 +337,7 @@ class HermesSources:
     resume: Optional[HermesResumeLab] = None
     readiness: Optional[Callable[[], Mapping[str, Any]]] = None
     curated: Optional[Any] = None
+    reviews: Optional[Any] = None
 
 
 def build_hermes_capabilities(sources: HermesSources) -> HermesCapabilities:
@@ -333,7 +355,7 @@ def build_hermes_capabilities(sources: HermesSources) -> HermesCapabilities:
     def cancel_reminder(request: Mapping[str, Any]) -> Mapping[str, Any]:
         key = str(request["idempotency_key"])
         return sources.ledger.cancel_reminder(
-            str(request["reminder_id"]),
+            str(request["reminder_id"]).removeprefix("general:"),
             MutationContext(key, "hermes", "hermes_reminder"),
         )
 
@@ -349,22 +371,24 @@ def build_hermes_capabilities(sources: HermesSources) -> HermesCapabilities:
         return health
 
     return HermesCapabilities(
+        search_mail_page=getattr(sources.mail, "search_mail_page", None),
+        lifecycle_call=(lambda name, args: sources.ledger.lifecycle.call_tool(name, args)) if hasattr(sources.ledger, "lifecycle") else None,
+        chief_call=lambda name,args: __import__('job_search.interactions.tools',fromlist=['call']).call(sources.ledger,name,args),
+        review_call=sources.reviews.call if sources.reviews else None,
         publish_curated_shortlist=sources.curated.publish if sources.curated else None,
         search_jobs=sources.jobs.search_jobs,
         list_shortlist=sources.shortlist.list_shortlist,
         list_applications=sources.ledger.list_applications,
-        list_attention_items=sources.ledger.list_attention_items,
+        list_attention_items=(lambda: [*sources.ledger.list_attention_items(), *sources.ledger.lifecycle.list_lifecycle_reviews()]) if hasattr(sources.ledger, "lifecycle") else sources.ledger.list_attention_items,
         get_application_timeline=sources.ledger.get_application_timeline,
-        list_interviews=lambda limit: sources.ledger.list_interview_schedules(
-            limit=limit
-        ),
+        list_interviews=(lambda limit: sources.ledger.lifecycle.list_upcoming_interviews(limit)) if hasattr(sources.ledger, "lifecycle") else (lambda limit: sources.ledger.list_interview_schedules(limit=limit)),
         search_mail=sources.mail.search_mail,
         get_mail_message=sources.mail.get_mail_message,
         get_sanitized_evidence=sources.ledger.get_sanitized_evidence,
         propose_reply=sources.proposals.propose_reply,
         propose_interview_slots=sources.proposals.propose_interview_slots,
         create_reminder=create_reminder,
-        list_reminders=sources.ledger.list_reminders,
+        list_reminders=(lambda statuses, limit: sources.ledger.lifecycle.list_unified_reminders(statuses=statuses, limit=limit)) if hasattr(sources.ledger, "lifecycle") else sources.ledger.list_reminders,
         cancel_reminder=cancel_reminder,
         get_action_status=sources.ledger.get_action,
         system_health=system_health,
@@ -509,7 +533,7 @@ def _definition(
 _ID = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"}
 _IDEMPOTENCY = dict(_ID)
 
-TOOL_DEFINITIONS: Tuple[Mapping[str, Any], ...] = (
+TOOL_DEFINITIONS: Tuple[Mapping[str, Any], ...] = REVIEW_DEFINITIONS + LIFECYCLE_DEFINITIONS + CHIEF_DEFINITIONS + (
     _definition(
         "publish_curated_shortlist",
         "Save an ordered list of existing catalog jobs chosen by the caller. Does not rank, train, or start applications.",
@@ -752,6 +776,15 @@ class HermesAdapter:
             raise
         except Exception:
             raise HermesToolError(f"{tool_name} failed") from None
+        if tool_name in CHIEF_TOOLS:
+            from .interactions.tools import bounded
+            return bounded(result)
+        if tool_name in LIFECYCLE_TOOLS:
+            from .lifecycle.output import bounded_lifecycle
+            return bounded_lifecycle(tool_name, result, args)
+        if tool_name in REVIEW_TOOLS:
+            from .job_reviews.contracts import bounded
+            return bounded(result)
         return bounded_output(result, string_limit=(MAX_RESUME_CONTENT_CHARS
             if tool_name == "get_application_resume_content" else MAX_STRING_LENGTH))
 
@@ -759,6 +792,33 @@ class HermesAdapter:
 
     def _dispatch(self, name: str, args: Mapping[str, Any]) -> Any:
         cap = self._capabilities
+        if name in CHIEF_TOOLS:
+            try:
+                if cap.chief_call is None:
+                    raise ContractError('chief-of-staff tools are not configured')
+                return cap.chief_call(name,args)
+            except ContractError as exc:
+                raise HermesValidationError(str(exc)) from None
+        if name in LIFECYCLE_TOOLS:
+            try:
+                if name == "search_mail_history":
+                    from .lifecycle.tools import validate
+                    values = validate(name, args)
+                    if cap.search_mail_page is None:
+                        raise ContractError("archive history search is not configured")
+                    return cap.search_mail_page(values["query"], min(values.get("limit", 25), 25), cursor=values.get("cursor"))
+                if cap.lifecycle_call is None:
+                    raise ContractError("lifecycle tools are not configured")
+                return cap.lifecycle_call(name, args)
+            except ContractError as exc:
+                raise HermesValidationError(str(exc)) from None
+        if name in REVIEW_TOOLS:
+            try:
+                if cap.review_call is None:
+                    raise ContractError('agent reviews are not configured')
+                return cap.review_call(name[7:].replace('_', '-'), args)
+            except ContractError as exc:
+                raise HermesValidationError(str(exc)) from None
         if name == "publish_curated_shortlist":
             from .curated import validate_publication
             try:
@@ -857,6 +917,13 @@ class HermesAdapter:
         if name == "explain_status":
             _exact(args, ("application_id",), ("application_id",))
             application_id = _identifier(args, "application_id")
+            if cap.lifecycle_call is not None:
+                briefing = cap.lifecycle_call("get_application_briefing", {"application_id": application_id})
+                app = briefing["application"]
+                return {"application_id": application_id, "phase": app["current_phase"],
+                    "terminal_outcome": app.get("terminal_outcome"), "explanation": briefing["explanation"],
+                    "coverage": briefing["coverage"], "next_obligations": briefing["next_obligations"][:5],
+                    "truncated": briefing.get("truncated",False) or len(briefing["next_obligations"])>5}
             return self._explain(cap.get_application_timeline(application_id))
         if name == "search_mail":
             _exact(args, ("query", "limit"), ("query",))
@@ -1189,6 +1256,9 @@ class HermesAdapter:
             raise HermesToolError("interview capability returned invalid data")
         allowed = (
             "interview_schedule_id",
+            "round_id",
+            "round_kind",
+            "employer_confirmed",
             "application_id",
             "starts_at",
             "ends_at",
@@ -1254,6 +1324,9 @@ class HermesAdapter:
             key: value.get(key)
             for key in (
                 "reminder_id",
+                "source",
+                "delivery_status",
+                "source_status",
                 "application_id",
                 "note",
                 "due_at",

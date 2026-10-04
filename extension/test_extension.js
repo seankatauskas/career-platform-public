@@ -333,6 +333,52 @@ function testGreenhouseConfirmationIdentity() {
   assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), original+'/confirmation', job), 'success_dom');
   assert.strictEqual(tracking.outcome(doc('Enter the security code to submit your application.'), original, job), null);
   assert.strictEqual(tracking.outcome(doc(''), original+'/confirmation', job), null);
+  const embedded = 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=12345';
+  const confirmation = embedded.replace('job_app?', 'job_app/confirmation?');
+  assert.deepStrictEqual(tracking.identify(embedded), job);
+  assert.deepStrictEqual(tracking.identify(confirmation), job);
+  assert.strictEqual(tracking.identify(confirmation.replace('/confirmation?', '/confirmation/other?')), null);
+  assert.strictEqual(tracking.identify(confirmation.replace('12345', 'invalid')), null);
+  assert(!tracking.sameJob(job, tracking.identify(confirmation.replace('12345', '54321'))));
+  assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), confirmation, job), 'success_dom');
+  assert.strictEqual(tracking.outcome(doc(''), confirmation, job), null);
+  const request = {method:'POST', url:'https://boards.greenhouse.io/embed/acme/jobs/12345'};
+  assert(tracking.submissionRequest(request, job, true));
+  for (const url of [request.url+'/other', request.url.replace('12345','54321'), request.url.replace('/acme/','/other/')])
+    assert(!tracking.submissionRequest({...request,url},job,true));
+  assert(!tracking.submissionRequest({...request,method:'GET'},job,true));
+}
+
+function testAshbyConfirmationContainers() {
+  const tracking = require('./tracking.js');
+  const url = 'https://jobs.ashbyhq.com/acme/00000000-0000-4000-8000-000000000001';
+  const job = tracking.identify(url);
+  const doc = ({success=false, failure=false, visible=true, text='SuccessThank you for applying to Acme!'}={}) => ({
+    querySelectorAll: selector => {
+      const node={textContent:text,getClientRects:()=>visible?[{}]:[]};
+      if(selector === '.ashby-application-form-success-container [role="status"]') return success?[node]:[];
+      if(selector === '.ashby-application-form-failure-container, .ashby-application-form-blocked-application-container') return failure?[node]:[];
+      return [node];
+    }
+  });
+  assert.equal(tracking.outcome(doc({success:true}),url,job),'success_dom');
+  assert.equal(tracking.outcome(doc({success:true,text:'SuccessVielen Dank!'}),url,job),'success_dom');
+  assert.equal(tracking.outcome(doc({success:true,visible:false}),url,job),null);
+  assert.equal(tracking.outcome(doc(),url,job),null,'unscoped Success text is not acknowledgment');
+  assert.equal(tracking.outcome(doc({success:true}),url.replace('000001','000002'),job),null,'a different job cannot acknowledge this attempt');
+  assert.equal(tracking.outcome(doc({failure:true,text:"We couldn't submit your application"}),url,job),'validation_error');
+}
+
+function testAshbySubmissionRequests() {
+  const tracking=require('./tracking.js');
+  const job=tracking.identify('https://jobs.ashbyhq.com/acme/00000000-0000-4000-8000-000000000001');
+  const request=op=>({method:'POST',url:`https://jobs.ashbyhq.com/api/non-user-graphql?op=${op}`});
+  for(const op of ['ApiSubmitApplication','SubmitApplication','ApiSubmitSingleApplicationFormAction','ApiSubmitMultipleFormsAction']) {
+    assert.equal(tracking.submissionRequest(request(op),job,true),true);
+    assert.equal(tracking.submissionRequest({...request(op),method:'GET'},job,true),false);
+  }
+  for(const op of ['ApiSubmitSurveyFormAction','ApiSubmitRegistrationFormAction','ApiSubmitSourcingFormAction','ApiSubmitCandidateTextingConsent','ApiSubmitSingleApplicationFormActionDraft'])
+    assert.equal(tracking.submissionRequest(request(op),job,true),false);
 }
 
 async function testDurableAnswerQueue() {
@@ -349,7 +395,7 @@ async function testDurableAnswerQueue() {
       assert.equal(path,'answers');calls.push(body);
       accepted.set(body.capture_id,JSON.stringify(body));
       if(loseAck) {loseAck=false;throw new Error('Response lost after server saved it');}
-      return {saved:true,field_count:body.snapshot.fields.length};
+      return {saved:true,capture_id:body.capture_id,application_id:'fixture-application',field_count:body.snapshot.fields.length};
     }
   });
   vm.runInContext(fs.readFileSync(path.join(root,'answer_worker.js'),'utf8'),context);
@@ -385,6 +431,8 @@ async function testDurableAnswerQueue() {
 const tests = [
   testDurableAnswerQueue,
   testGreenhouseConfirmationIdentity,
+  testAshbyConfirmationContainers,
+  testAshbySubmissionRequests,
   testPrivateAndForbiddenGuardrails,
   testSafeInferenceAndApplication,
   testPrivateGroupsFillAndCaptureWithoutOverwrite,

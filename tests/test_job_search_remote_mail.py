@@ -19,6 +19,7 @@ from job_search.mail import (
     validate_temporal_output,
 )
 from job_search.mail.model import LocalCommandClassifier, ModelExecutionError
+from job_search.mail.proposals import ProposalValidationError
 from job_search.mail.remote import MAX_REMOTE_TEMPORAL_SOURCE_CHARS
 from job_search.mail.temporal import TemporalExtractionError, TemporalSource
 from job_search.runtime import RuntimeConfigV1, _configured_mail_models
@@ -148,6 +149,98 @@ def test_remote_classifier_rejects_non_exact_and_oversized_json() -> None:
         assert "too large" in str(exc)
     else:
         raise AssertionError("oversized remote classifier output was accepted")
+
+
+def evidence_response(quote, **overrides):
+    return {
+        "event_type": "submission_confirmed", "application_id": "application-1",
+        "confidence": 0.91, "evidence_quote": quote, "span_start": 0,
+        "span_end": len(quote), "payload": {}, **overrides,
+    }
+
+
+def test_remote_classifier_restores_unique_whitespace_quote_to_exact_mail() -> None:
+    mail = sanitize_mail(
+        "You’re on our radar — thanks for applying to Example Labs 🚀",
+        "<p>Thanks for applying to</p><p>Example Labs.</p>",
+        body_kind="html", max_chars=2_048,
+    )
+    classifier = RemoteMailClassifier(FakeProvider(json.dumps(
+        evidence_response("Thanks for applying to Example Labs.")
+    )))
+    raw = classifier.classify(mail.text, [candidate()])
+    proposal = validate_model_output(
+        raw, evidence_id="evidence-1", mail=mail, candidates=[candidate()],
+        producer_version=classifier.producer_version,
+    )
+    assert proposal.evidence_quote == "Thanks for applying to\n\nExample Labs."
+    assert mail.verifies_evidence(proposal.evidence_quote, proposal.span_start, proposal.span_end)
+    assert len(classifier._provider.calls) == 1
+
+
+def test_remote_classifier_quote_repair_preserves_rejection_boundaries() -> None:
+    cases = [
+        # Repeated evidence, including overlapping matches, is still ambiguous.
+        ("Update", "Thanks for\napplying. Thanks for\napplying.", "Thanks for applying.", {}),
+        ("Update", "a\na\na", "a a", {}),
+        ("Update", "Thanks for applying. Thanks for applying.", "Thanks for applying.", {}),
+        # No paraphrasing, changed case, punctuation, or removed word boundaries.
+        ("Update", "Thanks for applying.", "Thank you for applying.", {}),
+        ("Update", "Thanks for applying.", "thanks for applying.", {}),
+        ("Update", "Thanks for applying.", "Thanks for applying!", {}),
+        ("Update", "Thanks for applying.", "Thanksfor applying.", {}),
+        # Framing and quotes crossing the subject/body boundary cannot be evidence.
+        ("Update", "Thanks for applying.", "BEGIN UNTRUSTED EMAIL", {}),
+        ("Update", "Thanks for applying.", "Update BODY Thanks for applying.", {}),
+        # Malformed offsets and expanded quotes over the persisted limit remain invalid.
+        ("Update", "Thanks for\napplying.", "Thanks for applying.", {"span_start": True}),
+        ("Update", "a" * 255 + "\n\n" + "b" * 256, "a" * 255 + " " + "b" * 256, {}),
+    ]
+    for subject, body, quote, overrides in cases:
+        mail = sanitize_mail(subject, body, max_chars=2_048)
+        classifier = RemoteMailClassifier(FakeProvider(json.dumps(evidence_response(quote, **overrides))))
+        raw = classifier.classify(mail.text, [candidate()])
+        try:
+            validate_model_output(
+                raw, evidence_id="evidence-1", mail=mail, candidates=[candidate()],
+                producer_version=classifier.producer_version,
+            )
+        except ProposalValidationError:
+            pass
+        else:
+            raise AssertionError(f"unsafe quote accepted: {quote!r}")
+
+
+def test_remote_classifier_preserves_valid_offsets_for_repeated_quotes() -> None:
+    quote = "Thanks for applying."
+    mail = sanitize_mail(quote, quote, max_chars=2_048)
+    start, end = mail.body_range
+    classifier = RemoteMailClassifier(FakeProvider(json.dumps(
+        evidence_response(quote, span_start=start, span_end=end)
+    )))
+    raw = classifier.classify(mail.text, [candidate()])
+    proposal = validate_model_output(
+        raw, evidence_id="evidence-1", mail=mail, candidates=[candidate()],
+        producer_version=classifier.producer_version,
+    )
+    assert (proposal.span_start, proposal.span_end) == mail.body_range
+
+
+def test_remote_temporal_restores_whitespace_without_changing_calendar_values() -> None:
+    source = TemporalSource("archive-1", "Deadline:\nSeptember 4, 2026 at 10 AM Central.", NOW)
+    item = {
+        "kind": "deadline", "application_id": "application-1", "confidence": 0.91,
+        "evidence_quote": "Deadline: September 4, 2026 at 10 AM Central.",
+        "span_start": 0, "span_end": 1, "starts_at": None, "ends_at": None,
+        "due_at": "2026-09-04T15:00:00Z", "time_zone": "America/Chicago",
+    }
+    extractor = RemoteTemporalExtractor(FakeProvider(json.dumps({"proposals": [item]})))
+    raw = extractor.extract(source, [candidate()], "America/Chicago")
+    proposals = validate_temporal_output(
+        raw, source=source, candidates=[candidate()], producer_version=extractor.producer_version,
+    )
+    assert proposals[0].evidence_quote == source.text
+    assert proposals[0].due_at == item["due_at"]
 
 
 def test_remote_temporal_prefix_preserves_source_spans_and_review_validation() -> None:
@@ -510,7 +603,7 @@ def test_mail_prompt_distinguishes_receipt_from_recruiter_followup() -> None:
     assert "submission_confirmed, not recruiter_contact" in prompt
     assert "payload must always be the empty object {}" in prompt
     assert "Other recruiter follow-ups" in prompt
-    assert REMOTE_MAIL_ADAPTER_VERSION == "remote-mail-json-v4"
+    assert REMOTE_MAIL_ADAPTER_VERSION == "remote-mail-json-v6-identity"
 
 
 def main() -> None:

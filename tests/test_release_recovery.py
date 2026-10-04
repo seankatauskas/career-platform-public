@@ -83,6 +83,44 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(ops.OpsError): ops.recover(self.c, '0'*32)
         require_idle(self.c)
 
+    def test_status_distinguishes_held_maintenance_lock_from_interrupted_journal(self):
+        op = Operation.begin(self.c, 'deploy', recovery_tool='/verified/candidate/scripts/job-search-ops')
+        path = self.data / '.operations.lock'
+        with patch.object(ops, 'preflight', return_value={'issues': []}), patch.object(ops, 'running_services', return_value=[]):
+            result = ops.status(self.c)
+            self.assertFalse(path.exists(), 'read-only status must not create a lock')
+            self.assertTrue(result['recovery_required'])
+            with patch.object(ops, 'verify_mount'), ops.lock(self.c):
+                result = ops.status(self.c)
+                self.assertEqual(result['status'], 'maintenance')
+                self.assertTrue(result['maintenance_active'])
+                self.assertFalse(result['recovery_required'])
+                self.assertEqual(result['next_action'], 'wait_for_active_operation')
+                self.assertFalse(read(self.c)['complete'])
+            result = ops.status(self.c)
+            self.assertTrue(result['recovery_required'])
+            self.assertFalse(result['maintenance_active'])
+            self.assertEqual(result['recovery_tool'], '/verified/candidate/scripts/job-search-ops')
+            self.assertIn(op.id, result['next_action'])
+
+    def test_status_lock_probe_never_follows_links_blocks_on_fifo_or_trusts_unsafe_permissions(self):
+        path = self.data / '.operations.lock'
+        outside = self.root / 'outside'; outside.write_text('untouched')
+        path.symlink_to(outside)
+        self.assertIsNone(ops.operation_lock_held(self.c))
+        self.assertEqual(outside.read_text(), 'untouched')
+        path.unlink(); os.mkfifo(path)
+        self.assertIsNone(ops.operation_lock_held(self.c))
+        path.unlink(); path.write_text(''); path.chmod(0o666)
+        self.assertIsNone(ops.operation_lock_held(self.c))
+        op = Operation.begin(self.c, 'deploy')
+        with patch.object(ops, 'preflight', return_value={'issues': []}), patch.object(ops, 'running_services', return_value=[]):
+            result = ops.status(self.c)
+        self.assertTrue(result['recovery_required'])
+        self.assertFalse(result['maintenance_active'])
+        self.assertTrue(result['operation_lock_unverified'])
+        self.assertEqual(read(self.c)['operation_id'], op.id)
+
     def test_postwrite_recovery_never_rewinds_database(self):
         op = Operation.begin(self.c, 'deploy', previous_release=ops.release_path(self.c).name)
         op.update('resuming', writes_possible=True, backup={'backup_id':'old','sha256':'a'*64})
@@ -94,13 +132,28 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads((self.data/'maintenance/gate.json').read_text())['allowed_services'], [])
 
     def test_recovery_stops_one_shot_initializers_and_verifies_exit(self):
-        with patch.object(ops, 'project_containers', REAL_PROJECT_CONTAINERS), patch.object(ops, 'run', side_effect=['abc123def456\n', '', '']) as run:
-            REAL_STOP_PROJECT(self.c)
-        self.assertIn('label=com.docker.compose.project=job-search', run.call_args_list[0].args[0])
-        self.assertEqual(run.call_args_list[1].args[0], ['docker', 'stop', '--time', '4200', 'abc123def456'])
-        with patch.object(ops, 'project_containers', REAL_PROJECT_CONTAINERS), patch.object(ops, 'run', side_effect=['abc123def456', '', 'abc123def456']):
-            with self.assertRaisesRegex(ops.OpsError, 'still has writers'):
-                REAL_STOP_PROJECT(self.c)
+        for sticky in (False, True):
+            stopped = False
+            def command(argv, **kwargs):
+                nonlocal stopped
+                if argv[:2] == ['docker', 'stop']:
+                    stopped = True
+                    return ''
+                if 'label=com.docker.compose.project=job-search' in argv:
+                    return 'abc123def456' if sticky or not stopped else ''
+                if 'label=org.career-platform.review.worker=true' in argv:
+                    return ''
+                raise AssertionError('unexpected recovery command')
+            with patch.object(ops, 'project_containers', REAL_PROJECT_CONTAINERS), patch.object(ops, 'run', side_effect=command) as run:
+                if sticky:
+                    with self.assertRaisesRegex(ops.OpsError, 'still has writers'):
+                        REAL_STOP_PROJECT(self.c)
+                else:
+                    REAL_STOP_PROJECT(self.c)
+                calls = [call.args[0] for call in run.call_args_list]
+                self.assertIn(['docker', 'stop', '--time', '4200', 'abc123def456'], calls)
+                self.assertTrue(any('label=com.docker.compose.project=job-search' in call for call in calls))
+                self.assertTrue(any('label=org.career-platform.review.worker=true' in call for call in calls))
 
     def test_restore_recovers_after_sigkill_at_each_directory_boundary(self):
         # Each trial is independent; child death bypasses every finally/except block.
@@ -139,7 +192,7 @@ ops.restore_unlocked(p['c'],Path(p['bundle']),p['sha'],replace=True)
                         fixture.doCleanups()
 
     def test_deployment_sigkill_recovery_obeys_write_boundary(self):
-        for boundary in ('prepared', 'snapshotted', 'initializing', 'release_pointer', 'secrets', 'after_write'):
+        for boundary in ('prepared', 'snapshotting', 'snapshot_published', 'snapshotted', 'initializing', 'release_pointer', 'secrets', 'after_write'):
             with self.subTest(boundary=boundary):
                 fixture = ops_fixtures.OperationsTests(); fixture.setUp()
                 try:
@@ -175,6 +228,11 @@ def checkpoint(self,phase,**fields):
     update(self,phase,**fields)
     if phase==p['boundary']: kill()
 ops.Operation.update=checkpoint
+replace=ops.os.replace
+def publish(source,destination):
+    replace(source,destination)
+    if p['boundary']=='snapshot_published' and str(destination).endswith('.snapshot'): kill()
+ops.os.replace=publish
 point=ops.point_current
 def point_current(c,path):
     point(c,path)
@@ -201,6 +259,44 @@ ops.deploy(p['c'],'b'*40+'-2')
                     self.assertFalse(json.loads((fixture.data/'activation.json').read_text())['enabled'])
                 finally:
                     fixture.doCleanups()
+
+    def test_directory_restore_recovers_after_sigkill_at_each_publication_boundary(self):
+        for directory in ops.BACKUP_DIRS:
+            for boundary in ('save', 'publish'):
+                with self.subTest(directory=directory, boundary=boundary):
+                    fixture = ops_fixtures.OperationsTests(); fixture.setUp()
+                    try:
+                        receipt, snapshot = fixture.local_snapshot()
+                        for name in ops.BACKUP_DIRS:
+                            (fixture.data / name / 'original.txt').write_text('current ' + name)
+                        payload = {'c': fixture.c, 'snapshot': str(snapshot), 'sha': receipt['sha256'],
+                                   'name': directory, 'boundary': boundary}
+                        code = '''
+import json,os,signal,sys
+from pathlib import Path
+from job_search import aws_ops as ops
+p=json.loads(sys.stdin.read()); original=ops.os.replace
+ops.running_services=lambda c: []
+ops.materialize_secrets=lambda *a,**k: None
+ops.chown_runtime=lambda c: None
+def replace(source,destination):
+    original(source,destination)
+    source,destination=Path(source),Path(destination)
+    hit=(destination.name==p['name'] and ((p['boundary']=='save' and destination.parent.name.endswith('-saved')) or (p['boundary']=='publish' and source.parent.name.startswith('restore-stage-'))))
+    if hit: os.kill(os.getpid(),signal.SIGKILL)
+ops.os.replace=replace
+ops.restore_unlocked(p['c'],Path(p['snapshot']),p['sha'],replace=True)
+'''
+                        result = subprocess.run([sys.executable, '-c', code], input=json.dumps(payload),
+                                                text=True, capture_output=True, cwd=ROOT, timeout=20)
+                        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+                        record = read(fixture.c)
+                        with patch.object(ops, 'stop_project'), patch.object(ops, 'materialize_secrets'):
+                            ops.recover(fixture.c, record['operation_id'])
+                        for name in ops.BACKUP_DIRS:
+                            self.assertEqual((fixture.data / name / 'original.txt').read_text(), 'current ' + name)
+                        ops.verify_snapshot(snapshot)
+                    finally: fixture.doCleanups()
 
     def test_restore_after_committed_publication_keeps_restored_data(self):
         self.fixture.original_data(); bundle = self.fixture.bundle()

@@ -24,6 +24,17 @@ let profile={configured:true,draft_revision_id:'revision-1',approved_revision_id
 async function api(url, options={}) { calls.push({url,options});
  if(url==='/api/v1/settings')return {timezone:'America/Chicago',demo_mode:true};
  if(url==='/api/v1/browser/devices')return {devices:[{device_id:'browser-1',created_at:'2026-09-20T16:00:00Z'}]};
+ if(url==='/api/v1/chief/preferences' && !options.method)return {revision:3,mode:'important_developments',timezone:'America/Chicago',morning_time:'07:00',evening_time:'19:00',enabled:true,overnight_enabled:true,quiet_hours_enabled:false,quiet_start:'22:00',quiet_end:'07:00',ai_enabled:true,ready_replies_enabled:true,final_nudge_enabled:true};
+ if(url==='/api/v1/chief/preferences' && options.method)return {revision:4,...JSON.parse(options.body).changes};
+ if(url.startsWith('/api/v1/chief/preview'))return {title:'Morning briefing',body:'One reply needs your review.',snapshot:{coverage:{complete:false,reason:'Calendar not connected'},facts:[]}};
+ if(url.startsWith('/api/v1/chief/briefing/'))return {briefing_id:'brief1',title:'Saved briefing',body:'Full saved briefing text',snapshot:{coverage:{complete:false},facts:[]}};
+ if(url.startsWith('/api/v1/chief/history'))return {items:[{briefing_id:'brief1',title:'Saved briefing',local_date:'2026-10-02',status:'finalized'}],complete:true,next_offset:null};
+ if(url==='/api/v1/chief/candidates')return {items:[{candidate_id:'candidate1',revision:2,title:'Reply requested',summary:'Recruiter asks for availability.'}],complete:true};
+ if(url==='/api/v1/chief/commitments')return {commitments:[]};
+ if(url==='/api/v1/chief/delivery-recovery' && !options.method)return {items:[{ticket_id:'ticket1',title:'Recruiter update',delivery_revision:2,payload_sha256:'c'.repeat(64),source_version:'1',identity:{bot_id:'123',user_id:'456',chat_id:'456'},delivery_started_at:'2026-10-03T12:00:00Z'}],complete:true};
+ if(url==='/api/v1/chief/delivery-recovery' && options.method)return {message:'Receipt recorded. This does not approve an email.'};
+ if(url==='/api/v1/chief/actions')return {proposals:[{proposal_id:'proposal1',account_id:'mail1',payload_hash:'a'.repeat(64),source_hash:'b'.repeat(64),subject:'Availability',recipients:['recruiter@example.test'],body:'Thursday works. <img src=x onerror=unsafe>',expires_at:'2026-10-03T12:15:00Z'}]};
+ if(url==='/api/v1/chief/actions/decide' || url==='/api/v1/chief/actions/edit' || url==='/api/v1/chief/acknowledge' || url==='/api/v1/chief/snooze')return {status:'recorded'};
  if(url.startsWith('/api/v1/resume-lab/standards'))return {standards:[{name:'My resume',standard_version_id:'version-1',document_url:'/api/v1/resume-lab/standards/version-1/document',preview_url:'/api/v1/resume-lab/standards/version-1/document?disposition=inline'},{name:'Source only',standard_version_id:'version-2'}]};
  if(url==='/api/v1/career-profile' && !options.method)return profile;
  if(url==='/api/v1/career-profile' && options.method==='POST'){const body=JSON.parse(options.body);profile={...profile,draft_revision_id:'revision-2',draft:{content:body.content}};return profile;}
@@ -35,9 +46,9 @@ const loadApplications = async()=>{};
 `;
 const server=createServer(async(req,res)=>{
  try {
-  if(req.url==='/') {res.setHeader('Content-Type','text/html');res.end(`<html><head><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/settings-view.css"></head><body><main style="margin:0;padding:24px"><span id="demo-badge" hidden>Demo</span><p id="notice"></p><section id="settings"></section><section id="career" hidden></section><section id="ops" hidden></section></main><script>${setup}</script><script src="/settings-view.js"></script><script>initializeSettingsView();loadSettingsPage();</script></body></html>`);return;}
+  if(req.url==='/') {res.setHeader('Content-Type','text/html');res.end(`<html><head><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/settings-view.css"></head><body><main style="margin:0;padding:24px"><span id="demo-badge" hidden>Demo</span><p id="notice"></p><section id="settings"></section><section id="career" hidden></section><section id="ops" hidden></section></main><script>${setup}</script><script src="/settings-view.js"></script><script src="/chief-view.js"></script><script>initializeSettingsView();loadSettingsPage();</script></body></html>`);return;}
   const file=req.url.slice(1);
-  if(!['styles.css','settings-view.css','settings-view.js'].includes(file)){res.writeHead(404);res.end();return;}
+  if(!['styles.css','settings-view.css','settings-view.js','chief-view.js'].includes(file)){res.writeHead(404);res.end();return;}
   res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':'text/css');res.end(await readFile(path.join(root,'job_search/web',file)));
  }catch(error){res.writeHead(500);res.end(String(error));}
 });
@@ -47,7 +58,7 @@ try {
  const page=await browser.newPage({viewport:{width:1280,height:1000}});const errors=[];page.on('pageerror',error=>errors.push(error.message));
  await page.goto(`http://127.0.0.1:${server.address().port}`);
  await page.getByText('Connect another browser',{exact:true}).waitFor();
- assert.equal(await page.locator('.settings-group').count(),4);
+ assert.equal(await page.locator('#settings-home .settings-group').count(),5);
  assert.equal(await page.locator('#settings-list').isVisible(),false);
  assert.equal(await page.locator('.settings-device').innerText().then(text=>text.includes('Browser connected')),true);
  await page.evaluate(()=>loadSettingsPage('stored-records'));
@@ -57,6 +68,22 @@ try {
  await page.evaluate(()=>loadSettingsPage('resumes'));
  assert.equal(await page.getByRole('link',{name:'View document'}).getAttribute('href'),'/api/v1/resume-lab/standards/version-1/document?disposition=inline');
  assert.match(await page.locator('#saved-resume-list').innerText(),/downloadable document is not recorded/);
+ await page.evaluate(()=>loadSettingsPage('chief?briefing=brief1'));
+ assert.equal(await page.getByLabel('Morning briefing',{exact:true}).inputValue(),'07:00');
+ assert.equal(await page.getByLabel('Allow important alerts overnight').isChecked(),true);
+ assert.equal(await page.getByLabel('Use quiet hours',{exact:true}).isChecked(),false);
+ assert.match(await page.locator('#chief-preview').innerText(),/Full saved briefing text/);
+ assert.match(await page.locator('#chief-actions').innerText(),/<img src=x onerror=unsafe>/);
+ assert.equal(await page.getByRole('button',{name:'Send email',exact:true}).isDisabled(),true);
+ await page.getByLabel('I reviewed the recipients and full message.').check();
+ await page.getByRole('button',{name:'Send email',exact:true}).click();
+ assert.equal(await page.evaluate(()=>JSON.parse(calls.find(c=>c.url==='/api/v1/chief/actions/decide').options.body).payload_hash),'a'.repeat(64));
+ await page.getByLabel('Notification mode').selectOption('risk_only');
+ await page.getByRole('button',{name:'Save preferences',exact:true}).click();
+ assert.equal(await page.evaluate(()=>JSON.parse(calls.find(c=>c.url==='/api/v1/chief/preferences'&&c.options.method).options.body).expected_revision),3);
+ await page.getByRole('button',{name:'I received it',exact:true}).click();
+ assert.equal(await page.evaluate(()=>JSON.parse(calls.find(c=>c.url==='/api/v1/chief/delivery-recovery'&&c.options.method).options.body).expected_revision),2);
+ for(const width of [390,768,1280]) {await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'chief '+width);}
  await page.evaluate(async()=>{$('#settings').hidden=true;$('#career').hidden=false;await loadCareerProfile();});
  assert.match(await page.locator('.career-saved-summary').first().innerText(),/Example Candidate/);
  assert.equal(await page.getByLabel('Full name',{exact:true}).isVisible(),false);

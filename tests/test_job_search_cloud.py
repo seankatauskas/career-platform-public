@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -51,6 +52,28 @@ def _docker_context_includes(rules: str, candidate: str) -> bool:
         if matched:
             included = negated
     return included
+
+
+def test_cost_snapshot_mount_is_dashboard_only_read_only_and_not_a_secret_directory() -> None:
+    compose = (ROOT / "compose.cloud.yaml").read_text()
+    dashboard = compose.split("\n  dashboard:\n", 1)[1].split("\n  mcp:\n", 1)[0]
+    assert compose.count("JOB_SEARCH_COST_DIR") == 2  # variable and required-variable message
+    assert "JOB_SEARCH_COST_DIR:?set JOB_SEARCH_COST_DIR" in dashboard
+    assert "target: /run/job-search-costs\n        read_only: true" in dashboard
+    assert "JOB_SEARCH_COST_SNAPSHOT: /run/job-search-costs/snapshot.json" in dashboard
+    assert "cost_collector" not in compose
+
+
+def test_hermes_acceptance_supplies_all_required_compose_settings() -> None:
+    module = runpy.run_path(str(ROOT / "scripts/hermes-healthcheck-acceptance.py"))
+    env = module["fixture_environment"]("/fixture")
+    required = set()
+    for name in ("compose.cloud.yaml", "compose.hermes.yaml"):
+        required.update(re.findall(r"\$\{(JOB_SEARCH_[A-Z_]+):?\?", (ROOT / name).read_text()))
+    assert required
+    assert required <= env.keys(), required - env.keys()
+    assert all(env[key] for key in required)
+    assert env["JOB_SEARCH_COST_DIR"] == "/fixture"
 
 
 class FakeRuntime:
@@ -268,7 +291,9 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     }
     # Host administration ships in the verified release archive, not application
     # images. It invokes privileged Docker/AWS operations and has no app caller.
-    host_only_python = {"job_search/aws_ops.py", "job_search/operation_journal.py", "job_search/release_policy.py"}
+    host_only_python = {"job_search/aws_ops.py", "job_search/operation_journal.py",
+                        "job_search/release_policy.py", "job_search/cost_collector.py",
+                        "job_search/review_host.py"}
     assert packaged_python == repository_python - host_only_python
     assert not (packaged_python & host_only_python)
     for excluded in (

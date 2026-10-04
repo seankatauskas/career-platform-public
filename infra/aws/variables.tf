@@ -2,6 +2,11 @@ variable "region" {
   type    = string
   default = "us-east-2"
 }
+variable "cost_monitor_enabled" {
+  type        = bool
+  default     = false
+  description = "Opt in to daily host-only billing snapshots and ce:GetCostAndUsage read access. Cost Explorer API requests are chargeable. Existing hosts also require the documented monitor setup."
+}
 variable "name" {
   type    = string
   default = "career-platform"

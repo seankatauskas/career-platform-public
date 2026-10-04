@@ -145,7 +145,11 @@ already caused silent, wrong-looking-correct output: Lever's job title is `text`
 
 ## Publishing a caller-selected shortlist
 
-After collection finishes, an agent may query the configured jobs database read-only,
+For recurring broad/targeted reviews, use `skills/career-job-review/SKILL.md` and
+`docs/agent-job-reviews.md`. Review tools preserve strict posting windows, private
+evidence, and resumable coverage. They never invoke ranking or submit applications.
+
+For other caller-selected lists, after collection finishes, an agent may query the configured jobs database read-only,
 choose existing jobs, and publish them with `python -m job_search --config <config>
 shortlist publish --input -`. See `docs/curated-shortlists.md` for the JSON contract.
 Use the publishing API rather than writing shortlist tables directly. Selection and

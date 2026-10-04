@@ -1,0 +1,31 @@
+# The resulting image digest is recorded in the prepared release manifest.
+# No application tree, databases, fixtures, skills, or operator configuration.
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+LABEL org.career-platform.review.codex-version="0.160.0"
+RUN python - <<'PY'
+import base64, hashlib, io, pathlib, tarfile, urllib.request
+url = 'https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-linux-x64.tgz'
+expected = 'KI/73OqGrHmR18s7ya7E1NqV6rT0y3lxr0s8S1qR2m6zU6QRF/HlR529jALLh5vjdUnsRT4Ahoxt0axb4kY99g=='
+data = urllib.request.urlopen(url, timeout=120).read()
+assert base64.b64encode(hashlib.sha512(data).digest()).decode() == expected, 'Codex package integrity mismatch'
+archive = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')
+members = [m for m in archive.getmembers() if m.name == 'package/vendor/x86_64-unknown-linux-musl/bin/codex' and m.isfile()]
+assert len(members) == 1, 'Unexpected Codex distribution layout'
+target = pathlib.Path('/opt/codex/bin/codex')
+target.parent.mkdir(parents=True)
+target.write_bytes(archive.extractfile(members[0]).read())
+target.chmod(0o755)
+host = target.with_name('codex-code-mode-host')
+host.write_bytes(archive.extractfile('package/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host').read())
+host.chmod(0o755)
+pathlib.Path('/opt/codex/SHA256SUMS').write_text(hashlib.sha256(target.read_bytes()).hexdigest() + '  bin/codex\n')
+PY
+RUN /opt/codex/bin/codex --version | python -c 'import sys; assert sys.stdin.read().strip() == "codex-cli 0.160.0"'
+WORKDIR /opt/reviewer
+RUN mkdir -p job_search/job_reviews /review /model /output && touch job_search/__init__.py job_search/job_reviews/__init__.py && chown 10001:10001 /review /model && chmod 700 /review /model
+COPY job_search/contracts.py ./job_search/
+COPY job_search/job_reviews/codex_runtime.py job_search/job_reviews/reviewer_mcp.py job_search/job_reviews/reviewer_api.py job_search/job_reviews/context.py job_search/job_reviews/contracts.py ./job_search/job_reviews/
+COPY job_search/job_reviews/reviewer_rubric.md ./job_search/job_reviews/
+ENV PYTHONPATH=/opt/reviewer PYTHONDONTWRITEBYTECODE=1 HOME=/tmp/review-home CODEX_HOME=/tmp/review-home
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "job_search.job_reviews.codex_runtime"]

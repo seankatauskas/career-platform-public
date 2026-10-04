@@ -23,6 +23,10 @@ COPY --chown=root:root job_search/maintenance.py /opt/job-search-hermes/maintena
 COPY --chown=root:root deploy/hermes/cont-init.d/001-job-search-maintenance /etc/cont-init.d/001-job-search-maintenance
 COPY --chown=root:root job_search/hermes_delivery.py \
   /opt/job-search-hermes/hermes_delivery.py
+COPY --chown=root:root deploy/hermes/plugins/career-interactions/ /opt/hermes/plugins/career-interactions/
+COPY --chown=root:root job_search/interactions/telegram.py /opt/hermes/plugins/career-interactions/runtime.py
+COPY --chown=root:root job_search/interactions/bootstrap.py /opt/job-search-hermes/interaction_bootstrap.py
+COPY --chown=root:root deploy/hermes/cont-init.d/019-career-interactions /etc/cont-init.d/019-career-interactions
 COPY --chown=root:root deploy/hermes/s6-rc.d/ \
   /etc/s6-overlay/s6-rc.d/
 COPY --chown=root:root deploy/hermes/cont-init.d/018-job-search-mcp-token \
@@ -30,6 +34,9 @@ COPY --chown=root:root deploy/hermes/cont-init.d/018-job-search-mcp-token \
 COPY --chown=root:root deploy/hermes/cont-init.d/017-job-search-private-config \
   /etc/cont-init.d/017-job-search-private-config
 RUN chmod 0755 /etc/cont-init.d/001-job-search-maintenance && \
+    chmod 0755 /etc/cont-init.d/019-career-interactions && \
+    chmod -R a-w /opt/hermes/plugins/career-interactions && \
+    chmod 0444 /opt/job-search-hermes/interaction_bootstrap.py && \
     chmod 0555 /opt/job-search-hermes/maintenance.py /opt/job-search-hermes/hermes_delivery.py && \
     chmod 0755 \
       /etc/cont-init.d/017-job-search-private-config \

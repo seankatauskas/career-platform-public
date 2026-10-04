@@ -64,9 +64,12 @@ The current SQLite/Compose design uses one host. The actual installation still
 needs a maintenance pause while writers stop, a consistent rollback snapshot is
 taken, and the new release initializes. Workers drain before that pause, while the
 dashboard remains available. Build and image downloads happen before the pause.
-Predeployment archives use faster gzip compression; the same checksum and restore
-checks still apply. This is not a guarantee of uninterrupted access or a fixed
-outage length. The deployment receipt records the measured pause.
+Predeployment rollback snapshots are checksummed directories published atomically,
+so compression and an extra archive copy are no longer part of the pause. Regular
+off-host backups remain compressed archives. Recovery verifies the entire snapshot
+before changing data, and preserves writes made after a release resumes. This is
+not a guarantee of uninterrupted access or a fixed outage length. The deployment
+receipt records snapshot-phase timings and the measured pause.
 
 For an application submitted on an employer's site during a dashboard outage,
 the paired extension durably queues captured tracking observations and replays

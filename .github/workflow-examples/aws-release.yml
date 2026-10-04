@@ -58,6 +58,9 @@ jobs:
           set -euo pipefail
           docker build --platform linux/amd64 --build-arg SOURCE_REVISION="$GITHUB_SHA" --tag career-platform:release-candidate .
           docker run --rm career-platform:release-candidate --help
+          docker build --platform linux/amd64 --file Dockerfile.codex-review --tag career-platform:reviewer-candidate .
+          reviewer_id=$(docker image inspect career-platform:reviewer-candidate --format '{{.Id}}')
+          python3 -m tests.probe_codex_review_container --image "$reviewer_id"
           python3 scripts/prepare-acceptance-toolchain.py --output .cache/acceptance-toolchain
           python3 scripts/compose-acceptance.py --image career-platform:release-candidate --toolchain-dir .cache/acceptance-toolchain --output .cache/compose-acceptance --require-linux-host
           python3 scripts/release-transition-acceptance.py --candidate-image career-platform:release-candidate
@@ -86,22 +89,34 @@ jobs:
             aws ecr get-login-password | docker login --username AWS --password-stdin "${repository%%/*}"
           done
           docker tag career-platform:release-candidate "$APP_REPOSITORY:$RELEASE_ID"
+          docker tag career-platform:reviewer-candidate "$APP_REPOSITORY:$RELEASE_ID-reviewer"
           docker run --rm "$APP_REPOSITORY:$RELEASE_ID" --help
           docker build --platform linux/amd64 --file Dockerfile.hermes --build-arg "HERMES_BASE_IMAGE=$HERMES_BASE_IMAGE" --tag "$HERMES_REPOSITORY:$RELEASE_ID" .
           python3 scripts/hermes-healthcheck-acceptance.py --image "$HERMES_REPOSITORY:$RELEASE_ID"
           docker push "$APP_REPOSITORY:$RELEASE_ID"
+          docker push "$APP_REPOSITORY:$RELEASE_ID-reviewer"
           docker push "$HERMES_REPOSITORY:$RELEASE_ID"
           app_digest=$(aws ecr describe-images --repository-name "${APP_REPOSITORY#*/}" --image-ids "imageTag=$RELEASE_ID" --query 'imageDetails[0].imageDigest' --output text)
           hermes_digest=$(aws ecr describe-images --repository-name "${HERMES_REPOSITORY#*/}" --image-ids "imageTag=$RELEASE_ID" --query 'imageDetails[0].imageDigest' --output text)
+          reviewer_digest=$(aws ecr describe-images --repository-name "${APP_REPOSITORY#*/}" --image-ids "imageTag=$RELEASE_ID-reviewer" --query 'imageDetails[0].imageDigest' --output text)
+          echo "REVIEWER_IMAGE=$APP_REPOSITORY@$reviewer_digest" >> "$GITHUB_ENV"
           echo "APP_IMAGE=$APP_REPOSITORY@$app_digest" >> "$GITHUB_ENV"
           echo "HERMES_IMAGE=$HERMES_REPOSITORY@$hermes_digest" >> "$GITHUB_ENV"
+      - name: Preserve Hermes native contract evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hermes-native-validation-${{ github.sha }}
+          path: .cache/hermes-healthcheck.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Package committed sources and publish checksummed release
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain --untracked-files=no)"
           python3 scripts/aws-release-package.py --output "$RUNNER_TEMP/release" \
             --release-id "$RELEASE_ID" --source-sha "$GITHUB_SHA" \
-            --app-image "$APP_IMAGE" --hermes-image "$HERMES_IMAGE" \
+            --app-image "$APP_IMAGE" --hermes-image "$HERMES_IMAGE" --reviewer-image "$REVIEWER_IMAGE" \
             --hermes-base-image "$HERMES_BASE_IMAGE" --tectonic-version "$TECTONIC_VERSION" \
             --transition-evidence .cache/release-transition.json
           for name in release.tar.gz manifest.json; do

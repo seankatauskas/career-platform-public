@@ -51,6 +51,6 @@ locals {
   account      = data.aws_caller_identity.current.account_id
   partition    = data.aws_partition.current.partition
   prefix       = "arn:${local.partition}"
-  secret_names = toset(["config.json", "portable-master-key", "mcp-token", "inference.json", "runpod-api-key", "resume-model.json", "hermes.env", "hermes.yaml", "tailscale-auth-key"])
+  secret_names = toset(["config.json", "portable-master-key", "mcp-token", "inference.json", "runpod-api-key", "resume-model.json", "hermes.env", "hermes.yaml", "tailscale-auth-key", "interaction-token", "briefing-inference.json", "briefing-api-key"])
 
 }

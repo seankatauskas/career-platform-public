@@ -360,6 +360,36 @@ def test_audit_is_hidden_until_students_are_fit() -> None:
             assert "fit both students" in str(exc)
 
 
+def test_status_shows_only_audits_for_current_policy_versions() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        source = _make_source(directory)
+        proxy = Path(directory) / "proxy.db"
+        profile = _profile(directory)
+        prepared = prepare_run(source, proxy, profile, 10, 2, 9)
+        run_id = prepared["run"]["run_id"]
+        with sqlite3.connect(proxy) as con:
+            for policy in ("selective", "broad"):
+                con.execute("INSERT INTO proxy_students VALUES (?,?,?,?,?,?,?,?,?)", (
+                    run_id, policy, policy + "-old", "revision", 8, "state.db", "artifacts", "{}", "2026-01-01",
+                ))
+                con.execute("INSERT INTO proxy_student_audits VALUES (?,?,?,?,?)", (
+                    run_id, policy, policy + "-old", json.dumps({"version": "old"}), "2026-01-01",
+                ))
+        assert set(status(proxy)["audits"]) == {"selective", "broad"}
+        with sqlite3.connect(proxy) as con:
+            con.execute("UPDATE proxy_students SET model_run_id='selective-sparse' WHERE policy_id='selective'")
+        assert status(proxy)["audits"] == {"broad": {"version": "old"}}
+        with sqlite3.connect(proxy) as con:
+            con.execute("INSERT INTO proxy_student_audits VALUES (?,?,?,?,?)", (
+                run_id, "selective", "selective-sparse", '{"version":"sparse"}', "2026-01-02",
+            ))
+        assert status(proxy)["audits"] == {
+            "broad": {"version": "old"}, "selective": {"version": "sparse"},
+        }
+        with sqlite3.connect(proxy) as con:
+            assert con.execute("SELECT COUNT(*) FROM proxy_student_audits").fetchone()[0] == 3
+
+
 def test_passive_actions_become_weighted_examples_only_after_minimum_coverage() -> None:
     with tempfile.TemporaryDirectory() as directory:
         db = Path(directory) / "feedback.db"

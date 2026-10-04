@@ -94,6 +94,8 @@ resource "aws_instance" "host" {
     cw_version        = var.cloudwatch_agent_version
     cw_sha256         = var.cloudwatch_agent_sha256
     installer         = file("${path.module}/../../deploy/aws/install-release")
+    cost_service      = file("${path.module}/../../deploy/aws/job-search-costs.service")
+    cost_timer        = file("${path.module}/../../deploy/aws/job-search-costs.timer")
     operations_json = jsonencode({
 
       version        = 1, aws_region = var.region, backup_bucket = aws_s3_bucket.backups.id,
@@ -105,6 +107,7 @@ resource "aws_instance" "host" {
       },
       cloudwatch_namespace = "CareerPlatform", notification_topic_arn = aws_sns_topic.alerts.arn,
       app_uid              = 10001, app_gid = 10001
+      costs                = { enabled = var.cost_monitor_enabled }
 
     })
     cw_json = jsonencode({

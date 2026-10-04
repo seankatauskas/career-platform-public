@@ -79,6 +79,8 @@ resource "aws_instance" "drill" {
     cw_version        = var.cloudwatch_agent_version
     cw_sha256         = var.cloudwatch_agent_sha256
     installer         = file("${path.module}/../../../deploy/aws/install-release")
+    cost_service      = file("${path.module}/../../../deploy/aws/job-search-costs.service")
+    cost_timer        = file("${path.module}/../../../deploy/aws/job-search-costs.timer")
     operations_json = jsonencode({
       version        = 1, aws_region = var.region, backup_bucket = var.backup_bucket,
       release_bucket = var.release_bucket, data_root = "/var/lib/job-search",
@@ -100,7 +102,7 @@ resource "aws_instance" "drill" {
         log_stream_name = "{instance_id}/recovery-drill"
       }] } } }
     })
-  }), "systemctl disable --now job-search-status.timer job-search-backup.timer"]))
+  }), "systemctl disable --now job-search-status.timer job-search-backup.timer job-search-costs.timer"]))
   tags = { Name = "career-platform-restore-drill" }
 }
 

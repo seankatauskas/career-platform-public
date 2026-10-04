@@ -20,7 +20,7 @@ MAIL_SELECT = (
 )
 BODY_SELECT = (
     "id,conversationId,internetMessageId,sender,from,replyTo,subject,"
-    "receivedDateTime,lastModifiedDateTime,body,bodyPreview,isDraft,"
+    "receivedDateTime,sentDateTime,parentFolderId,toRecipients,ccRecipients,bccRecipients,lastModifiedDateTime,body,bodyPreview,isDraft,"
     "hasAttachments,webLink,internetMessageHeaders"
 )
 FOLDER_SELECT = "id,parentFolderId,childFolderCount,isHidden"

@@ -29,7 +29,7 @@ from typing import Any
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z")
 DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}\Z")
-SECRET_FILES = {"config.json", "inference.json", "resume-model.json", "runpod-api-key", "mcp-token", "portable-master-key", "hermes.env", "hermes.yaml", "tailscale-auth-key"}
+SECRET_FILES = {"config.json", "inference.json", "resume-model.json", "runpod-api-key", "mcp-token", "portable-master-key", "hermes.env", "hermes.yaml", "tailscale-auth-key", "interaction-token", "briefing-inference.json", "briefing-api-key"}
 SERVICES = ("tools", "dashboard", "mcp", "core", "model", "hermes")
 REVIEW_SERVICES = ("tools", "dashboard", "mcp", "hermes")
 BACKUP_DIRS = ("state", "hermes", "toolchain")
@@ -37,9 +37,24 @@ BACKUP_DIRS = ("state", "hermes", "toolchain")
 EXCLUDED = {".env", "config.yaml", ".operations.lock", "runtime", "logs", "__pycache__"}
 
 from .operation_journal import (
-    OpsError, Operation, read as read_operation, require_idle, set_gate,
+    OpsError, Operation, read as read_operation, require_idle, set_gate as _set_gate,
     write_json, sync_directory, sync_tree, now as operation_now,
 )
+
+
+def set_gate(c, allowed, *, draining=False, initialize=None):
+    permitted = list(allowed)
+    if not draining and "dashboard" in permitted:
+        try:
+            if manifest(release_path(c)).get("reviewer_image"):
+                permitted.append("review-runner")
+        except (OpsError, OSError, ValueError):
+            pass
+    _set_gate(c, permitted, draining=draining, initialize=initialize)
+
+
+class OperationBusy(OpsError):
+    """Positive lock contention, distinct from unreadable maintenance state."""
 
 
 def digest(path: Path) -> str:
@@ -98,8 +113,29 @@ def lock(c: dict):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise OpsError("another deployment or backup is active") from None
+        except BlockingIOError: raise OperationBusy("another deployment or backup is active") from None
         yield
+    finally: os.close(fd)
+
+
+def operation_lock_held(c: dict) -> bool | None:
+    """Observe maintenance ownership without creating a lock file or waiting.
+
+    None means the lock could not be inspected safely, not proof of an active
+    deployment. The journal still blocks all competing mutations in that case.
+    """
+    try: fd = os.open(Path(c["data_root"]) / ".operations.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError: return False
+    except OSError: return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_uid != os.geteuid():
+            return None
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return True
+        except OSError: return None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
     finally: os.close(fd)
 
 def release_path(c: dict, release_id: str | None = None) -> Path:
@@ -118,14 +154,25 @@ def manifest(path: Path) -> dict:
     if m.get("version") != 1 or not ID.fullmatch(m.get("release_id", "")): raise OpsError("invalid release manifest")
     for key in ("app_image", "hermes_image", "hermes_base_image"):
         if not IMAGE.fullmatch(m.get(key, "")): raise OpsError("release images must be pinned by digest")
+    if "reviewer_image" in m and (not IMAGE.fullmatch(m["reviewer_image"]) or m["reviewer_image"].split("@", 1)[0] != m["app_image"].split("@", 1)[0]):
+        raise OpsError("reviewer image must use the pinned application repository")
     if not isinstance(m.get("tectonic_version"), str) or not m["tectonic_version"]: raise OpsError("missing Tectonic version")
     return m
 
 def compose(c: dict, *args: str, release: Path | None = None) -> str:
     r = release or release_path(c); m = manifest(r); d = Path(c["data_root"])
+    # Sanitized host observations only; never mount billing credentials here.
+    costs = d / "costs"
+    if costs.is_symlink(): raise OpsError("cost observation directory is a symlink")
+    if args and args[0] in {"up", "run"}:
+        # Compose ps/config and status are diagnostics, not provisioning paths.
+        costs.mkdir(mode=0o755, exist_ok=True)
+        costs.chmod(0o755)
+        if os.geteuid() == 0: os.chown(costs, 0, c.get("app_gid", 10001))
     env = dict(os.environ)
     env.update({
         "JOB_SEARCH_MAINTENANCE_DIR": str(d / "maintenance"),
+        "JOB_SEARCH_COST_DIR": str(costs),
         "JOB_SEARCH_IMAGE": m["app_image"], "JOB_SEARCH_HERMES_BRIDGE_IMAGE": m["hermes_image"],
         "JOB_SEARCH_HERMES_BASE_IMAGE": m["hermes_base_image"], "JOB_SEARCH_STATE_DIR": str(d / "state"),
         "JOB_SEARCH_PRIVATE_DIR": str(d / "private"), "JOB_SEARCH_HERMES_DATA_DIR": str(d / "hermes"),
@@ -144,30 +191,60 @@ def compose(c: dict, *args: str, release: Path | None = None) -> str:
             if runtime["mail_inference_config"] != "/run/job-search/mail-inference.json":
                 raise OpsError("cloud mail inference requires the dedicated mounted profile")
             files += ["-f", str(r / "compose.mail.yaml")]
+        if runtime.get("briefing_inference_config") and (r / "compose.briefing.yaml").is_file():
+            if runtime["briefing_inference_config"] != "/run/job-search/briefing-inference.json":
+                raise OpsError("cloud briefings require the dedicated mounted profile")
+            files += ["-f", str(r / "compose.briefing.yaml")]
+        if runtime.get("interaction_token_file") and (r / "compose.chief.yaml").is_file():
+            if runtime["interaction_token_file"] != "/run/job-search/interaction-token" or runtime.get("interaction_port", 8768) != 8768:
+                raise OpsError("cloud interactions require the dedicated mounted bearer and port 8768")
+            for suffix in ("BOT", "USER", "CHAT"):
+                identity = runtime.get("telegram_" + suffix.lower() + "_id", "")
+                if not isinstance(identity, str) or not re.fullmatch(r"[1-9][0-9]{0,23}", identity):
+                    raise OpsError("cloud interactions require explicit Telegram owner identity")
+                env["JOB_SEARCH_TELEGRAM_" + suffix + "_ID"] = identity
+            files += ["-f", str(r / "compose.chief.yaml")]
     return run(["docker", "compose", "--project-name", "job-search", *files, *args], env=env, timeout=4500)
 
 def running_services(c: dict, release: Path | None = None) -> list[str]:
-    return [v for v in compose(c, "ps", "--services", "--status", "running", release=release).splitlines() if v in SERVICES]
+    return [v for v in compose(c, "ps", "--services", "--status", "running", release=release).splitlines() if v in (*SERVICES, "interactions")]
+
+
+def configured_services(c: dict, *, review: bool = False, release: Path | None = None) -> list[str]:
+    services = list(REVIEW_SERVICES if review else SERVICES)
+    runtime_path = Path(c["data_root"]) / "private" / "config.json"
+    if runtime_path.is_file() and json.loads(runtime_path.read_text()).get("interaction_token_file"):
+        if ((release or release_path(c)) / "compose.chief.yaml").is_file():
+            services.append("interactions")
+    return services
 
 def activation(c: dict) -> dict:
     path = Path(c["data_root"]) / "activation.json"
     return json.loads(path.read_text()) if path.exists() else {"enabled": False}
 
 
-def available_space(c: dict, *, restore_bytes: int = 0) -> None:
+def available_space(c: dict, *, restore_bytes: int | None = None, local_snapshot: bool = False) -> None:
     root = Path(c["data_root"])
-    size = sum(p.stat().st_size for name in BACKUP_DIRS for p in (root / name).rglob("*") if p.is_file() and not p.is_symlink())
-    # Snapshot + incompressible archive + extraction, plus a minimum safety margin.
-    needed = max(size * 3, restore_bytes) + 256 * 1024**2
+    # Local snapshots need capture + independent recovery staging. Off-host
+    # bundles additionally need archive space. Never spend recovery headroom.
+    # At restore time the snapshot already occupies disk; only staging is new.
+    if restore_bytes is not None:
+        needed = restore_bytes
+    else:
+        size = sum(p.stat().st_size for name in BACKUP_DIRS for p in (root / name).rglob("*") if p.is_file() and not p.is_symlink())
+        needed = size * (2 if local_snapshot else 3)
+    needed += 256 * 1024**2
     if shutil.disk_usage(root).free < needed:
         raise OpsError("insufficient disk space for a recoverable maintenance operation")
 
 
 def drain_workers(c: dict, active: list[str], timeout: int = 4200) -> None:
     lanes = [s for s in active if s in {"core", "model"}]
+    set_gate(c, [s for s in active if s not in lanes], draining=True)
+    from .review_host import drain as drain_reviews
+    drain_reviews(c, run)
     if not lanes:
         return
-    set_gate(c, [s for s in active if s not in lanes], draining=True)
     until = time.monotonic() + timeout
     waiting = set(lanes)
     while waiting and time.monotonic() < until:
@@ -194,7 +271,7 @@ def stop_for_maintenance(c: dict, op: Operation, active: list[str]) -> None:
         op.finish("drain_aborted")
         raise
     op.update("stopping", downtime_started_at=operation_now())
-    set_gate(c, [])
+    set_gate(c, [], draining=True)
     remaining = active  # workers have already acknowledged a safe drain
     if remaining:
         compose(c, "stop", "--timeout", "30", *remaining)
@@ -287,6 +364,8 @@ def secret_versions(c: dict) -> dict:
     return result
 
 def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, release_id: str | None = None) -> dict:
+    if paused and not upload:
+        return local_snapshot_unlocked(c, release_id=release_id)
     available_space(c)
     snapshot_at = operation_now()
     bid = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(4).hex()
@@ -308,10 +387,8 @@ def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, relea
              "release_id": release_id or release_path(c).name, "secrets": versions, "files": files}
         write_json(stage / "backup.json", m)
         bundle = Path(temp) / "backup.tar.gz"
-        # Predeployment archives are built while the application is stopped.
-        # Prefer speed there; routine off-host backups compress after resuming.
-        # Both remain ordinary gzip archives with the same verified restore path.
-        with tarfile.open(bundle, "w:gz", compresslevel=1 if paused and not upload else 9) as tar:
+        # Routine off-host backup compression still runs after services resume.
+        with tarfile.open(bundle, "w:gz", compresslevel=9) as tar:
             for p in sorted(stage.rglob("*")):
                 tar.add(p, arcname=str(p.relative_to(stage)), recursive=False)
         sync_tree(Path(temp))
@@ -329,6 +406,72 @@ def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, relea
             with destination.open("rb") as stream: os.fsync(stream.fileno())
             sync_directory(backups)
         return {"status": "backed_up", "backup_id": bid, "sha256": archive_hash}
+
+
+def backup_root(c: dict) -> Path:
+    root = Path(c["data_root"]) / "backups"
+    if root.is_symlink(): raise OpsError("backup directory is a symlink")
+    root.mkdir(mode=0o700, exist_ok=True)
+    root.chmod(0o700)
+    if root.stat().st_uid != os.geteuid(): raise OpsError("backup directory owner mismatch")
+    return root
+
+
+def local_snapshot_unlocked(c: dict, *, release_id: str | None = None) -> dict:
+    """Durable local rollback without compression or a second full archive copy.
+
+    All writers must already be stopped and the operations lock held. Only a
+    fully fsynced snapshot is atomically published; migration starts only after
+    its manifest digest is durably recorded in the operation journal. The SHA
+    commits to every retained file's checksum, not to a compressed byte stream.
+    """
+    started = time.monotonic()
+    available_space(c, local_snapshot=True)
+    d = Path(c["data_root"]); backups = backup_root(c)
+    bid = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(4).hex()
+    snapshot_at = operation_now()
+    stage = Path(tempfile.mkdtemp(prefix="snapshot-pending-", dir=backups))
+    published = backups / (bid + ".snapshot")
+    try:
+        versions = secret_versions(c)
+        for name in BACKUP_DIRS: copy_snapshot(d / name, stage / name, hermes=name == "hermes")
+        captured = time.monotonic()
+        files = {str(p.relative_to(stage)): {"sha256": digest(p), "size": p.stat().st_size}
+                 for p in stage.rglob("*") if p.is_file()}
+        directories = sorted(str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_dir())
+        m = {"version": 1, "format": "directory-v1", "backup_id": bid,
+             "created_at": snapshot_at, "snapshot_at": snapshot_at,
+             "release_id": release_id or release_path(c).name, "secrets": versions,
+             "files": files, "directories": directories}
+        write_json(stage / "backup.json", m)
+        manifest_hash = digest(stage / "backup.json")
+        manifested = time.monotonic()
+        sync_tree(stage)
+        if published.exists() or published.is_symlink(): raise OpsError("backup ID already exists")
+        os.replace(stage, published)
+        sync_directory(backups)
+        finished = time.monotonic()
+        return {"status": "backed_up", "format": "directory-v1", "backup_id": bid,
+                "sha256": manifest_hash, "snapshot_at": snapshot_at,
+                "file_count": len(files), "size_bytes": sum(f["size"] for f in files.values()),
+                "timings_seconds": {"capture": round(captured - started, 3),
+                                    "manifest": round(manifested - captured, 3),
+                                    "durable_publish": round(finished - manifested, 3),
+                                    "total": round(finished - started, 3)}}
+    finally:
+        # A crash leaves an unpublished directory for inspection, never a valid
+        # rollback receipt. Ordinary failures can remove only our own staging.
+        if stage.exists(): shutil.rmtree(stage)
+
+
+def local_backup_path(c: dict, snapshot: dict) -> Path:
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("backup_id"), str):
+        raise OpsError("invalid rollback snapshot receipt")
+    kind = snapshot.get("format", "tar.gz")
+    if not isinstance(kind, str) or kind not in {"tar.gz", "directory-v1"}:
+        raise OpsError("unsupported rollback snapshot format")
+    suffix = ".snapshot" if kind == "directory-v1" else ".tar.gz"
+    return backup_root(c) / (valid_id(snapshot["backup_id"]) + suffix)
 
 def safe_extract(bundle: Path, target: Path, *, max_bytes: int = 200 * 1024**3) -> None:
     total = 0; seen = set()
@@ -351,13 +494,39 @@ def safe_extract(bundle: Path, target: Path, *, max_bytes: int = 200 * 1024**3) 
                 dest.chmod(0o600)
 
 def verify_snapshot(stage: Path) -> dict:
-    m = json.loads((stage / "backup.json").read_text())
-    if m.get("version") != 1 or not isinstance(m.get("files"), dict): raise OpsError("invalid backup manifest")
-    actual = {str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_file() and p != stage / "backup.json"}
+    if stage.is_symlink() or not stage.is_dir(): raise OpsError("invalid snapshot directory")
+    actual, directories = set(), set()
+    for p, info in runtime_entries(stage):
+        name = str(p.relative_to(stage))
+        if stat.S_ISDIR(info.st_mode): directories.add(name)
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1: actual.add(name)
+        else: raise OpsError("backup contains a link or special file")
+    manifest_path = stage / "backup.json"
+    if "backup.json" not in actual or manifest_path.stat().st_size > 64 * 1024**2:
+        raise OpsError("invalid backup manifest")
+    try: m = json.loads(manifest_path.read_text())
+    except (ValueError, UnicodeError): raise OpsError("invalid backup manifest") from None
+    if not isinstance(m, dict) or m.get("version") != 1 or not isinstance(m.get("files"), dict):
+        raise OpsError("invalid backup manifest")
+    actual.remove("backup.json")
+    if not set(BACKUP_DIRS) <= directories:
+        raise OpsError("backup directory set mismatch")
+    for name in directories:
+        if PurePosixPath(name).parts[0] not in BACKUP_DIRS: raise OpsError("backup path outside data set")
+    if m.get("format") == "directory-v1" and (
+            not isinstance(m.get("directories"), list) or
+            any(not isinstance(name, str) for name in m["directories"]) or
+            sorted(directories) != sorted(m["directories"])):
+        raise OpsError("backup directory set mismatch")
     if actual != set(m["files"]): raise OpsError("backup file set mismatch")
     for name, expected in m["files"].items():
         rel = PurePosixPath(name)
-        if rel.is_absolute() or ".." in rel.parts or rel.parts[0] not in BACKUP_DIRS: raise OpsError("backup path outside data set")
+        if (not rel.parts or str(rel) != name or rel.is_absolute() or ".." in rel.parts or
+                len(rel.parts) < 2 or rel.parts[0] not in BACKUP_DIRS):
+            raise OpsError("backup path outside data set")
+        if (not isinstance(expected, dict) or type(expected.get("size")) is not int or expected["size"] < 0 or
+                not isinstance(expected.get("sha256"), str) or not DIGEST.fullmatch(expected["sha256"])):
+            raise OpsError("invalid backup file manifest")
         p = stage / name
         if p.stat().st_size != expected["size"] or digest(p) != expected["sha256"]: raise OpsError("backup checksum mismatch")
         if not p.name.endswith(("-wal", "-shm")): sqlite_check(p)
@@ -498,6 +667,12 @@ def chown_runtime(c: dict) -> None:
         for p, info in [(root, root.lstat()), *runtime_entries(root, hermes=name == "hermes")]:
             if stat.S_ISLNK(info.st_mode): raise OpsError("runtime contains symlink")
             if p.name == "tailscale-auth-key": continue
+            relative = p.relative_to(root).parts
+            if relative and ((name == "state" and relative[0] == "review-runner") or
+                             (name == "runtime" and relative[0] == "reviews")):
+                os.chown(p, 0, 0)
+                p.chmod(0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
+                continue
             if p == root and name == "private":
                 os.chown(p, 0, c.get("app_gid", 10001)); p.chmod(0o710)
                 continue
@@ -547,7 +722,12 @@ def undo_restore(c: dict, op: Operation) -> None:
 
 def restore_unlocked(c: dict, bundle: Path, expected_sha256: str, *, replace: bool = False,
                      _operation: Operation | None = None) -> dict:
-    if not DIGEST.fullmatch(expected_sha256) or digest(bundle) != expected_sha256:
+    if bundle.is_symlink(): raise OpsError("backup path is a symlink")
+    directory_snapshot = bundle.is_dir()
+    checksum_path = bundle / "backup.json" if directory_snapshot else bundle
+    if (checksum_path.is_symlink() or not checksum_path.is_file() or
+            not isinstance(expected_sha256, str) or not DIGEST.fullmatch(expected_sha256) or
+            digest(checksum_path) != expected_sha256):
         raise OpsError("backup archive checksum mismatch")
     d = Path(c["data_root"])
     current = Path(c["release_root"]) / "current"
@@ -556,15 +736,26 @@ def restore_unlocked(c: dict, bundle: Path, expected_sha256: str, *, replace: bo
     occupied = any((d / name).exists() and any((d / name).iterdir()) for name in BACKUP_DIRS)
     if occupied and not replace:
         raise OpsError("restore target is not empty; use explicit --replace")
-    with tarfile.open(bundle, "r:gz") as archive:
-        required = sum(member.size for member in archive)
-    available_space(c, restore_bytes=required)
+    if directory_snapshot:
+        source_manifest = verify_snapshot(bundle)
+        if source_manifest.get("format") != "directory-v1": raise OpsError("unsupported rollback snapshot format")
+        required = sum(item["size"] for item in source_manifest["files"].values())
+    else:
+        with tarfile.open(bundle, "r:gz") as archive:
+            required = sum(member.size for member in archive)
+    available_space(c, restore_bytes=required, local_snapshot=directory_snapshot)
     if _operation is None:
         require_idle(c)
     # Preserve staging on interruption. It is never part of a normal backup.
     stage = Path(tempfile.mkdtemp(prefix="restore-stage-", dir=d))
     stage.chmod(0o700)
-    safe_extract(bundle, stage); m = verify_snapshot(stage)
+    if directory_snapshot:
+        # Recovery staging owns independent bytes: publication must never move
+        # or hard-link the retained rollback snapshot, including on retries.
+        shutil.copytree(bundle, stage, dirs_exist_ok=True)
+        if digest(stage / "backup.json") != expected_sha256: raise OpsError("backup manifest changed during recovery")
+    else: safe_extract(bundle, stage)
+    m = verify_snapshot(stage)
     target_release = release_path(c, m["release_id"]); manifest(target_release)
     sync_tree(stage); sync_directory(d)
     op = _operation or Operation.begin(c, "restore", previous_release=release_path(c).name if current.exists() else None,
@@ -579,7 +770,7 @@ def restore_unlocked(c: dict, bundle: Path, expected_sha256: str, *, replace: bo
             "prior_release": release_path(c).name if current.exists() else None,
             "prior_secrets": used_secret_versions(c), "target_secrets": m["secrets"]}
     op.update("restore_prepared", restore=info)
-    set_gate(c, [])
+    set_gate(c, [], draining=True)
     try:
         # Resolve every required version before moving a directory.
         materialize_secrets(c, m["secrets"])
@@ -611,10 +802,14 @@ def project_containers() -> list[str]:
     ids = run(query).split()
     if any(not re.fullmatch(r"[a-f0-9]{12,64}", value) for value in ids):
         raise OpsError("invalid project container identity")
-    return ids
+    from .review_host import worker_containers
+    return sorted(set(ids + worker_containers(run)))
 
 
 def stop_project(c: dict) -> None:
+    set_gate(c, [], draining=True)
+    from .review_host import drain as drain_reviews
+    drain_reviews(c, run)
     ids = project_containers()
     if ids:
         run(["docker", "stop", "--time", "4200", *ids], timeout=4500)
@@ -629,14 +824,14 @@ def recover(c: dict, operation_id: str) -> dict:
     if value["complete"]:
         return {"status": "already_complete", "operation_id": operation_id, "phase": value["phase"]}
     op = Operation(c, value)
-    set_gate(c, [])
+    set_gate(c, [], draining=True)
     stop_project(c)
     if value.get("restore") and not value["restore"].get("committed"):
         undo_restore(c, op)
     if value["kind"] in {"deploy", "rollback"} and not value["writes_possible"]:
         snapshot = value.get("backup")
         if snapshot:
-            restore_unlocked(c, Path(c["data_root"]) / "backups" / (valid_id(snapshot["backup_id"]) + ".tar.gz"),
+            restore_unlocked(c, local_backup_path(c, snapshot),
                              snapshot["sha256"], replace=True, _operation=op)
         elif value.get("state_mutation_started"):
             raise OpsError("operation has no verified rollback snapshot; preserve data for inspection")
@@ -679,33 +874,39 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
     previous = release_path(c) if current.exists() else None
     if previous and previous.name == release_id:
         state = activation(c)
-        active = list(SERVICES) if state.get("enabled") else list(REVIEW_SERVICES) if state.get("mode") == "review" else []
+        active = configured_services(c) if state.get("enabled") else configured_services(c, review=True) if state.get("mode") == "review" else []
         if active and not healthy(c, active):
             raise OpsError("release already installed but unhealthy; inspect status before retrying")
         return {"status": "deployed" if active else "deployed_paused", "release_id": release_id, "already_installed": True}
     check_transition(candidate, manifest(previous) if previous else None, rollback=rollback)
     compose(c, "config", "--quiet", release=target)
     compose(c, "pull", release=target)
+    if candidate.get("reviewer_image"):
+        run(["docker", "pull", candidate["reviewer_image"]], timeout=1800)
     if preflight(c)["issues"]:
         raise OpsError("preflight is incomplete")
-    available_space(c)
+    available_space(c, local_snapshot=True)
     active = running_services(c) if previous else []
     prior_activation = activation(c)
     op = Operation.begin(c, "rollback" if rollback else "deploy", previous_release=previous.name if previous else None,
                          target_release=release_id, active_services=active, previous_activation=prior_activation,
-                         backup=None, state_mutation_started=False)
+                         backup=None, state_mutation_started=False,
+                         recovery_tool=str(Path(__file__).resolve().parent.parent / "scripts" / "job-search-ops"))
     try:
         stop_for_maintenance(c, op, active)
         # Fresh seed state also needs a recoverable snapshot before initialization.
+        op.update("snapshotting")
         snapshot = backup_unlocked(c, paused=True, upload=False, release_id=previous.name if previous else release_id)
         op.update("snapshotted", backup=snapshot)
         op.update("initializing", state_mutation_started=True)
         materialize_secrets(c); chown_runtime(c)
+        from .review_host import prepare as prepare_reviewer
+        prepare_reviewer(c, target, candidate, run)
         if preflight(c)["issues"]: raise OpsError("preflight is incomplete")
         point_current(c, target)
         set_gate(c, [], initialize=op.id)
         compose(c, "run", "--rm", "--no-deps", "--env", "JOB_SEARCH_INITIALIZE_OPERATION=" + op.id, "initialize")
-        set_gate(c, [])
+        set_gate(c, [], draining=True)
         compose(c, "up", "-d", "--no-deps", "--no-build", "tools")
         wait_healthy(c, ["tools"])
         compose(c, "stop", "tools")
@@ -715,12 +916,12 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
     except Exception:
         if op.value["complete"]:  # Drain timed out before any data changed.
             raise
-        set_gate(c, [])
+        set_gate(c, [], draining=True)
         stop_project(c)
         if op.value.get("backup"):
             point_current(c, previous or target)
             snapshot = op.value["backup"]
-            restore_unlocked(c, Path(c["data_root"]) / "backups" / (snapshot["backup_id"] + ".tar.gz"),
+            restore_unlocked(c, local_backup_path(c, snapshot),
                              snapshot["sha256"], replace=True, _operation=op)
         elif op.value["state_mutation_started"]:
             op.update("recovery_required")
@@ -747,11 +948,33 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
         pause(c, reason="release failed after validation; data retained for inspection")
         op.update("recovery_required")
         raise
-    archives = sorted((Path(c["data_root"]) / "backups").glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for archive in archives[2:]:
-        if archive.is_file() and not archive.is_symlink(): archive.unlink()
+    retention = "retained_two_newest"
+    try: prune_local_backups(c, keep_backup=op.value["backup"]["backup_id"])
+    except (OSError, OpsError):
+        # Deployment is already complete. Keep old evidence rather than turn a
+        # cleanup failure into an ambiguous failed deployment or stop writers.
+        retention = "cleanup_failed_backups_preserved"
     return {"status": op.value["phase"], "release_id": release_id, "operation_id": op.id,
-            "previous_release": op.value["previous_release"], "phase_times": op.value["phase_times"], "backup": op.value["backup"]}
+            "previous_release": op.value["previous_release"], "phase_times": op.value["phase_times"],
+            "backup": op.value["backup"], "local_backup_retention": retention}
+
+
+def prune_local_backups(c: dict, *, keep_backup: str) -> None:
+    """Retain the two newest published local backups, across both formats.
+
+    Never touch interrupted staging, unusual paths, or the current journal's
+    snapshot. Cleanup happens only after services have successfully resumed.
+    """
+    root = backup_root(c)
+    candidates = [p for p in root.iterdir() if not p.is_symlink() and
+                  re.fullmatch(r"[0-9]{8}T[0-9]{6}-[a-f0-9]{8}\.(?:snapshot|tar\.gz)", p.name) and
+                  (p.is_dir() if p.name.endswith(".snapshot") else p.is_file())]
+    candidates.sort(key=lambda p: p.name, reverse=True)
+    for item in candidates[2:]:
+        if item.name in {keep_backup + ".snapshot", keep_backup + ".tar.gz"}: continue
+        if item.is_dir(): shutil.rmtree(item)
+        else: item.unlink()
+    sync_directory(root)
 
 
 def preflight(c: dict) -> dict:
@@ -782,20 +1005,25 @@ def model_readiness(c: dict) -> None:
         "from job_search.cli import _dependency_health",
         "c = load_runtime_config(Path('/run/job-search/config.json'))",
         "r = _dependency_health(c)['inference']",
-        "print(json.dumps({'configured': r.get('configuration_ready', False), 'embedding': r.get('preference_embeddings', {}).get('status'), 'mail_ready': not c.remote_mail_inference_enabled or r.get('remote_mail', {}).get('status') in ('configuration_ready', 'local_classifier_selected'), 'private_dashboard': bool(c.dashboard_https_origin and c.dashboard_allowed_tailscale_login)}))",
+        "print(json.dumps({'configured': r.get('configuration_ready', False), 'embedding': r.get('preference_embeddings', {}).get('status'), 'ranking_refresh_mode': c.ranking_refresh_mode, 'shortlist_policy': c.shortlist_policy, 'mail_ready': not c.remote_mail_inference_enabled or r.get('remote_mail', {}).get('status') in ('configuration_ready', 'local_classifier_selected'), 'private_dashboard': bool(c.dashboard_https_origin and c.dashboard_allowed_tailscale_login)}))",
     ])
     report = json.loads(compose(c, "run", "--rm", "--no-deps", "--entrypoint", "python", "core", "-c", probe))
-    if not report.get("configured") or report.get("embedding") != "ready":
+    sparse_ready = (report.get("ranking_refresh_mode") == "sparse_cpu"
+                    and report.get("shortlist_policy") in {"broad", "selective", "compare"}
+                    and report.get("embedding") == "not_required")
+    if not report.get("configured") or not (report.get("embedding") == "ready" or sparse_ready):
         raise OpsError("remote inference or ranking model migration is incomplete")
     if not report.get("private_dashboard"): raise OpsError("private dashboard owner is not configured")
     if report.get("mail_ready") is False: raise OpsError("remote mail inference is not ready")
 
 
 def pause(c: dict, *, reason: str = "operator paused") -> dict:
-    set_gate(c, [])
+    set_gate(c, [], draining=True)
     # Record intent before draining. Status separately detects unexpected runners.
     write_json(Path(c["data_root"]) / "activation.json", {"enabled": False, "reason": reason})
-    compose(c, "stop", "--timeout", "4200", *SERVICES)
+    from .review_host import drain as drain_reviews
+    drain_reviews(c, run)
+    compose(c, "stop", "--timeout", "4200", *configured_services(c))
     if running_services(c): raise OpsError("services failed to stop")
     return {"status": "paused"}
 
@@ -805,10 +1033,10 @@ def activate(c: dict) -> dict:
     check = preflight(c)
     if check["issues"]: raise OpsError("preflight is incomplete")
     model_readiness(c)
-    set_gate(c, list(SERVICES))
+    set_gate(c, configured_services(c))
     try:
-        compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *SERVICES)
-        wait_healthy(c, list(SERVICES))
+        compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *configured_services(c))
+        wait_healthy(c, configured_services(c))
     except Exception:
         pause(c, reason="activation failed; investigate before retrying")
         raise
@@ -821,10 +1049,10 @@ def review(c: dict) -> dict:
     if preflight(c)["issues"]: raise OpsError("preflight is incomplete")
     require_idle(c)
     pause(c, reason="interactive setup")
-    set_gate(c, list(REVIEW_SERVICES))
+    set_gate(c, configured_services(c, review=True))
     try:
-        compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *REVIEW_SERVICES)
-        wait_healthy(c, list(REVIEW_SERVICES))
+        compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *configured_services(c, review=True))
+        wait_healthy(c, configured_services(c, review=True))
     except Exception:
         pause(c, reason="interactive setup failed")
         raise
@@ -856,6 +1084,17 @@ def domain_readiness(c: dict) -> dict:
 
 def status(c: dict, publish: bool = False) -> dict:
     result = preflight(c)
+    from .review_host import status as reviewer_status
+    result["codex_reviews"] = reviewer_status(c)
+    # This bounded local snapshot adds no CloudWatch dimensions or metrics.
+    # Host counters describe current pressure; they cannot explain past peaks.
+    try:
+        from .resource_usage import memory_snapshot
+        result["host_memory"] = {"measured_at": datetime.now(timezone.utc).isoformat(),
+                                 "counters": {key: value for key, value in memory_snapshot().items()
+                                              if key.startswith("host_")}}
+    except Exception:
+        result["host_memory"] = {"status": "unavailable"}
     ok = False
     enabled = False
     try:
@@ -863,11 +1102,11 @@ def status(c: dict, publish: bool = False) -> dict:
         activation = json.loads((Path(c["data_root"]) / "activation.json").read_text())
         enabled = activation.get("enabled", False)
         result["automation_enabled"] = enabled
-        ok = healthy(c, list(SERVICES)) and not result["issues"] if enabled else False
+        ok = healthy(c, configured_services(c)) and not result["issues"] if enabled else False
         result["status"] = "healthy" if ok else ("attention" if enabled else "paused")
         if not enabled:
             active = running_services(c)
-            if activation.get("mode") == "review" and set(active) == set(REVIEW_SERVICES) and healthy(c, list(REVIEW_SERVICES)):
+            if activation.get("mode") == "review" and set(active) == set(configured_services(c, review=True)) and healthy(c, configured_services(c, review=True)):
                 result["status"] = "review"
             elif active: result["status"] = "attention"
     except (OSError, ValueError, OpsError): result["status"] = "blocked_setup"
@@ -879,7 +1118,7 @@ def status(c: dict, publish: bool = False) -> dict:
         except (OSError, ValueError, OpsError):
             domain["reason_code"] = "domain_report_unavailable"
     result["domain"] = domain
-    domain_ok = not enabled or domain["status"] in {"ready", "configured_unverified", "disabled"}
+    domain_ok = not enabled or domain["status"] in {"ready", "configured_unverified", "disabled", "paused"}
     # Preserve the independent process/container signal used during deployment.
     result["liveness_healthy"] = ok
     if enabled and not domain_ok and result["status"] == "healthy":
@@ -910,11 +1149,19 @@ def status(c: dict, publish: bool = False) -> dict:
                 {"MetricName": "DomainPendingReconciliation", "Value": domain["metrics"]["pending_reconciliation"], "Unit": "Count", "Dimensions": dimensions},
             ]))
     operation = read_operation(c)
-    result["operation"] = {key: operation.get(key) for key in ("operation_id", "kind", "phase", "complete", "writes_possible", "previous_release", "target_release", "started_at", "updated_at", "phase_times")} if operation else None
-    result["recovery_required"] = bool(operation and not operation["complete"])
+    result["operation"] = {key: operation.get(key) for key in ("operation_id", "kind", "phase", "complete", "writes_possible", "previous_release", "target_release", "started_at", "updated_at", "phase_times", "recovery_tool", "backup")} if operation else None
+    incomplete = bool(operation and not operation["complete"])
+    held = operation_lock_held(c) if incomplete else False
+    result["maintenance_active"] = incomplete and held is True
+    result["recovery_required"] = incomplete and held is not True
+    if result["maintenance_active"]:
+        result["status"] = "maintenance"
+        result["next_action"] = "wait_for_active_operation"
     if result["recovery_required"]:
         result["status"] = "attention"
         result["next_action"] = "recover --operation " + operation["operation_id"]
+        result["recovery_tool"] = operation.get("recovery_tool")
+        if held is None: result["operation_lock_unverified"] = True
     return result
 
 
@@ -976,18 +1223,31 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action in {"deploy", "rollback"}:
                     result = deploy(c, args.release, rollback=args.action == "rollback")
                 elif args.action == "restore":
-                    if project_containers(): raise OpsError("stop all project containers, including initializers, before restore")
+                    from .review_host import runner_busy
+                    if project_containers() or runner_busy(c): raise OpsError("stop all project containers and review coordinators before restore")
                     result = restore_unlocked(c, args.bundle, args.sha256, replace=args.replace)
                 elif args.action == "secrets":
                     if (Path(c["release_root"]) / "current").exists() and running_services(c):
                         raise OpsError("pause before changing secrets; activate recreates mounts")
-                    set_gate(c, [])
+                    set_gate(c, [], draining=True)
+                    from .review_host import drain as drain_reviews
+                    drain_reviews(c, run)
                     materialize_secrets(c); chown_runtime(c); result = {"status": "secrets_materialized"}
                 elif args.action == "pause": result = pause(c)
                 elif args.action == "activate": result = activate(c)
                 elif args.action == "review": result = review(c)
         print(json.dumps(result, sort_keys=True))
+        # Publication success is distinct from application health. Unhealthy
+        # metrics/JSON still raise the appropriate CloudWatch alarms.
+        if args.action == "status" and args.publish and result["status"] != "blocked_setup":
+            return 0
         return 0 if result["status"] not in {"attention", "blocked_setup"} else 2
+    except OperationBusy as exc:
+        if args.action == "backup" and args.scheduled:
+            print(json.dumps({"status": "deferred", "reason": "maintenance_active"}))
+            return 0
+        print(json.dumps({"status": "error", "reason": str(exc)}), file=sys.stderr)
+        return 2
     except (OpsError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as exc:
         # No credentials, subprocess output, or file contents in error output.
         reason = str(exc) if isinstance(exc, OpsError) else type(exc).__name__

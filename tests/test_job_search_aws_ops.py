@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from job_search import aws_ops as ops
 
@@ -109,9 +110,10 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(result["status"], "deployed_paused")
         self.assertEqual(ops.release_path(self.c).name, "a" * 40 + "-1")
         self.assert_original_data()
-        snapshot = self.data / "backups" / (result["backup"]["backup_id"] + ".tar.gz")
-        with tarfile.open(snapshot) as archive:
-            self.assertEqual(archive.extractfile("state/original.txt").read(), b"original state")
+        snapshot = ops.local_backup_path(self.c, result["backup"])
+        self.assertEqual((snapshot / "state/original.txt").read_bytes(), b"original state")
+        self.assertEqual(result["backup"]["format"], "directory-v1")
+        self.assertEqual(ops.digest(snapshot / "backup.json"), result["backup"]["sha256"])
 
     def test_first_deployment_rejects_stray_one_shot_writer_before_snapshot(self):
         (self.releases / "current").unlink()
@@ -178,6 +180,127 @@ class OperationsTests(unittest.TestCase):
         (self.data / "state" / "link").symlink_to(private)
         with self.assertRaises(ops.OpsError):
             ops.copy_snapshot(self.data / "state", self.root / "snapshot")
+
+    def local_snapshot(self):
+        self.original_data()
+        (self.data / "state/empty").mkdir(exist_ok=True)
+        (self.data / "materialized-secrets.json").write_text("{}")
+        receipt = ops.backup_unlocked(self.c, paused=True, upload=False)
+        return receipt, ops.local_backup_path(self.c, receipt)
+
+    def test_local_snapshot_skips_archiving_and_retains_all_durable_directories(self):
+        with patch.object(ops.tarfile, "open", side_effect=AssertionError("no paused archive work")):
+            receipt, snapshot = self.local_snapshot()
+        manifest = ops.verify_snapshot(snapshot)
+        self.assertEqual(set(manifest["files"]), {name + "/original.txt" for name in ops.BACKUP_DIRS})
+        self.assertIn("state/empty", manifest["directories"])
+        self.assertEqual(snapshot.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(list(snapshot.parent.glob("*.tar.gz")))
+        self.assertFalse(list(snapshot.parent.glob("snapshot-pending-*")))
+        self.assertEqual(receipt["file_count"], 3)
+        self.assertGreaterEqual(receipt["timings_seconds"]["total"], 0)
+
+    def test_directory_restore_preserves_backup_for_independent_retries(self):
+        receipt, snapshot = self.local_snapshot()
+        (self.data / "state/original.txt").write_text("candidate migration")
+        with patch.object(ops, "running_services", return_value=[]), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"):
+            ops.restore_unlocked(self.c, snapshot, receipt["sha256"], replace=True)
+        self.assert_original_data()
+        self.assertTrue((self.data / "state/empty").is_dir())
+        self.assertEqual((snapshot / "state/original.txt").read_text(), "original state")
+        self.assertNotEqual((snapshot / "state/original.txt").stat().st_ino,
+                            (self.data / "state/original.txt").stat().st_ino)
+        (self.data / "state/original.txt").write_text("new user work")
+        ops.verify_snapshot(snapshot)
+
+    def test_local_snapshot_capacity_reserves_usable_restore_headroom(self):
+        self.original_data()
+        (self.data / "materialized-secrets.json").write_text("{}")
+        size = sum((self.data / name / "original.txt").stat().st_size for name in ops.BACKUP_DIRS)
+        margin = 256 * 1024**2
+        with patch.object(ops.shutil, "disk_usage", return_value=SimpleNamespace(free=size * 2 + margin)):
+            receipt = ops.backup_unlocked(self.c, paused=True, upload=False)
+        snapshot = ops.local_backup_path(self.c, receipt)
+        # Capturing the snapshot used one payload's worth of initially reserved
+        # space. Recovery must not require another TWO copies at this boundary.
+        with patch.object(ops.shutil, "disk_usage", return_value=SimpleNamespace(free=size + margin)), patch.object(ops, "running_services", return_value=[]), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"):
+            ops.restore_unlocked(self.c, snapshot, receipt["sha256"], replace=True)
+        self.assert_original_data()
+
+    def test_directory_restore_rejects_corruption_before_secret_or_data_mutation(self):
+        cases = ("changed", "missing", "extra", "missing_directory", "extra_directory", "symlink", "fifo", "hardlink", "manifest")
+        for case in cases:
+            with self.subTest(case=case):
+                fixture = OperationsTests(); fixture.setUp()
+                try:
+                    receipt, snapshot = fixture.local_snapshot()
+                    item = snapshot / "state/original.txt"
+                    if case == "changed": item.write_text("corrupt bytes")
+                    elif case == "missing": item.unlink()
+                    elif case == "extra": (snapshot / "state/unlisted.txt").write_text("extra")
+                    elif case == "missing_directory": (snapshot / "state/empty").rmdir()
+                    elif case == "extra_directory": (snapshot / "state/unlisted").mkdir()
+                    elif case == "symlink": item.unlink(); item.symlink_to(fixture.data / "state/original.txt")
+                    elif case == "fifo": item.unlink(); os.mkfifo(item)
+                    elif case == "hardlink": item.unlink(); os.link(fixture.data / "state/original.txt", item)
+                    elif case == "manifest": (snapshot / "backup.json").write_text("{}")
+                    with patch.object(ops, "running_services", return_value=[]), patch.object(ops, "materialize_secrets") as secrets:
+                        with self.assertRaises(ops.OpsError):
+                            ops.restore_unlocked(fixture.c, snapshot, receipt["sha256"], replace=True)
+                    secrets.assert_not_called()
+                    fixture.assert_original_data()
+                    self.assertIsNone(ops.read_operation(fixture.c))
+                finally: fixture.doCleanups()
+
+    def test_local_snapshot_sync_failure_cannot_publish_a_valid_receipt(self):
+        self.original_data()
+        (self.data / "materialized-secrets.json").write_text("{}")
+        with patch.object(ops, "sync_tree", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError): ops.backup_unlocked(self.c, paused=True, upload=False)
+        self.assertEqual(list((self.data / "backups").iterdir()), [])
+        self.assert_original_data()
+
+    def test_local_snapshot_rejects_symlinked_backup_root_and_unknown_format(self):
+        external = self.root / "external"; external.mkdir()
+        (self.data / "backups").symlink_to(external)
+        with self.assertRaisesRegex(ops.OpsError, "symlink"):
+            ops.backup_unlocked(self.c, paused=True, upload=False)
+        with self.assertRaisesRegex(ops.OpsError, "format"):
+            ops.local_backup_path(self.c, {"format": "future-format", "backup_id": "old"})
+        self.assertEqual(list(external.iterdir()), [])
+
+    def test_local_retention_counts_both_formats_and_preserves_unpublished_or_unknown_paths(self):
+        backups = ops.backup_root(self.c)
+        old_dir = backups / "20260101T000000-aaaaaaaa.snapshot"; old_dir.mkdir()
+        (old_dir / "contents").write_text("expired fixture")
+        middle = backups / "20260102T000000-bbbbbbbb.tar.gz"; middle.write_text("legacy archive")
+        newest = backups / "20260103T000000-cccccccc.snapshot"; newest.mkdir()
+        pending = backups / "snapshot-pending-fixture"; pending.mkdir()
+        unknown = backups / "operator-evidence"; unknown.write_text("retain")
+        link = backups / "20260104T000000-dddddddd.snapshot"; link.symlink_to(pending)
+        ops.prune_local_backups(self.c, keep_backup="20260103T000000-cccccccc")
+        self.assertFalse(old_dir.exists())
+        self.assertTrue(all(path.exists() for path in (middle, newest, pending, unknown, link)))
+
+    def test_cost_bind_source_is_public_observations_directory_not_private_credentials(self):
+        costs = self.data / "costs"
+        with patch.object(ops, "run", return_value="") as run:
+            ops.compose(self.c, "config")
+            self.assertFalse(costs.exists(), "diagnostics must not provision bind directories")
+            ops.compose(self.c, "ps")
+            self.assertFalse(costs.exists())
+            ops.compose(self.c, "up", "-d", "dashboard")
+        self.assertEqual(costs.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(run.call_args.kwargs["env"]["JOB_SEARCH_COST_DIR"], str(costs))
+        costs.chmod(0o750)
+        with patch.object(ops, "run", return_value=""), patch.object(ops.os, "chown") as chown:
+            ops.compose(self.c, "ps")
+        self.assertEqual(costs.stat().st_mode & 0o777, 0o750)
+        chown.assert_not_called()
+        costs.rmdir(); costs.symlink_to(self.data / "private")
+        with patch.object(ops, "run") as run:
+            with self.assertRaisesRegex(ops.OpsError, "symlink"): ops.compose(self.c, "config")
+        run.assert_not_called()
 
     def test_snapshot_excludes_hermes_credentials_and_runtime_logs(self):
         hermes = self.data / "hermes"
@@ -392,6 +515,22 @@ class OperationsTests(unittest.TestCase):
         with patch.object(ops, "compose", return_value=json.dumps({"configured": True, "embedding": "ready", "private_dashboard": True})):
             ops.model_readiness(self.c)
 
+    def test_sparse_cpu_activation_requires_validated_mode_and_policy_without_embeddings(self):
+        ready = {"configured": True, "embedding": "not_required", "private_dashboard": True,
+                 "ranking_refresh_mode": "sparse_cpu", "shortlist_policy": "compare", "mail_ready": True}
+        with patch.object(ops, "compose", return_value=json.dumps(ready)) as compose:
+            ops.model_readiness(self.c)
+        probe = compose.call_args.args[-1]
+        self.assertIn("load_runtime_config", probe)
+        self.assertIn("c.ranking_refresh_mode", probe)
+        self.assertNotIn("salary", probe)
+        for change in ({"configured": False}, {"ranking_refresh_mode": "full"},
+                       {"ranking_refresh_mode": "broad_cpu"}, {"shortlist_policy": "champion"},
+                       {"embedding": "migration_required"}, {"mail_ready": False}):
+            with self.subTest(change=change), patch.object(ops, "compose", return_value=json.dumps({**ready, **change})):
+                with self.assertRaises(ops.OpsError):
+                    ops.model_readiness(self.c)
+
     def mail_secret_values(self):
         profile = {"version": 1, "profile_id": "mail", "embeddings": None,
                    "structured_generation": {"kind": "openrouter", "model": "example/model",
@@ -509,6 +648,15 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(result["status"], "deployed")
         self.assertEqual(ops.release_path(self.c).name, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-2")
 
+    def test_retention_failure_does_not_misreport_completed_deployment_or_pause_writers(self):
+        self.install_candidate()
+        with patch.object(ops, "running_services", return_value=["dashboard"]), patch.object(ops, "compose", return_value=""), patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "prune_local_backups", side_effect=OSError("cleanup failed")), patch.object(ops, "pause") as pause:
+            result = ops.deploy(self.c, "b" * 40 + "-2")
+        self.assertEqual(result["status"], "deployed")
+        self.assertEqual(result["local_backup_retention"], "cleanup_failed_backups_preserved")
+        self.assertTrue(ops.read_operation(self.c)["complete"])
+        pause.assert_not_called()
+
     def test_postresume_health_failure_stops_services_without_rewinding_data(self):
         self.install_candidate()
         (self.data / "activation.json").write_text('{"enabled": true}')
@@ -589,6 +737,29 @@ class OperationsTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(result["domain"]["status"], "paused")
 
+    def test_host_memory_snapshot_is_local_and_does_not_expand_cloudwatch_metrics(self):
+        (self.data / "activation.json").write_text('{"enabled": false}')
+        self.c["instance_id"] = "i-fixture"
+        memory = {"host_available_bytes": 1024, "host_file_cache_bytes": 2048,
+                  "process_rss_bytes": 512, "cgroup_current_bytes": 4096}
+        with patch.object(ops, "preflight", return_value={"issues": []}), \
+             patch.object(ops, "running_services", return_value=[]), \
+             patch("job_search.resource_usage.memory_snapshot", return_value=memory), \
+             patch.object(ops, "aws") as aws:
+            result = ops.status(self.c, publish=True)
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(result["host_memory"]["counters"],
+                         {"host_available_bytes": 1024, "host_file_cache_bytes": 2048})
+        metrics = json.loads(aws.call_args.args[-1])
+        self.assertEqual(len(metrics), 8)
+        self.assertFalse(any("memory" in item["MetricName"].lower() for item in metrics))
+        with patch.object(ops, "preflight", return_value={"issues": []}), \
+             patch.object(ops, "running_services", return_value=[]), \
+             patch("job_search.resource_usage.memory_snapshot", side_effect=OSError("private failure")):
+            result = ops.status(self.c)
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(result["host_memory"], {"status": "unavailable"})
+
     def test_unavailable_domain_report_is_visible(self):
         (self.data / "activation.json").write_text('{"enabled": true}')
         with patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "healthy", return_value=True), patch.object(ops, "domain_readiness", side_effect=ops.OpsError("fixture")):
@@ -601,6 +772,27 @@ class OperationsTests(unittest.TestCase):
         with patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "healthy", return_value=True), patch.object(ops, "domain_readiness", return_value=self.domain("configured_unverified")):
             result = ops.status(self.c)
         self.assertEqual(result["status"], "healthy")
+
+    def test_partial_pause_is_not_a_domain_alarm(self):
+        (self.data / "activation.json").write_text('{"enabled": true}')
+        with patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "healthy", return_value=True), patch.object(ops, "domain_readiness", return_value=self.domain("paused")):
+            self.assertEqual(ops.status(self.c)["status"], "healthy")
+
+    def test_monitor_success_is_distinct_from_unhealthy_report_or_publication_failure(self):
+        with patch.object(ops, "load_config", return_value=self.c), patch.object(ops, "status", return_value={"status": "attention"}), patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(ops.main(["status"]), 2)
+            self.assertEqual(ops.main(["status", "--publish"]), 0)
+        with patch.object(ops, "load_config", return_value=self.c), patch.object(ops, "status", side_effect=ops.OpsError("publication failed")), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(ops.main(["status", "--publish"]), 2)
+
+    def test_only_scheduled_backup_treats_positive_lock_contention_as_deferred(self):
+        with patch.object(ops, "load_config", return_value=self.c), patch.object(ops.os, "geteuid", return_value=0), patch.object(ops, "lock", side_effect=ops.OperationBusy("busy")), patch.object(ops, "scheduled_backup") as backup, patch("sys.stdout", new_callable=io.StringIO) as out, patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(ops.main(["backup", "--scheduled"]), 0)
+            self.assertEqual(json.loads(out.getvalue())["status"], "deferred")
+            self.assertEqual(ops.main(["backup"]), 2)
+            backup.assert_not_called()
+        with patch.object(ops, "load_config", return_value=self.c), patch.object(ops.os, "geteuid", return_value=0), patch.object(ops, "lock", side_effect=ops.OpsError("unsafe lock")), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(ops.main(["backup", "--scheduled"]), 2)
 
     def test_cli_incomplete_preflight_never_starts_services(self):
         with patch.object(ops, "load_config", return_value=self.c), patch.object(ops.os, "geteuid", return_value=0), patch.object(ops, "lock", return_value=nullcontext()), patch.object(ops, "preflight", return_value={"issues": ["missing_model"]}), patch.object(ops, "compose") as compose, patch("sys.stderr", new_callable=io.StringIO):

@@ -36,6 +36,7 @@
   "portable_encryption_key_file": null,
   "shortlist_limit": 20,
   "shortlist_policy": "champion",
+  "ranking_refresh_mode": "full",
   "shortlist_days": 30,
   "shortlist_salary_floor": null,
   "shortlist_remote_only": false,
@@ -50,5 +51,12 @@
   "hermes_workspace_dir": "hermes-workspace",
   "hermes_executable": null,
   "hermes_notification_socket": null,
-  "hermes_telegram_target": ""
+  "hermes_telegram_target": "",
+  "briefing_ai_enabled": true,
+  "briefing_inference_config": null,
+  "interaction_port": 8768,
+  "interaction_token_file": null,
+  "telegram_bot_id": "",
+  "telegram_user_id": "",
+  "telegram_chat_id": ""
 }

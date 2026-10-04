@@ -1078,6 +1078,39 @@ PRAGMA user_version = 13;
 """
 
 
+from .job_reviews.schema import SCHEMA as MIGRATION_014
+from .lifecycle.schema import SCHEMA as MIGRATION_015
+from .attention.schema import SCHEMA as MIGRATION_017
+from .career_actions.schema import SCHEMA as MIGRATION_018
+from .interactions.schema import SCHEMA as MIGRATION_019
+
+MIGRATION_016 = r"""
+CREATE TABLE job_review_grants (
+ grant_id TEXT PRIMARY KEY,
+ token_sha256 TEXT NOT NULL UNIQUE,
+ review_id TEXT NOT NULL REFERENCES job_reviews(review_id),
+ actor TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL CHECK(kind IN ('primary','check')),
+ context_sha256 TEXT NOT NULL,
+ runtime_id TEXT NOT NULL UNIQUE,
+ runtime_json TEXT NOT NULL,
+ launch_json TEXT,
+ created_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ revoked_at TEXT
+);
+CREATE INDEX job_review_grants_review ON job_review_grants(review_id,expires_at);
+CREATE TABLE job_review_grant_items (
+ grant_id TEXT NOT NULL REFERENCES job_review_grants(grant_id),
+ ordinal INTEGER NOT NULL,
+ expected_revision INTEGER NOT NULL,
+ snapshot_sha256 TEXT NOT NULL,
+ PRIMARY KEY(grant_id,ordinal)
+);
+PRAGMA user_version = 16;
+"""
+
+
 MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (1, "initial_job_search_ledger", MIGRATION_001),
     (2, "outlook_sync_state", MIGRATION_002),
@@ -1092,6 +1125,12 @@ MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (11, "curated_shortlists", MIGRATION_011),
     (12, "larger_curated_shortlists", MIGRATION_012),
     (13, "application_answer_history", MIGRATION_013),
+    (14, "agent_job_reviews", MIGRATION_014),
+    (15, "outlook_application_lifecycle", MIGRATION_015),
+    (16, "isolated_review_authority", MIGRATION_016),
+    (17, "chief_of_staff_attention", MIGRATION_017),
+    (18, "career_actions_agenda", MIGRATION_018),
+    (19, "trusted_career_interactions", MIGRATION_019),
 )
 
 

@@ -38,6 +38,7 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
         ),
         "external_endpoint_probed": False,
     }
+    cpu_ranking = config.ranking_refresh_mode in {"broad_cpu", "sparse_cpu"}
     inference: dict[str, Any] = {
         "configured": inference_path is not None or inference_path_error,
         "configuration_ready": False,
@@ -46,7 +47,7 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
         "external_endpoint_probed": False,
         "remote_mail": remote_mail,
         "preference_embeddings": {
-            "status": "not_configured",
+            "status": "not_required" if cpu_ranking else "not_configured",
             "remote_configured": False,
             "champion_present": False,
             "identity_match": None,
@@ -78,7 +79,11 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
                     "embeddings": loaded.embeddings is not None,
                 }
             )
-            if loaded.embeddings is not None:
+            if cpu_ranking:
+                # The guarded refresh verifies artifacts before writing scores.
+                # A provider revision cannot block or certify CPU-only ranking.
+                inference["preference_embeddings"]["remote_configured"] = loaded.embeddings is not None
+            elif loaded.embeddings is not None:
                 preflight = _preference_embedding_preflight(
                     config.preference_db,
                     loaded.embeddings.embedding_identity,

@@ -9,10 +9,15 @@ apt-get update
 apt-get install -y ca-certificates curl gnupg jq unzip python3 python3-venv iptables nvme-cli docker.io docker-compose-v2
 # No application service may start before metadata filtering is installed.
 systemctl stop docker.service docker.socket || true
-# Ubuntu 24.04 does not provide awscli in every archive snapshot. Use AWS's
-# officially supported, signed Snap package and expose it to systemd's PATH.
-if ! snap list aws-cli >/dev/null 2>&1; then snap install aws-cli --classic --channel=v2/stable; fi
-ln -sfn /snap/bin/aws /usr/local/bin/aws
+# The native CLI works under ProtectHome/ProtectSystem; Snap needs writable
+# /root/snap and cannot run inside the cost collector's filesystem sandbox.
+# Archive hash verified against AWS's PGP signature (FB5DB77FD5C118B80511ADA8A6310ACC4672475C).
+aws_cli_stage=$(mktemp -d /tmp/job-search-aws-cli.XXXXXX)
+curl --fail --silent --show-error --max-time 120 https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.35.21.zip -o "$aws_cli_stage/aws.zip"
+printf '%s  %s\n' '1fe665267a6149dfb8551cec52b419fa6e82533fab6dd7678939209246e792ee' "$aws_cli_stage/aws.zip" | sha256sum -c -
+unzip -q "$aws_cli_stage/aws.zip" -d "$aws_cli_stage"
+"$aws_cli_stage/aws/install" --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin --update
+rm -r -- "$aws_cli_stage"
 /usr/local/bin/aws --version
 install -d -m 0755 /etc/job-search /usr/local/sbin /opt/job-search /etc/systemd/system/docker.service.d
 install -d -m 0700 /var/log/job-search
@@ -151,6 +156,7 @@ for name in state hermes toolchain runtime; do
   install -d -o 10001 -g 10001 -m 0700 "/var/lib/job-search/$name"
 done
 install -d -o root -g 10001 -m 0710 /var/lib/job-search/private
+install -d -o root -g root -m 0755 /var/lib/job-search/costs
 MOUNT
 chmod 0755 /usr/local/sbin/job-search-mount-data
 cat > /etc/systemd/system/job-search-data.service <<'UNIT'
@@ -233,6 +239,12 @@ cat > /etc/logrotate.d/job-search <<'ROTATE'
   create 0600 root root
 }
 ROTATE
+cat > /etc/systemd/system/job-search-costs.service <<'COST_SERVICE'
+${cost_service}
+COST_SERVICE
+cat > /etc/systemd/system/job-search-costs.timer <<'COST_TIMER'
+${cost_timer}
+COST_TIMER
 systemctl daemon-reload
 systemctl enable --now job-search-metadata-firewall.service job-search-data.service
 systemctl is-active --quiet job-search-metadata-firewall.service
@@ -240,5 +252,5 @@ systemctl is-active --quiet job-search-data.service
 systemctl enable --now docker.service
 systemctl is-active --quiet docker.service
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/job-search.json -s
-systemctl enable --now job-search-status.timer job-search-backup.timer
+systemctl enable --now job-search-status.timer job-search-backup.timer job-search-costs.timer
 # Deliberately no tailscale login, app start, or secret retrieval before enrollment.

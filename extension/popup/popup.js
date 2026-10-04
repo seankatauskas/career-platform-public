@@ -43,8 +43,10 @@ async function initialize() {
   activeTabId = tab.id;
   const tracking = await send({type: "trackingStatus", tab_id: activeTabId});
   browserConnected = tracking.connected;
+  if(browserConnected && tracking.dashboard_base) $("#dashboard-base").value=tracking.dashboard_base;
   $("#disconnect-browser").hidden = !browserConnected;
-  $("#connect-browser").hidden = browserConnected;
+  $("#connect-browser").hidden = browserConnected && !tracking.needs_permission;
+  $("#connect-browser").textContent = tracking.needs_permission ? "Restore dashboard access" : "Connect browser";
   $("#pairing-code").parentElement.hidden = browserConnected;
   if (browserConnected) {
     $("#tracking-status").textContent = tracking.error || tracking.result?.label || (tracking.supported ? "Job recognized. Submit normally; tracking is automatic." : "Connected. Open an Ashby, Greenhouse, or Lever application.");
@@ -153,7 +155,7 @@ $("#connect-browser").addEventListener("click", async () => {
   try {
     const base = JobDashboardConnection.dashboardBase($("#dashboard-base").value);
     if(base.startsWith("https:") && !await chrome.permissions.request({origins:[JobDashboardConnection.permissionOrigin(base)]})) throw new Error("Dashboard access was denied.");
-    await send({type:"trackingConnect", dashboard_base:base, pairing_code:$("#pairing-code").value.trim()});
+    await send({type:"trackingConnect", dashboard_base:base, pairing_code:$("#pairing-code").value.trim(),restore_connection:!!browserConnected});
     $("#pairing-code").value="";
     const tabs=await chrome.tabs.query({});
     for(const tab of tabs) chrome.tabs.sendMessage(tab.id,{type:"trackingRefresh"}).catch(()=>{});
@@ -162,6 +164,13 @@ $("#connect-browser").addEventListener("click", async () => {
   } catch(error) { show(error.message); }
 });
 $("#disconnect-browser").addEventListener("click", async()=>{
-  await send({type:"trackingDisconnect"}); await initialize();
+  try {
+    const result=await chrome.runtime.sendMessage({type:"trackingDisconnect"});
+    if(result?.discard_required) {
+      if(!window.confirm(`${result.error}\n\nDisconnect and delete this local data anyway?`)) return;
+      await send({type:"trackingDisconnect",discard_pending:true});
+    } else if(!result?.ok) throw new Error(result?.error || "Could not disconnect this browser.");
+    await initialize();
+  } catch(error) {show(error.message);}
 });
 setInterval(()=>{if(browserConnected) initialize().catch(()=>{});},3000);

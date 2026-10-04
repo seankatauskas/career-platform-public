@@ -28,7 +28,8 @@ pairing credential. They survive worker/browser restarts, and submit snapshots
 retry until the dashboard acknowledges saving them. Encryption is not protection
 against someone with access to the entire browser profile and its credential.
 Unsubmitted local drafts expire after seven days; queued submission snapshots do
-not expire. Disconnecting or uninstalling clears unsynced local data. Opening or
+not expire. Disconnecting requires explicit confirmation before deleting local
+drafts or unsynced submissions. Uninstalling still clears local data. Opening or
 typing into a form alone does not create an application record.
 
 Capture allows up to 400 fields, 64,000 characters per value, and 1 MiB of field
@@ -41,6 +42,33 @@ retroactively from pages that are no longer available.
 Deploy the matching dashboard migration/API before installing extension 1.3.
 Reload the unpacked extension and refresh already-open application pages. Existing
 browser pairing remains valid; a new pairing code is not normally needed.
+
+Version 1.3.1 also detects recognized ATS submission requests when the final
+button has a nonstandard label. A request alone never confirms employer acceptance.
+If navigation prevents reading the final page, the encrypted earlier-step draft
+is retained with an incomplete-capture warning. Removing dashboard site permission
+no longer deletes pending answers or their pairing key: click **Restore dashboard
+access** in the popup to resume syncing with the same connection. Replacing a connection is
+blocked until you explicitly disconnect. Answer retries are removed only after
+the server acknowledges the matching capture, application, and field count.
+This patch uses the existing version 1.3 dashboard API; no new migration is needed.
+
+Version 1.3.2 recognizes Ashby's current submission requests and its success
+container, including company-specific confirmation messages beneath the **Success**
+heading. A successful submission is recorded as **Submitted · awaiting email**;
+email confirmation remains separate. Jobs opened directly, from a search engine,
+or from another site's link match the same catalog job without a dashboard handoff.
+This patch uses the existing version 1.3 dashboard API and requires no migration.
+Reload the unpacked extension and refresh already-open application pages to use it;
+the existing browser connection remains valid.
+
+Version 1.3.3 recognizes Greenhouse's embedded confirmation route and embedded
+submission endpoint. A tracked attempt followed by the iframe's visible **Thank
+you for applying** message records **Submitted · awaiting email**, including when
+the company page itself does not navigate. Visiting a confirmation URL without a
+tracked attempt does not create an application. Reload the unpacked extension and
+refresh the open confirmation iframe to recover a retained attempt; no new pairing
+or dashboard migration is needed.
 
 ## Resume attachment (version 1.2)
 

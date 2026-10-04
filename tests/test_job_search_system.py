@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from job_search.resume_lab.gateway import build_resume_lab_read_gateway
 from job_search.runtime import RuntimeConfigV1
@@ -80,6 +81,21 @@ def test_hermes_resume_view_never_constructs_model_or_document_tools() -> None:
         assert gateway is not None
         assert gateway.model is None
         assert gateway.toolchain is None
+
+
+def test_dashboard_only_receives_cost_snapshot_path_not_billing_clients() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = RuntimeConfigV1.defaults(Path(directory))
+        target = str(Path(directory) / "costs" / "snapshot.json")
+        with patch.dict(os.environ, {"JOB_SEARCH_COST_SNAPSHOT": target}), \
+                patch("job_search.system.DashboardController") as constructor:
+            build_dashboard_controller(config)
+        assert constructor.call_args.kwargs["cost_snapshot_path"] == Path(target)
+        assert not (Path(directory) / "costs").exists()
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("job_search.system.DashboardController") as constructor:
+            build_dashboard_controller(config)
+        assert constructor.call_args.kwargs["cost_snapshot_path"] is None
 
 
 def main() -> None:

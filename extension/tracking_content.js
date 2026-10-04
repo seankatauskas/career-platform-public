@@ -100,7 +100,16 @@
     if(scheduled) return;
     scheduled=true; setTimeout(()=>{scheduled=false; check();},200);
   }).observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['hidden','class','style']});
-  chrome.runtime.onMessage.addListener(message=>{
+  chrome.runtime.onMessage.addListener((message,_sender,respond)=>{
+    if(message?.type==='trackingCapture') {
+      snapshotDraft();
+      const snapshot=pendingDraft || JobAnswerCapture.collect(document);
+      pendingDraft=null; clearTimeout(draftTimer);
+      attempted=true; initialOutcome=null; lastSignal='';
+      respond({page_url:location.href,snapshot});
+      setTimeout(check,0);
+      return;
+    }
     if(message?.type==='trackingRouteChanged' || message?.type==='trackingRefresh') page();
   });
   window.addEventListener('pageshow',page);

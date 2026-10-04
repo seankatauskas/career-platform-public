@@ -124,12 +124,13 @@ for operator access. Tailscale uses outbound relay connections; enroll the host
 and configure private Serve HTTPS after setup. Do not enable Funnel.
 
 Bootstrap installs Docker/Compose from the signed Ubuntu archive, Tailscale from
-its signed package archive, AWS CLI v2 from AWS's officially supported `v2/stable`
-Snap package, SSM via Canonical's signed snap, and a pinned CloudWatch
+its signed package archive, AWS CLI v2.35.21 from AWS's native Linux installer
+(pinned SHA256, verified against AWS's signing key), SSM via Canonical's signed snap, and a pinned CloudWatch
 agent package verified by SHA256. The default CloudWatch package is
 `1.300072.0b1766`, obtained from its versioned official AWS distribution on
 2026-09-19. For upgrades, review the new version and checksum together.
-AWS CLI and SSM receive Snap refreshes. The AWS CLI link in `/usr/local/bin`
+SSM receives Snap refreshes; AWS CLI upgrades require reviewing its version and
+checksum together. The AWS CLI link in `/usr/local/bin`
 also makes it available to systemd services without relying on interactive PATH.
 
 The host's root processes use its instance role. IMDSv2 is required; IPv6 metadata
@@ -152,11 +153,21 @@ Secret identifiers exposed by `secret_arns`:
 - `portable-master-key`, `mcp-token`, `runpod-api-key`: narrowly mounted credentials.
 - `hermes.env`, `hermes.yaml`: Hermes provider/Telegram settings and tool configuration.
 - `tailscale-auth-key`: one-time owner-controlled host enrollment credential.
+- `interaction-token`: separate bearer for the owner-bound Telegram interaction broker.
+- `briefing-inference.json`, `briefing-api-key`: explicitly configured briefing/reply
+  model profile and credential, mounted only into the model worker.
 
 Populate values through Secrets Manager or an operator CLI from protected files;
 never put them in Terraform variables, Git, workflow logs, or shell command lines.
 No secret versions are created by Terraform. Application setup must verify actual
 file access modes and provider functionality before enabling recurring work.
+
+Existing hosts must use the [chief-of-staff provisioning sequence](../../docs/operations/aws-deployment.md#chief-of-staff-secrets-on-an-existing-host).
+The additional secret ARNs change generated cloud-init data, and a full apply can
+replace the EC2 host because `user_data_replace_on_change` is enabled. The bounded
+operator apply described there creates the secret containers and updates the host
+read policy without applying a host replacement. It does not change the existing
+host's operations file automatically.
 
 ## Release and monitoring interfaces
 
@@ -182,6 +193,62 @@ versions after a further 14 days. Versioned release bundles and tagged images st
 available for rollback until deliberately retired.
 
 ## Local checks and live acceptance
+
+### Optional unified cost monitor
+
+The dashboard's **Settings → Operations → Costs and credits** view reads a
+sanitized, host-published snapshot. It never calls billing APIs or receives AWS or
+OpenRouter management credentials. Set `cost_monitor_enabled = true` in a reviewed
+Terraform change to add only `ce:GetCostAndUsage` to the host role and opt a newly
+bootstrapped host into collection. This does not enable Cost Explorer in an account
+where it is disabled; complete that account setup separately. No billing permission
+is added by default. Review the plan; do not recreate an existing host merely to
+update cloud-init. **The host has `user_data_replace_on_change = true`; a full
+apply of changed bootstrap inputs would replace it. For an existing host, limit
+the reviewed infrastructure change to the separate cost-monitor IAM policy, then
+install the units/configuration in place as below.** Host replacement is a
+separate, explicitly approved recovery workflow, not part of cost enablement.
+
+For an existing host, after installing a verified release containing the monitor:
+
+The cost service requires the native AWS CLI, not the Snap launcher: Snap needs
+to create `/root/snap`, which the service's `ProtectHome`/`ProtectSystem` sandbox
+intentionally forbids. Existing Snap-based hosts can migrate the CLI in place
+using the pinned native archive and checksum in `templates/cloud-init.sh.tftpl`.
+Preserve the old launcher target for recovery and retain the Snap package until
+the native CLI is verified. Do not run cloud-init again or weaken the service
+sandbox. Verify `aws --version` under the unit's restrictions before collection.
+
+1. Apply the reviewed, opt-in IAM policy through an authorized operator identity.
+   The deployment role cannot grant itself billing access.
+2. Preserve the existing root-owned `/etc/job-search/operations.json` and add
+   `"costs": {"enabled": true}`. Provider keys stay in private host files; do not
+   copy credentials into the runtime JSON, Compose, dashboard, or a chat.
+3. Install the units from that verified release:
+
+   ```sh
+   sudo install -o root -g root -m 0644 /opt/job-search/current/deploy/aws/job-search-costs.service /etc/systemd/system/job-search-costs.service
+   sudo install -o root -g root -m 0644 /opt/job-search/current/deploy/aws/job-search-costs.timer /etc/systemd/system/job-search-costs.timer
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now job-search-costs.timer
+   sudo systemctl start job-search-costs.service
+   sudo systemctl status job-search-costs.service --no-pager
+   ```
+
+The hourly timer only checks whether the daily snapshot is due; the collector
+reserves each attempt durably and allows no more than one per 24 hours. It shares
+the operations lock and skips collection while an operation needs recovery.
+Cost Explorer bills each API page; account data can lag more than a day. Disabled
+collection makes no provider calls. Errors and missing credentials are visible as
+unavailable data, not zero spending. Recovery-drill hosts disable this timer.
+Turning collection off is an explicit host configuration change and does not
+delete previous billing figures. No new AWS resources, IAM policies, timers, or
+provider requests are applied just by building this branch.
+
+See [cost dashboard](../../docs/operations/cost-dashboard.md) for metric scope,
+OpenRouter account-versus-key access, optional warnings, and freshness semantics.
+
+### Verification commands
 
 ```sh
 terraform -chdir=infra/aws fmt -check -recursive

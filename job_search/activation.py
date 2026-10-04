@@ -9,11 +9,14 @@ from .db import connect
 GROUPS = {
     'collection': ('ats.authoritative', 'ats.new_only', 'ats.refresh_recent', 'opportunity.location_refresh'),
     'ranking': ('opportunity.preference_refresh',),
-    'mail': ('outlook.mail.sync',),
+    'mail': ('outlook.mail.sync', 'outlook.calendar.sync', 'outlook.mail.replay', 'career.mail.reconcile'),
     'outlook_actions': ('outlook.actions.execute',),
     'notifications': ('notification.deliver', 'notification.reminders_due', 'notification.shortlist_evaluate'),
     'salary': ('opportunity.salary_drain',),
     'resume_generation': ('resume.optimize',),
+    'briefing_ai': ('briefing.compose', 'career.reply.context', 'career.reply.prepare'),
+    'outlook_send': ('career.actions.execute',),
+    'calendar_commitments': ('career.calendar.sync',),
 }
 
 def task_group(task: str) -> str | None:
@@ -59,6 +62,9 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
         result = {'capability':capability,'enabled':enabled,'revision':revision+1,'updated_at':stamp}
         con.execute('INSERT INTO automation_controls VALUES (?,?,?,?) ON CONFLICT(capability) DO UPDATE SET enabled=excluded.enabled,revision=excluded.revision,updated_at=excluded.updated_at',
                     (capability,int(enabled),revision+1,stamp))
+        if capability == 'notifications':
+            from .attention import AttentionService
+            AttentionService.on_activation_changed(con, enabled, stamp)
         # Stop schedule creation immediately. Re-enabling reseeds future occurrences,
         # and credentials remain a separate prerequisite.
         tasks = GROUPS[capability]

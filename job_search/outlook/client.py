@@ -1,4 +1,4 @@
-"""OutlookTransport implementation without send or invitation capabilities."""
+"""Narrow Outlook operations with dedicated approved-send and private-event methods."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from job_search.contracts import CalendarBlock, MailDeltaPage, parse_utc
 
-from .auth import DRAFT_SCOPES, HOLD_SCOPES
+from .auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, SEND_SCOPES
 from .calendar import GraphCalendarClient
 from .mail import GraphMailClient
 from .transport import GraphSession, RetryClass
@@ -37,6 +37,10 @@ class GraphOutlookClient:
         if kind == "outlook_reply_draft":
             self._session.ensure_authorized(DRAFT_SCOPES)
             return
+        if kind == "outlook_reply_send":
+            self._session.ensure_authorized(DRAFT_SCOPES)
+            self._session.ensure_authorized(SEND_SCOPES)
+            return
         if kind == "calendar_tentative_hold":
             self._session.ensure_authorized(HOLD_SCOPES)
             return
@@ -50,6 +54,12 @@ class GraphOutlookClient:
 
     def read_calendar_view(self, starts_at: str, ends_at: str) -> Sequence[CalendarBlock]:
         return self._calendar.read_calendar_view(starts_at, ends_at)
+
+    def read_interview_event(self, remote_id: str) -> Mapping[str, Any]:
+        return self._calendar.read_interview_event(remote_id)
+
+    def read_interview_events(self, starts_at: str, ends_at: str, **bounds) -> Sequence[Mapping[str, Any]]:
+        return self._calendar.read_interview_events(starts_at, ends_at, **bounds)
 
     def create_reply_draft(self, immutable_message_id: str) -> Mapping[str, Any]:
         if not immutable_message_id:
@@ -115,3 +125,53 @@ class GraphOutlookClient:
             expected_statuses=(201,),
         )
         return _minimal_result(result, ("id", "changeKey", "transactionId", "webLink"))
+
+    def send_reply_draft(self, draft_id: str) -> Mapping[str, Any]:
+        if not isinstance(draft_id, str) or not draft_id:
+            raise UnsafeOutlookAction("draft identity is required")
+        return self._session.request_json(
+            "POST", f"/v1.0/me/messages/{quote(draft_id, safe='')}/send",
+            scopes=SEND_SCOPES, retry_class=RetryClass.NON_IDEMPOTENT_WRITE,
+            expected_statuses=(202,),
+        )
+
+    def read_agenda(self, starts_at: str, ends_at: str):
+        return self._calendar.read_agenda(starts_at, ends_at)
+
+    def write_private_commitment(self, starts_at, ends_at, transaction_id, *, remote_id="", etag="", cancelled=False, location="", join_url=""):
+        parse_utc(starts_at); parse_utc(ends_at)
+        payload = {
+            "subject": "Private career commitment", "body": {"contentType": "text", "content": ("Location: " + location + "\n" if location else "") + ("Join: " + join_url if join_url else "")},
+            "start": {"dateTime": starts_at[:-1], "timeZone": "UTC"},
+            "end": {"dateTime": ends_at[:-1], "timeZone": "UTC"},
+            "showAs": "free" if cancelled else "busy", "sensitivity": "private",
+            "isReminderOn": False, "responseRequested": False, "allowNewTimeProposals": False,
+            "attendees": [], "transactionId": transaction_id,
+        }
+        if location:
+            payload["location"]={"displayName":location}
+        if remote_id:
+            payload.pop("transactionId")
+            payload.pop("allowNewTimeProposals")
+        return self._session.request_json(
+            "PATCH" if remote_id else "POST",
+            "/v1.0/me/events" + ("/" + quote(remote_id, safe="") if remote_id else ""),
+            scopes=HOLD_SCOPES, retry_class=RetryClass.IDEMPOTENT_WRITE,
+            payload=payload, expected_statuses=(200,) if remote_id else (201,), if_match=etag,
+        )
+
+    def read_owned_event(self, remote_id):
+        return self._session.request_json(
+            "GET", "/v1.0/me/events/" + quote(remote_id, safe=""),
+            scopes=BASE_SCOPES,
+            retry_class=RetryClass.READ, preferences=('outlook.timezone="UTC"',),
+        )
+
+    def delete_private_commitment(self, remote_id, etag):
+        if not remote_id or not etag:
+            raise UnsafeOutlookAction("owned event deletion requires identity and version")
+        return self._session.request_json(
+            "DELETE", "/v1.0/me/events/" + quote(remote_id, safe=""),
+            scopes=HOLD_SCOPES, retry_class=RetryClass.IDEMPOTENT_WRITE,
+            expected_statuses=(204,), if_match=etag,
+        )

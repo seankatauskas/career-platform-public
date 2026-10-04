@@ -1,0 +1,12 @@
+# Scheduling template only: the installer does not install this unit until a
+# calendar has been explicitly selected. No default review cadence is inferred.
+[Unit]
+Description=Schedule isolated Career Platform job reviews (disabled)
+
+[Timer]
+Unit=job-search-review.service
+Persistent=false
+# OnCalendar must be supplied by a later explicit scheduling configuration.
+
+[Install]
+WantedBy=timers.target

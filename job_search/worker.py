@@ -66,6 +66,7 @@ class FollowUpTask:
     lane: str = "core"
     workflow_id: str = ""
     parent_work_id: str = ""
+    dedupe_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class TaskContext:
     lane: str = "core"
     workflow_id: str = ""
     parent_work_id: str = ""
+    record_resources: Callable[[Mapping[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -187,22 +189,38 @@ def run_command_with_heartbeat(
             process.kill()
             process.communicate()
 
-    while True:
-        remaining = timeout_seconds - (time.monotonic() - started)
-        if remaining <= 0:
-            stop()
-            raise RetryableTaskError("ATS command timed out")
-        try:
-            stdout, stderr = process.communicate(
-                timeout=min(heartbeat_interval_seconds, remaining)
-            )
-            return subprocess.CompletedProcess(
-                tuple(command), int(process.returncode), stdout, stderr
-            )
-        except subprocess.TimeoutExpired:
-            if not context.heartbeat():
+    sampler = None
+    try:
+        pid = getattr(process, "pid", None)
+        if context.record_resources is not None and type(pid) is int and pid > 0:
+            from .resource_usage import MemorySampler
+            sampler = MemorySampler(pid=pid, interval_seconds=2).start()
+    except Exception:
+        # Observability must not prevent the command or lease heartbeats.
+        sampler = None
+    try:
+        while True:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
                 stop()
-                raise PermanentTaskError("worker lease was lost during ATS command")
+                raise RetryableTaskError("ATS command timed out")
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(heartbeat_interval_seconds, remaining)
+                )
+                return subprocess.CompletedProcess(
+                    tuple(command), int(process.returncode), stdout, stderr
+                )
+            except subprocess.TimeoutExpired:
+                if not context.heartbeat():
+                    stop()
+                    raise PermanentTaskError("worker lease was lost during ATS command")
+    finally:
+        if sampler is not None:
+            try:
+                context.record_resources(sampler.finish())
+            except Exception:
+                pass
 
 
 def acquire_worker_lease(
@@ -393,26 +411,39 @@ class Worker:
             con.commit()
         return {"work": len(work_ids), "outbox": int(outbox), "reconciliation": len(uncertain), "exhausted": len(exhausted)}
 
+    def _next_due_work(self, con, stamp: str):
+        from .activation import disabled_tasks
+
+        deferred = tuple(sorted(set(self.deferred_task_kinds) | set(disabled_tasks(con))))
+        deferred_sql = ""
+        parameters: list[Any] = [self.lane, stamp]
+        if deferred:
+            marks = ",".join("?" for _ in deferred)
+            deferred_sql = f" AND task_kind NOT IN ({marks})"
+            parameters.extend(deferred)
+        return con.execute(
+            "SELECT * FROM work_items WHERE lane=? AND status='queued' AND due_at<=?"
+            + deferred_sql
+            + " ORDER BY priority DESC,due_at,created_at,work_id LIMIT 1",
+            tuple(parameters),
+        ).fetchone()
+
+    def _more_due(self, now: datetime) -> bool:
+        """Observe claimable work without reserving it across worker ticks."""
+        stamp = utc_stamp(now)
+        with connect(self.db_path) as con:
+            return bool(
+                (self.max_work_per_tick and self._next_due_work(con, stamp))
+                or (self.max_outbox_per_tick and self._next_due_outbox(con, stamp))
+            )
+
     def _claim_work(self, now: datetime) -> tuple[dict[str, Any], str] | None:
         stamp = utc_stamp(now)
         expires = utc_stamp(now + timedelta(seconds=self.lease_seconds))
         token = uuid.uuid4().hex
         with connect(self.db_path) as con:
             con.execute("BEGIN IMMEDIATE")
-            deferred_sql = ""
-            parameters: list[Any] = [self.lane, stamp]
-            from .activation import disabled_tasks
-            deferred = tuple(set(self.deferred_task_kinds) | set(disabled_tasks(con)))
-            if deferred:
-                marks = ",".join("?" for _ in deferred)
-                deferred_sql = f" AND task_kind NOT IN ({marks})"
-                parameters.extend(deferred)
-            row = con.execute(
-                "SELECT * FROM work_items WHERE lane=? AND status='queued' AND due_at<=?"
-                + deferred_sql
-                + " ORDER BY priority DESC,due_at,created_at,work_id LIMIT 1",
-                tuple(parameters),
-            ).fetchone()
+            row = self._next_due_work(con, stamp)
             if not row:
                 con.rollback()
                 return None
@@ -436,7 +467,7 @@ class Worker:
                 (run_id, row["work_id"], scheduled_for, stamp, "{}"),
             )
             con.execute(
-                "UPDATE job_runs SET started_at=?,completed_at=NULL,outcome=NULL,error='' WHERE work_id=?",
+                "UPDATE job_runs SET started_at=?,completed_at=NULL,outcome=NULL,error='',result_json='{}' WHERE work_id=?",
                 (stamp, row["work_id"]),
             )
             claimed = dict(con.execute(
@@ -479,6 +510,13 @@ class Worker:
                     raise PermanentTaskError("follow-up parent must be the current work item")
                 due = now + timedelta(seconds=max(0, follow_up.delay_seconds))
                 dedupe = f"follow-up:{item['work_id']}:{index}:{follow_up.task_kind}"
+                if follow_up.dedupe_key:
+                    if not isinstance(follow_up.dedupe_key, str) or len(follow_up.dedupe_key) > 256 or any(ord(c) < 32 for c in follow_up.dedupe_key):
+                        raise PermanentTaskError("follow-up dedupe key is invalid")
+                    dedupe = f"semantic-follow-up:{follow_up.task_kind}:{follow_up.dedupe_key}"
+                    existing = con.execute("SELECT payload_json,lane FROM work_items WHERE dedupe_key=?", (dedupe,)).fetchone()
+                    if existing is not None and (existing['payload_json'] != canonical_json(dict(follow_up.payload)) or existing['lane'] != follow_up.lane):
+                        raise PermanentTaskError("follow-up dedupe key conflicts with existing work")
                 con.execute(
                     "INSERT OR IGNORE INTO work_items "
                     "(work_id,schedule_key,task_kind,dedupe_key,payload_json,status,priority,"
@@ -558,6 +596,7 @@ class Worker:
         token: str,
         exc: BaseException,
         now: datetime,
+        resources: Mapping[str, Any] | None = None,
     ) -> str:
         retryable, due = _retry_time(exc, now, int(item["attempts"]))
         failure_kind, classified_retryable, ambiguous = _failure_classification(exc)
@@ -595,8 +634,8 @@ class Worker:
                 con.rollback()
                 raise RuntimeError("work lease was lost before failure recording")
             con.execute(
-                "UPDATE job_runs SET completed_at=?,outcome=?,error=? WHERE work_id=?",
-                (stamp, outcome, error, item["work_id"]),
+                "UPDATE job_runs SET completed_at=?,outcome=?,error=?,result_json=? WHERE work_id=?",
+                (stamp, outcome, error, canonical_json({"command_memory": resources} if resources else {}), item["work_id"]),
             )
             critical_failure = item["task_kind"] in {
                 "ats.authoritative",
@@ -619,17 +658,21 @@ class Worker:
             con.commit()
         return status
 
+    @staticmethod
+    def _next_due_outbox(con, stamp: str):
+        return con.execute(
+            "SELECT * FROM outbox_messages WHERE status='pending' AND available_at<=? "
+            "ORDER BY available_at,created_at,outbox_id LIMIT 1",
+            (stamp,),
+        ).fetchone()
+
     def _claim_outbox(self, now: datetime) -> tuple[dict[str, Any], str] | None:
         stamp = utc_stamp(now)
         expires = utc_stamp(now + timedelta(seconds=self.lease_seconds))
         token = uuid.uuid4().hex
         with connect(self.db_path) as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT * FROM outbox_messages WHERE status='pending' AND available_at<=? "
-                "ORDER BY available_at,created_at,outbox_id LIMIT 1",
-                (stamp,),
-            ).fetchone()
+            row = self._next_due_outbox(con, stamp)
             if not row:
                 con.rollback()
                 return None
@@ -685,6 +728,10 @@ class Worker:
         if should_stop():
             return {"acquired": False, "reason": "worker draining"}
         tick_now = as_utc(now or self._now())
+        tick_started = time.monotonic()
+        # Include task duration even with an explicit fixture clock.
+        def current_time() -> datetime:
+            return tick_now + timedelta(seconds=max(0, time.monotonic() - tick_started))
         token = acquire_worker_lease(
             self.db_path,
             owner=self.owner,
@@ -711,7 +758,7 @@ class Worker:
             for _ in range(self.max_outbox_per_tick):
                 if should_stop():
                     break
-                claimed = self._claim_outbox(tick_now)
+                claimed = self._claim_outbox(current_time())
                 if not claimed:
                     break
                 item, item_token = claimed
@@ -728,20 +775,33 @@ class Worker:
                         raise PermanentTaskError(f"no outbox handler for {item['topic']}")
                     result = handler(item["payload"], context)
                     canonical_json(result)
-                    self._complete_outbox(item, item_token, tick_now)
+                    self._complete_outbox(item, item_token, current_time())
                     report["outbox"]["delivered"] += 1
                 except Exception as exc:
-                    status = self._fail_outbox(item, item_token, exc, tick_now)
+                    status = self._fail_outbox(item, item_token, exc, current_time())
                     report["outbox"]["dead" if status == "dead" else "retried"] += 1
 
             for _ in range(self.max_work_per_tick):
                 if should_stop():
                     break
-                claimed = self._claim_work(tick_now)
+                claimed = self._claim_work(current_time())
                 if not claimed:
                     break
                 item, item_token = claimed
                 handler = self.task_handlers.get(str(item["task_kind"]))
+                resources: dict[str, Any] = {"commands": [], "omitted_commands": 0}
+
+                def record_resources(summary: Mapping[str, Any]) -> None:
+                    encoded = canonical_json(summary)
+                    if len(encoded) > 16384:
+                        return
+                    if len(resources["commands"]) < 8:
+                        # The sampler owns a fixed counter allowlist and stores no
+                        # argv, environment, PID, filenames, or command output.
+                        resources["commands"].append(json.loads(encoded))
+                    else:
+                        resources["omitted_commands"] += 1
+
                 context = TaskContext(
                     work_id=str(item["work_id"]),
                     task_kind=str(item["task_kind"]),
@@ -753,6 +813,7 @@ class Worker:
                     lane=str(item["lane"]),
                     workflow_id=str(item["workflow_id"]),
                     parent_work_id=str(item["parent_work_id"] or ""),
+                    record_resources=record_resources,
                 )
                 try:
                     if item["task_kind"] == "system.worker_tick" and handler is None:
@@ -767,12 +828,16 @@ class Worker:
                     result = raw_result if isinstance(raw_result, TaskResult) else TaskResult(raw_result)
                     if not isinstance(result.result, Mapping):
                         raise PermanentTaskError("task handler result must be an object")
-                    self._complete_work(item, item_token, result, tick_now)
+                    if resources["commands"]:
+                        result = TaskResult({**result.result, "command_memory": resources}, result.follow_ups)
+                    self._complete_work(item, item_token, result, current_time())
                     report["work"]["succeeded"] += 1
                 except Exception as exc:
-                    status = self._fail_work(item, item_token, exc, tick_now)
+                    status = self._fail_work(item, item_token, exc, current_time(),
+                                             resources if resources["commands"] else None)
                     report["work"]["dead" if status == "dead" else "retried"] += 1
-            report["health"] = automation_health(self.db_path, tick_now)
+            report["health"] = automation_health(self.db_path, current_time())
+            report["more_due"] = self._more_due(current_time())
             return report
         finally:
             release_worker_lease(self.db_path, token, lane=self.lane)
@@ -852,7 +917,11 @@ class ATSCommandHandler:
                 shell=False,
             )
         if completed.returncode != 0:
-            message = " ".join(str(completed.stderr or "scraper failed").split())[:500]
+            # Exceptions are normally at the END, after progress. Redact first
+            # so truncation cannot cut away a credential's identifying prefix.
+            diagnostic = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/-]+", "Bearer [redacted]", str(completed.stderr or "scraper failed"))
+            diagnostic = re.sub(r"(?i)(api[_-]?key|token|secret)=\S+", r"\1=[redacted]", diagnostic)
+            message = f"ATS {self.mode} exit {completed.returncode}: " + " ".join(diagnostic.split())[-800:]
             if completed.returncode == 2:
                 raise PermanentTaskError(message)
             raise RetryableTaskError(message)

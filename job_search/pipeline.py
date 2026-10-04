@@ -289,11 +289,22 @@ def build_opportunity_handlers(
     preference_db: Path,
     proxy_db: Path | None = None,
     policy_refresh: bool = False,
+    ranking_refresh_mode: str = "full",
     environment_provider: Callable[[], Mapping[str, str]],
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     salary_status_provider: Callable[[Path], Mapping[str, Any]] | None = None,
 ) -> tuple[OpportunityDAG, Mapping[str, Callable[..., Any]]]:
     root = Path(project_root)
+    if ranking_refresh_mode not in {"full", "broad_cpu", "sparse_cpu"}:
+        raise ValueError("ranking_refresh_mode must be full, broad_cpu, or sparse_cpu")
+    if ranking_refresh_mode in {"broad_cpu", "sparse_cpu"} and not policy_refresh:
+        raise ValueError(f"{ranking_refresh_mode} requires named policy refresh")
+    refresh_options = ()
+    if ranking_refresh_mode == "broad_cpu":
+        refresh_options = ("--policy", "broad", "--active-components-only", "--no-embeddings")
+    elif ranking_refresh_mode == "sparse_cpu":
+        refresh_options = ("--policy", "broad", "--policy", "selective",
+                           "--active-components-only", "--no-embeddings")
     python = sys.executable
     salary_python = model_python(root)
     dag = OpportunityDAG()
@@ -318,6 +329,7 @@ def build_opportunity_handlers(
             "--state-db",
             str(preference_db),
             *(("--proxy-db", str(proxy_db)) if policy_refresh and proxy_db else ()),
+            *refresh_options,
         ),
         project_root=root,
         environment_provider=environment_provider,

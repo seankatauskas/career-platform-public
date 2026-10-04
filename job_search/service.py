@@ -26,6 +26,56 @@ class DeterministicJobSearchService:
     def __init__(self, db_path: Path):
         self.store = LedgerStore(Path(db_path))
 
+    @property
+    def lifecycle(self):
+        from .lifecycle.service import LifecycleService
+        if not hasattr(self, "_lifecycle"):
+            self._lifecycle = LifecycleService(self)
+        return self._lifecycle
+
+    @property
+    def attention(self):
+        from .attention import AttentionService
+        if not hasattr(self, "_attention"):
+            self._attention = AttentionService(self)
+        return self._attention
+
+    @property
+    def career_actions(self):
+        from .career_actions import CareerActionService
+        if not hasattr(self, "_career_actions"):
+            self._career_actions = CareerActionService(self)
+        return self._career_actions
+
+    @property
+    def interactions(self):
+        from .interactions import InteractionsService
+        if not hasattr(self, "_interactions"):
+            self._interactions = InteractionsService(self)
+        return self._interactions
+
+    def request_career_reply(self, application_id: str, evidence_id: str, context: MutationContext):
+        """Queue preparation without granting the caller permission to send mail."""
+        from .contracts import canonical_json
+        from .worker import _stable_id
+        request = {"application_id": application_id, "evidence_id": evidence_id}
+        def operation(con, stamp):
+            self.store._application(con, application_id)
+            evidence = con.execute("SELECT account_id FROM mail_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
+            if evidence is None:
+                raise ContractError("reply evidence not found")
+            # The source service applies the full association and incoming-message
+            # checks again before capturing any external reply context.
+            linked = con.execute("SELECT 1 FROM lifecycle_mail_links l JOIN lifecycle_mail_observations o USING(observation_id) WHERE l.application_id=? AND o.evidence_id=? AND o.direction='inbound'", (application_id,evidence_id)).fetchone()
+            if linked is None:
+                raise ContractError("reply evidence must be linked to this application")
+            key = "career-reply:" + payload_sha256({**request, "command":context.idempotency_key})
+            work_id = _stable_id("work", key)
+            con.execute("INSERT OR IGNORE INTO work_items (work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,max_attempts,created_at,lane) VALUES (?,?,?,?,'queued',90,?,1,?,'core')",
+                        (work_id,"career.reply.context",key,canonical_json(request),stamp,stamp))
+            return {"queued":True,"work_id":work_id,"task_kind":"career.reply.context"}
+        return self.store._idempotent("request_career_reply", context, request, operation)
+
     def start_application(
         self,
         snapshot: JobSnapshot,
@@ -141,9 +191,12 @@ class DeterministicJobSearchService:
         return self.store.list_temporal_proposals(statuses, limit=limit)
 
     def list_interview_schedules(
-        self, *, limit: int = 200
+        self, *, limit: int = 200, application_id: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None, starts_after: Optional[str] = None,
+        starts_before: Optional[str] = None, offset: int = 0,
     ) -> Sequence[Mapping[str, Any]]:
-        return self.store.list_interview_schedules(limit=limit)
+        return self.store.list_interview_schedules(limit=limit, application_id=application_id,
+            statuses=statuses, starts_after=starts_after, starts_before=starts_before, offset=offset)
 
     def list_due_local_reminders(
         self, now: str, *, limit: int = 100
@@ -281,6 +334,8 @@ class DeterministicJobSearchService:
         notification = policy.evaluate(intent, available_at=available_at)
         if notification is None:
             return {"created": False, "suppressed": True, "topic": intent.topic}
+        if policy.policy_id == "chief-of-staff-v1":
+            return self.attention.from_notification(intent, now=available_at or None)
         key = "notify:" + payload_sha256(
             {"topic": intent.topic, "source_id": intent.source_id}
         )
@@ -293,6 +348,12 @@ class DeterministicJobSearchService:
         self, worker_id: str, now: str, lease_seconds: int = 60
     ) -> Optional[Mapping[str, Any]]:
         return self.store.claim_notification(worker_id, now, lease_seconds)
+
+    def defer_notification_for_receipt(self, notification_id, lease_token, now, retry_at):
+        return self.store.defer_notification_for_receipt(notification_id, lease_token, now, retry_at)
+
+    def validate_notification_claim(self, notification_id: str, lease_token: str, now: str) -> bool:
+        return self.store.validate_notification_claim(notification_id, lease_token, now)
 
     def complete_notification(
         self,
@@ -341,6 +402,9 @@ class DeterministicJobSearchService:
 
     def application_keys(self) -> Sequence[tuple[str, str]]:
         return self.store.application_job_keys()
+
+    def recent_company_applications(self) -> Sequence[Mapping[str, Any]]:
+        return self.store.recent_company_applications()
 
     def list_actions(
         self, statuses: Optional[Sequence[str]] = None

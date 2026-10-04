@@ -118,6 +118,8 @@ def build_dashboard_controller(
     config: RuntimeConfigV1, *, resume_lab: Optional[ResumeLabGateway] = None, mail_source: Any = None
 ) -> DashboardController:
     ledger = JobSearchLedger(config.application_db)
+    from .chief_runtime import configure_services
+    configure_services(ledger, config)
     preferences = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )
@@ -146,6 +148,8 @@ def build_dashboard_controller(
     )
     environment = config.environment(os.environ)
     jobs = LocalJobCatalog(config.jobs_db)
+    if has_outlook_config(environment):
+        ledger.lifecycle.calendar = _DashboardCalendarSource(config)
     return DashboardController(
         ledger,
         preferences,
@@ -163,6 +167,8 @@ def build_dashboard_controller(
         notification_recovery=build_notification_recovery(config, ledger),
         mail_source=mail_source or _DashboardMailSource(config, ledger),
         automation_config=config,
+        cost_snapshot_path=(Path(environment["JOB_SEARCH_COST_SNAPSHOT"])
+                            if environment.get("JOB_SEARCH_COST_SNAPSHOT") else None),
     )
 
 
@@ -184,9 +190,9 @@ def _archive_source(config: RuntimeConfigV1, ledger: JobSearchLedger):
     return build_archive_mail_source(ledger, key_provider=key_provider)
 
 
-def _availability_from_config(
+def _outlook_from_config(
     config: RuntimeConfigV1, environment: Mapping[str, str]
-) -> Optional[AvailabilityPlanner]:
+):
     if not has_outlook_config(environment):
         return None
     cache_value = str(environment.get("OUTLOOK_TOKEN_CACHE") or "").strip()
@@ -209,9 +215,24 @@ def _availability_from_config(
         persistence=persistence,
     )
     outlook = GraphOutlookClient(GraphSession(provider, UrllibHttpAdapter()))
-    return AvailabilityPlanner(
-        outlook, AvailabilityPolicy(timezone_name=config.timezone)
-    )
+    return outlook
+
+
+class _DashboardCalendarSource:
+    """Construct the read adapter only when a user reviews an interview time."""
+    def __init__(self, config):
+        self.config = config
+
+    def read_calendar_view(self, starts_at, ends_at):
+        outlook = _outlook_from_config(self.config, self.config.environment(os.environ))
+        if outlook is None:
+            raise ValueError("Outlook availability is not configured")
+        return outlook.read_calendar_view(starts_at, ends_at)
+
+
+def _availability_from_config(config, environment):
+    outlook = _outlook_from_config(config, environment)
+    return AvailabilityPlanner(outlook, AvailabilityPolicy(timezone_name=config.timezone)) if outlook is not None else None
 
 
 def build_hermes_sources_from_config(
@@ -224,6 +245,8 @@ def build_hermes_sources_from_config(
     """Compose Hermes from bounded adapters, never from raw database/Graph clients."""
 
     ledger = JobSearchLedger(config.application_db)
+    from .chief_runtime import configure_services
+    configure_services(ledger, config)
     gateway = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )
@@ -245,7 +268,12 @@ def build_hermes_sources_from_config(
     if planner is None:
         planner = _availability_from_config(config, environment)
     resume = _configured_resume_lab(config, resume_lab, read_only=True)
+    from .job_reviews.service import JobReviews
+    from .job_reviews.context import profile_context
+    from .scanning import scan_status
     return make_hermes_sources(
+        reviews=JobReviews(config.application_db, LocalJobCatalog(config.jobs_db),
+                           lambda: profile_context(resume), collection_provider=lambda: scan_status(config)),
         curated=CuratedShortlists(config.application_db, LocalJobCatalog(config.jobs_db)),
         jobs=LocalJobCatalog(config.jobs_db),
         shortlist=ConfiguredShortlistSource(
@@ -290,6 +318,19 @@ def make_mcp_host(
         config.mcp_port,
         bind_host=bind_host,
         allowed_hosts=allowed_hosts,
+    )
+
+
+def make_interaction_host(config: RuntimeConfigV1, *, bind_host="127.0.0.1", allowed_hosts=()):
+    """Dedicated human-interaction ingress, separate from the model's MCP bearer."""
+    if config.interaction_token_file is None:
+        raise ValueError("configure Telegram identity and interaction_token_file first")
+    from .chief_runtime import configure_services
+    from .interactions.server import make_interaction_server
+    ledger = configure_services(JobSearchLedger(config.application_db), config)
+    return make_interaction_server(
+        ledger.interactions, read_mcp_token(config.interaction_token_file),
+        host=bind_host, port=config.interaction_port, allowed_hosts=allowed_hosts,
     )
 
 

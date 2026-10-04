@@ -19,7 +19,7 @@ document.querySelector("#applications").innerHTML = `
             <a data-tab="overview" href="#applications">Overview</a><a data-tab="messages" href="#applications">Messages</a><a data-tab="answers" href="#applications">Answers</a><a data-tab="documents" href="#applications">Documents</a>
           </nav>
           <div id="workspace-feedback" role="status" hidden></div>
-          <div id="workspace-overview"><div id="workspace-review-notices"></div><div id="workspace-interviews"></div><h4>Application history</h4><div id="timeline" class="timeline"></div><details id="workspace-posting-history"><summary>Posting history</summary><div id="workspace-job-history"></div></details></div>
+          <div id="workspace-overview"><div id="workspace-lifecycle"></div><div id="workspace-review-notices"></div><div id="workspace-interviews"></div><h4>Application history</h4><div id="timeline" class="timeline"></div><details id="workspace-posting-history"><summary>Posting history</summary><div id="workspace-job-history"></div></details></div>
           <div id="workspace-messages" hidden></div>
           <div id="workspace-answers" hidden></div>
           <div id="workspace-documents" hidden></div>
@@ -28,7 +28,7 @@ document.querySelector("#applications").innerHTML = `
 `;
 
 function applicationScopeRows() {
-  return state.applications.filter(app => app.current_phase !== "preparing");
+  return state.applications.filter(app => app.current_phase !== "preparing" || app.ats === "external");
 }
 function applicationReviewNotice(item) {
   const link = node("a", "pending-note", `${item.title} · ${reviewStatus(item)}`);
@@ -102,18 +102,20 @@ async function refreshApplicationWorkspace() {
   if (!consoleState.workspace || consoleState.workspace.application.application_id !== id) {
     document.querySelector("#workspace-company").textContent = "Application";
     document.querySelector("#workspace-title").textContent = "Loading…";
-    for (const selector of ["#workspace-status", "#workspace-job-preview", "#workspace-posting-dates", "#workspace-review-notices", "#workspace-interviews", "#timeline", "#workspace-messages", "#workspace-answers", "#workspace-documents", "#workspace-job-history"]) document.querySelector(selector).replaceChildren();
+    for (const selector of ["#workspace-lifecycle", "#workspace-status", "#workspace-job-preview", "#workspace-posting-dates", "#workspace-review-notices", "#workspace-interviews", "#timeline", "#workspace-messages", "#workspace-answers", "#workspace-documents", "#workspace-job-history"]) document.querySelector(selector).replaceChildren();
   }
   updateWorkspaceTabs();
   try {
     const data = await api(`/api/v1/applications/${encodeURIComponent(id)}/workspace`);
     if (epoch !== consoleState.epoch || id !== consoleState.applicationId || consoleState.view !== "applications") return;
     consoleState.workspace = data;
+    renderLifecycleBriefing(data.briefing);
     const app = data.application;
+    const savedDraft = app.current_phase === "preparing" && app.ats !== "external";
     const back = document.querySelector(".workspace-back");
-    back.href = app.current_phase === "preparing" ? "#settings/stored-records" : "#applications";
-    back.textContent = app.current_phase === "preparing" ? "← Stored records" : "← All applications";
-    document.querySelector(".workspace-label").textContent = app.current_phase === "preparing" ? "Saved draft" : "Application record";
+    back.href = savedDraft ? "#settings/stored-records" : "#applications";
+    back.textContent = savedDraft ? "← Stored records" : "← All applications";
+    document.querySelector(".workspace-label").textContent = savedDraft ? "Saved draft" : "Application record";
     document.querySelector("#workspace-company").textContent = app.employer_snapshot;
     document.querySelector("#workspace-title").textContent = app.title_snapshot;
     const dates = postingDates(app);
@@ -139,7 +141,7 @@ async function refreshApplicationWorkspace() {
     document.querySelector("#workspace-status").replaceChildren(node("span", `phase ${app.current_phase}`, applicationStatusLabel(app)));
     renderApplicationReviewNotices();
     const interviews = document.querySelector("#workspace-interviews"); interviews.replaceChildren();
-    for (const interview of data.interviews || []) {
+    for (const interview of data.briefing ? [] : (data.interviews || [])) {
       interviews.append(node("h4", "", "Interview"), node("p", "meta", `${displayDate(interview.starts_at)} – ${displayDate(interview.ends_at)} · ${interview.time_zone || ""}`));
     }
     const history = document.querySelector("#timeline"); history.replaceChildren();
@@ -173,14 +175,7 @@ async function refreshApplicationWorkspace() {
       for(const item of data.browser_observations) evidence.append(node("p", "meta", `${displayDate(item.occurred_at)} · ${labels[item.kind] || item.kind}`));
       history.append(evidence);
     }
-    const messages = document.querySelector("#workspace-messages"); messages.replaceChildren();
-    if (!data.messages.length) messages.append(node("p", "empty", "No recruiter messages are linked to this application yet."));
-    data.messages.forEach(message => {
-      const article = node("article", "message");
-      article.append(node("h4", "", message.subject), node("p", "meta", `${message.sender} · ${displayDate(message.received_at)}`), node("p", "message-body", message.excerpt));
-      if (!message.available) article.append(node("p", "meta", "Archived message unavailable. Showing the saved evidence excerpt."));
-      messages.append(article);
-    });
+    renderLifecycleConversation(document.querySelector("#workspace-messages"), data);
     renderApplicationDocuments(data.documents || []);
     renderApplicationAnswers(data.answer_snapshots || []);
   } catch (error) {

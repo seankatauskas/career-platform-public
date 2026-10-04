@@ -30,6 +30,10 @@ Application records have Overview, Messages, and Documents tabs. Overview contai
 
 Shortlist preserves separate Codex picks and model picks. List history and caller ordering remain intact. Posting window and remote filters stay visible; ranking controls and scores are secondary. Review uses one normalized queue for cards, badges, and application notices, with reconciliation first, deadlines next, then oldest items. Decision labels describe the actual effect. Email reply drafts remain available; preparation and tailored resume generation controls are retired from the everyday interface.
 
+Both shortlist sources show a quiet “Applied recently” text link beside the company when a recorded submission or confirmation falls within the rolling 180-day window. Use secondary text, regular weight, and a subtle underline without a filled badge or border. The link opens the latest qualifying application, including applications to other roles at that company, and explains “Applied to this company within the last 180 days” and shows its date in the tooltip and accessible label. Drafts and unconfirmed submission attempts do not qualify. Rejected or withdrawn applications still count as prior applications. The indicator is refreshed when a saved or cached shortlist is loaded.
+
+The shared “Exclude recently applied companies” checkbox defaults to enabled for both Codex and model picks and uses the same company-history indicator. It filters the loaded list immediately, preserves its original ranks and saved contents, and reports how many roles are hidden. The choice persists in this browser across reloads and source changes. If every role is hidden, the empty state explains how to show them again.
+
 Settings holds connections, career profile and saved resumes, operations, and read-only earlier drafts. Saved facts are shown before editing controls. Operations shows problems before healthy or paused services. Documents resolve the resume recorded at submission, never the current preferred resume. Missing files retain an explicit unavailable state.
 
 ## Implementation coordination

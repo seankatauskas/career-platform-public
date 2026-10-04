@@ -6,7 +6,7 @@ const pendingCaptures = new Map();
 
 async function requirePermission(base) {
   if (!await chrome.permissions.contains({ origins: [permissionOrigin(base)] })) {
-    throw new Error("Dashboard access was denied or removed. Click Fill application to grant access and pair again.");
+    throw new Error("Dashboard access was denied or removed. Use Connect browser or Restore dashboard access to grant access without discarding pending answers.");
   }
 }
 

@@ -83,6 +83,45 @@ def assert_preserved(root, before):
     return after
 
 
+def install_ranking_trackers(config):
+    """Candidate-only setup; the predecessor must keep writing these databases."""
+    from job_search.ranking.refresh_freshness import ensure_tracking
+    boards.save([{'ats': 'ashby', 'id': 'transition-ranking', 'company': 'Fixture',
+                  'title': 'Engineer', 'description': 'Fictional ranking fixture'}],
+                config.jobs_db, '2026-10-03T00:00:00+00:00')
+    with sqlite3.connect(config.preference_db) as con:
+        con.execute('INSERT INTO preference_model_runs VALUES (?,?,?,?,?,?,?)',
+                    ('transition-ranking', '2026-10-03', 'fixture', 'fixture', 1, '{}', ''))
+        con.execute('INSERT INTO preference_scores VALUES (?,?,?,?,?,?,?,?,?)',
+                    ('transition-ranking', 'fixture-family', 'fixture-fingerprint',
+                     0, 0, .5, .5, '{}', '2026-10-03'))
+    ensure_tracking(config.jobs_db, 'source')
+    ensure_tracking(config.preference_db, 'scores')
+
+
+def verify_predecessor_ranking_writes(config):
+    """Execute the old collector and its score SQL shape with new triggers installed."""
+    def tracker(path, kind, scope):
+        with sqlite3.connect(path) as con:
+            epoch = con.execute(f'SELECT value FROM ranking_refresh_{kind}_epoch WHERE id=1').fetchone()[0]
+            row = con.execute(f'SELECT revision FROM ranking_refresh_{kind}_revisions WHERE scope=?',
+                              (scope,)).fetchone()
+        return epoch, row[0] if row else 0
+
+    source_before = tracker(config.jobs_db, 'source', 'catalog')
+    scores_before = tracker(config.preference_db, 'scores', 'transition-ranking')
+    boards.save([{'ats': 'ashby', 'id': 'transition-ranking', 'company': 'Fixture',
+                  'title': 'Updated Engineer', 'description': 'Updated fictional ranking fixture'}],
+                config.jobs_db, '2026-10-03T01:00:00+00:00')
+    with sqlite3.connect(config.preference_db) as con:
+        con.execute('UPDATE preference_scores SET sparse_score=?,final_score=? WHERE run_id=?',
+                    (.6, .6, 'transition-ranking'))
+    source_after = tracker(config.jobs_db, 'source', 'catalog')
+    scores_after = tracker(config.preference_db, 'scores', 'transition-ranking')
+    assert source_before[0] == source_after[0] and source_after[1] > source_before[1]
+    assert scores_before[0] == scores_after[0] and scores_after[1] > scores_before[1]
+
+
 def main():
     action, path = sys.argv[1:]
     root = Path(path)
@@ -121,7 +160,10 @@ def main():
         if action == 'upgrade':
             start(ledger, job_id='after-upgrade', key='after-upgrade')
             create_standard(resumes, name='After upgrade', rank=2, marker='two')
+            install_ranking_trackers(config)
             (root / 'after.json').write_text(json.dumps(snapshot(root)))
+        elif action == 'rollback':
+            verify_predecessor_ranking_writes(config)
     print(json.dumps({'passed': True, 'action': action, 'state_sha256': hashlib.sha256(json.dumps(snapshot(root), sort_keys=True).encode()).hexdigest()}))
 
 

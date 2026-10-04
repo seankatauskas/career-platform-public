@@ -3,6 +3,10 @@
 .shortlist-toolbar label { min-width: 140px; }
 #curated-list-label { max-width: min(100%, 480px); }
 #curated-list { max-width: 100%; }
+.shortlist-company-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 0 12px; margin: 0 0 16px; }
+.shortlist-company-filter .check { min-width: 0; font-weight: 400; }
+.shortlist-company-filter input { flex-shrink: 0; }
+.shortlist-company-filter .help { margin: 0; }
 .shortlist-filters { border-top: 1px solid var(--line); padding: 16px 0; }
 .shortlist-filters > .controls { justify-content: flex-start; gap: 16px; }
 .shortlist-advanced { margin-top: 16px; }
@@ -11,6 +15,10 @@
 .ranking-details { margin-top: 12px; }
 #shortlist-list .shortlist-score { font-size: 12px; }
 #shortlist-list .curated-explanation { max-width: 70ch; line-height: 1.6; }
+.shortlist-company { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.shortlist-company-applied { color: var(--secondary-ink); font-size: 12px; font-weight: 400; line-height: 1.5; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.shortlist-company-applied:hover { color: var(--ink); text-decoration-color: currentColor; }
+.shortlist-company-applied:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .job-preview-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; flex-shrink: 0; }
 .job-preview-header-actions a { font-size: 12px; white-space: nowrap; }
 .job-preview-source-details { margin-top: 16px; }
@@ -21,3 +29,11 @@
   .shortlist-toolbar > button { flex: 1 1 auto; }
   .job-preview-header-actions { flex-direction: column; align-items: flex-end; gap: 8px; }
 }
+.agent-review-summary { border: 1px solid var(--line); padding: 16px; margin: 12px 0 20px; border-radius: 6px; }
+.agent-review-summary h3 { font-size: 14px; margin: 0 0 8px; }
+#agent-review-status { margin: 8px 0 4px; }
+.agent-review-history { margin: 4px 0 20px; }
+.agent-review-history summary { color: var(--secondary-ink); cursor: pointer; font-size: 12px; }
+.agent-review-history button, .agent-review-entry { margin-top: 12px; }
+.agent-assessment h4 { font-size: 12px; margin-bottom: 4px; }
+.agent-assessment blockquote { border-left: 2px solid var(--line); margin: 8px 0; padding-left: 12px; font-size: 12px; }

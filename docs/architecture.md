@@ -33,10 +33,9 @@ Migrations are ordered, checksummed, transactional, and never routed through
   sink stores its application event ID as `recommendation_feedback.source_event_id` so
   retries cannot duplicate passive feedback.
 - Outlook tokens remain inside the auth/transport adapter. Workers use silent auth only.
-  No v1 interface can send mail, add attendees, or accept an invitation.
+  Recruiter replies can be sent only from immutable, explicitly approved career action proposals. Personal calendar commitments carry no attendees; accepting invitations remains unsupported.
 - Personal Outlook calendar availability uses paged `calendarView`, because delegated
-  personal accounts do not support `getSchedule`. Only privacy-minimized busy intervals
-  are retained.
+  personal accounts do not support `getSchedule`. Privacy-minimized agenda snapshots retain busy intervals and career-event context for briefings.
 - Classifiers receive sanitized text plus at most 20 candidate applications and return
   strict JSON. They have no tools, network, tokens, SQL, or mutation access.
 
@@ -71,7 +70,7 @@ The all-history encrypted mail and temporal-scheduling path is composed into the
 worker and documented in `docs/operations/job-search-secure-mail.md`. Mailbox discovery stores only
 folder identifiers and excludes Junk, Deleted Items, and both descendant subtrees.
 Secure task results contain counts, never Graph tokens or raw content. Hermes remains
-replaceable and cannot approve or execute actions.
+replaceable and cannot approve or execute actions through model tools. A separate trusted Telegram interaction handler accepts owner button presses and exact preview approvals before model processing.
 
 The Hermes surface is assembled from injected Protocols rather than database or Outlook
 objects. A loopback bearer-authenticated MCP adapter exposes only its frozen tool
@@ -79,7 +78,11 @@ registry. Migration 6 adds independent general reminders and a notification outb
 generic publish/claim/complete service methods let mail, application, reminder,
 system-health, and opportunity streams share durable delivery without making Hermes a
 ledger writer. Phone delivery is a fixed absolute-Hermes `send --to` argv with bounded
-plain text on stdin, and remains separately injectable in offline tests.
+plain text on stdin. Interactive attention cards use the trusted Telegram delivery adapter and durable receipts. Both transports remain injectable in offline tests.
+
+The chief-of-staff services add attention decisions, daily briefings, approved recruiter replies,
+and personal calendar commitments (migrations 16–18). See
+[Hermes chief of staff](hermes-chief-of-staff.md) for defaults, controls, and delivery recovery.
 
 ## Resume laboratory boundary
 

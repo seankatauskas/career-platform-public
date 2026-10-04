@@ -16,6 +16,9 @@ document.querySelector("#attention").innerHTML = `
 
 function actionNeedsReview(action) { return action.status === "pending" || action.status === "needs_reconciliation"; }
 function reviewTitle(item) {
+  if (item.kind === "lifecycle_correction") return "Proposed application update";
+  if (item.kind === "interview_revision") return "Interview change";
+  if (item.kind === "mail_discovery") return "Untracked recruiting conversation";
   if (item.kind === "event_proposal") return ({interview_requested: "Interview request", submission_confirmed: "Application confirmation", rejected: "Application outcome", offer_received: "Offer received"})[item.detail] || (item.detail || "Application update").replaceAll("_", " ");
   if (item.kind === "temporal_proposal") return item.detail === "interview" ? "Proposed interview time" : "Application deadline";
   if (item.kind === "browser_submission") return "Check submission";
@@ -56,10 +59,30 @@ function updateReviewCount() {
   renderApplicationTable();
   renderApplicationReviewNotices();
 }
+function captureReviewDisclosures(root) {
+  return new Map([...root.querySelectorAll('[data-review-key]')].map(row => [row.dataset.reviewKey,
+    new Map([...row.querySelectorAll('details')].map((detail, index) => [
+      detail.querySelector(':scope > summary')?.textContent || String(index), detail.open,
+    ])),
+  ]));
+}
+function restoreReviewDisclosures(row, saved) {
+  const disclosures = saved.get(row.dataset.reviewKey);
+  if (!disclosures) return;
+  [...row.querySelectorAll('details')].forEach((detail, index) => {
+    const key = detail.querySelector(':scope > summary')?.textContent || String(index);
+    if (disclosures.has(key)) detail.open = disclosures.get(key);
+  });
+}
 function renderReviewQueue() {
   const applicationId = new URLSearchParams(location.hash.split("?")[1] || "").get("application");
   const items = applicationId ? reviewItemsForApplication(applicationId) : getReviewItems();
   const list = document.querySelector("#attention-list");
+  // Async attention/action refreshes replace cards. Preserve the user's native
+  // disclosure state for the same review identity, including mailbox scope.
+  const disclosures = captureReviewDisclosures(list);
+  const history = document.querySelector("#action-list");
+  const historyDisclosures = captureReviewDisclosures(history);
   clear(list);
   list.classList.toggle("empty", !items.length);
   document.querySelector("#review-summary").textContent = items.length ? `${items.length} item${items.length === 1 ? "" : "s"} waiting for you` : "";
@@ -81,15 +104,20 @@ function renderReviewQueue() {
   for (const item of items) {
     const row = item.raw.action_id ? actionItem(item.raw) : reviewItem(item);
     row.dataset.reviewKey = item.key;
+    restoreReviewDisclosures(row, disclosures);
     row.tabIndex = -1;
     row.id = `review-${encodeURIComponent(item.key)}`;
     if (route[1] === encodeURIComponent(item.kind) && route[2] === encodeURIComponent(item.id)) { row.classList.add("review-selected"); focused = row; }
     list.append(row);
   }
-  const history = document.querySelector("#action-list");
   clear(history);
   const completed = consoleState.actions.filter(action => !actionNeedsReview(action));
-  for (const action of completed) history.append(actionItem(action));
+  for (const action of completed) {
+    const row = actionItem(action);
+    row.dataset.reviewKey = `${action.kind}:${action.action_id}`;
+    restoreReviewDisclosures(row, historyDisclosures);
+    history.append(row);
+  }
   if (!completed.length) history.append(node("p", "empty", "No previous actions."));
   updateReviewCount();
   const focusRoute = location.hash.split("?")[0];
@@ -218,6 +246,7 @@ function reviewItem(normalized) {
       detail.append(node("p", "help", "Saves the proposed time to this application. It does not accept an invitation or notify anyone."));
     }
     const actions = node("div", "actions");
+    if (["lifecycle_correction","interview_revision","mail_discovery"].includes(item.kind)) renderLifecycleReview(item, detail, actions);
     if (item.kind === "event_proposal") detail.append(node("p", "help", "Confirm that this email updates the application. This does not reply to the sender or accept an invitation."));
     if (item.kind === "browser_submission") {
       detail.append(node("p", "", item.detail));
@@ -268,20 +297,27 @@ function reviewItem(normalized) {
     }
     if (item.kind === "event_proposal") {
       let selectedApplicationId = item.application_id;
+      const accept = node("button", "", "Confirm update");
       if (!selectedApplicationId && (item.candidate_application_ids || []).length) {
         const select = node("select");
         select.setAttribute("aria-label", "Application for this proposal");
+        const placeholder = node("option", "", "Choose an application…");
+        placeholder.value = "";
+        select.append(placeholder);
         item.candidate_application_ids.forEach((candidate) => {
           const match = state.applications.find(app => app.application_id === candidate);
           const option = node("option", "", match ? `${match.employer_snapshot} · ${match.title_snapshot}` : candidate);
           option.value = candidate;
           select.append(option);
         });
-        selectedApplicationId = item.candidate_application_ids[0];
-        select.addEventListener("change", () => { selectedApplicationId = select.value; });
+        select.addEventListener("change", () => {
+          selectedApplicationId = select.value;
+          accept.disabled = !selectedApplicationId;
+        });
         actions.append(select);
+      } else if (!selectedApplicationId) {
+        actions.append(node("p", "review-context-link", "No matching application yet. This email will stay here for review; refresh after the application appears."));
       }
-      const accept = node("button", "", item.kind === "temporal_proposal" ? (item.detail === "interview" ? "Save proposed time" : "Save deadline") : "Confirm update");
       accept.type = "button";
       accept.disabled = !selectedApplicationId;
       accept.addEventListener("click", () => decideProposal(item, "accepted", selectedApplicationId, accept));

@@ -464,6 +464,53 @@ def test_exhausted_transient_body_failure_is_visible_for_attention():
         assert service.system_health()["status"] == "attention"
 
 
+def test_retry_failed_mail_repairs_layout_and_persists_exact_evidence_once():
+    import json
+    from job_search.mail import RemoteMailClassifier
+    from tests.test_job_search_remote_mail import FakeProvider, evidence_response
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "job-search.db"
+        service = JobSearchLedger(path)
+        state = SQLiteOutlookState(path)
+        message_id = "layout-message"
+        state.stage_changes("personal", "inbox", [change(message_id)], query_version=2)
+        mail = FakeMail()
+        mail.bodies[message_id] = {
+            "id": message_id,
+            "sender": {"emailAddress": {"address": "recruiter@example.test"}},
+            "subject": "You’re on our radar — thanks for applying to Example Labs 🚀",
+            "receivedDateTime": "2026-09-01T12:00:00Z",
+            "body": {"contentType": "html", "content": "<p>Thanks for applying to</p><p>Example Labs.</p>"},
+        }
+        response = evidence_response("Thanks for applying to Example Labs.", application_id=None)
+
+        class UnalignedClassifier:
+            def classify(self, _text, _candidates):
+                return response
+
+        coordinator = OutlookMailCoordinator(mail, state, service, classifier=UnalignedClassifier())
+        failed = coordinator.process_pending(query_version=2)
+        assert failed.failed == 1 and failed.proposed == 0 and failed.auto_applied == 0
+        assert any(item["kind"] == "mail_processing_failure" for item in service.list_attention_items())
+        service.resolve_mail_failure(
+            "personal", "inbox", message_id, 2, "retry",
+            MutationContext("retry-layout", "user", "dashboard"),
+        )
+        classifier = RemoteMailClassifier(FakeProvider(json.dumps(response)))
+        coordinator.classifier = classifier
+        coordinator.model_version = classifier.producer_version
+        recovered = coordinator.process_pending(query_version=2)
+        assert recovered.processed == 1 and recovered.failed == 0 and recovered.proposed == 1
+        assert recovered.auto_applied == 0
+        attention = service.list_attention_items()
+        assert not any(item["kind"] == "mail_processing_failure" for item in attention)
+        proposals = [item for item in attention if item["kind"] == "event_proposal"]
+        assert len(proposals) == 1
+        assert proposals[0]["evidence_quote"] == "Thanks for applying to\n\nExample Labs."
+        assert coordinator.process_pending(query_version=2).proposed == 0
+
+
 def test_model_cannot_auto_apply_with_more_than_twenty_candidate_applications():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "job-search.db"

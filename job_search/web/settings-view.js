@@ -3,6 +3,10 @@ document.querySelector("#settings").innerHTML = `
   <div id="settings-home">
     <div class="section-heading"><div><h2>Settings</h2><p class="section-note">Connections, saved information, and background work.</p></div></div>
     <div class="settings-groups">
+      <section class="settings-group" aria-labelledby="chief-settings-heading">
+        <h3 id="chief-settings-heading">Your chief of staff</h3>
+        <a class="settings-link-row" href="#settings/chief"><span><strong>Briefings, attention, and email reviews</strong><span class="meta">Choose when Hermes checks in, review what matters, and approve prepared replies.</span></span><span aria-hidden="true">→</span></a>
+      </section>
       <section class="settings-group" aria-labelledby="connections-heading">
         <h3 id="connections-heading">Connections</h3>
         <p class="meta">Connect your browser to record applications as you submit them.</p>
@@ -18,7 +22,7 @@ document.querySelector("#settings").innerHTML = `
       </section>
       <section class="settings-group" aria-labelledby="operations-settings-heading">
         <h3 id="operations-settings-heading">Operations</h3>
-        <a class="settings-link-row" href="#settings/operations"><span><strong>Connections and background work</strong><span class="meta">Check scans, resolve failures, and manage scheduled activity.</span></span><span aria-hidden="true">→</span></a>
+        <a class="settings-link-row" href="#settings/operations"><span><strong>Connections, costs, and background work</strong><span class="meta">Check scans, provider spending, failures, and scheduled activity.</span></span><span aria-hidden="true">→</span></a>
       </section>
       <section class="settings-group" aria-labelledby="stored-records-heading">
         <h3 id="stored-records-heading">Stored records</h3>
@@ -32,6 +36,7 @@ document.querySelector("#settings").innerHTML = `
     <p class="section-note">Existing resume documents. Each application keeps its own recorded document.</p>
     <p id="saved-resumes-status" role="status"></p><div id="saved-resume-list" class="stack"></div>
   </div>
+  <div id="settings-chief" hidden></div>
   <div id="settings-stored-records" hidden>
     <div class="section-heading"><div><p class="kicker"><a href="#settings">← Settings</a></p><h2>Earlier application drafts</h2></div></div>
     <p class="section-note">These saved records are kept for reference. Opening one does not start or submit an application.</p>
@@ -48,12 +53,17 @@ document.querySelector("#ops").innerHTML = `
     <p id="scan-status" class="meta"></p>
     <p id="pipeline-feedback" class="meta" role="status" hidden></p>
     <div id="ranking-progress" aria-live="polite"></div>
-    <p class="help">Scanning checks your configured company boards for new jobs. Ranking follows in the background within your model allowance. You can keep applying while it runs.</p>
+    <p class="help">Scanning checks your configured company boards for new jobs. Ranking checks saved results in the background and updates jobs that changed. You can keep applying while it runs.</p>
   </section>
   <div id="readiness-summary" class="readiness-summary" aria-live="polite">Checking recent work…</div>
   <section class="ops-recovery-section" aria-labelledby="recovery-heading"><div class="ops-section-heading"><h3 id="recovery-heading" tabindex="-1">Work that needs attention</h3></div><div id="recovery-list" class="stack empty">Checking unfinished work…</div></section>
   <section aria-labelledby="readiness-heading"><div class="ops-section-heading"><h3 id="readiness-heading">Services</h3><span id="readiness-checked" class="meta"></span></div><ul id="readiness-list" class="readiness-list"></ul></section>
   <section id="automation-section" hidden><h3>Scheduled activity</h3><div id="automation-controls" class="stack" aria-label="Background automation"></div></section>
+  <section id="costs-section" aria-labelledby="costs-heading"><div class="ops-section-heading"><h3 id="costs-heading">Costs and credits</h3><span id="costs-checked" class="meta"></span></div>
+    <p class="meta">AWS, Runpod, and OpenRouter · USD. Billing totals and prepaid balances use different time windows, so they are not added together.</p>
+    <p id="costs-status" class="meta" role="status"></p><div id="costs-alerts" class="stack"></div><div id="costs-providers" class="costs-grid"></div>
+    <p class="help">Collection runs at most once daily. Check now rereads the saved snapshot; it does not contact billing providers. Threshold warnings are informational, not spending caps.</p>
+  </section>
   <section id="notification-section"><h3>Telegram delivery</h3><div id="notification-list" class="stack empty">No notification activity.</div></section>
   <details class="ops-activity"><summary>Reminders and delivery history</summary><div class="ops-grid"><div><h3>Reminders</h3><div id="reminder-list" class="stack empty">No reminders.</div></div><div><h3>Recent deliveries</h3><div id="notification-history" class="stack empty">No notification activity.</div></div></div></details>
   <details class="ops-activity"><summary>Activity counts and release details</summary><div id="health-detail" class="metrics empty">Health data is loading.</div><p id="release-detail" class="meta"></p></details>
@@ -445,6 +455,54 @@ const OPS_ACTIONS = {
   upgrade_release: "Install the compatible release before resuming work.",
 };
 
+function costMoney(value) {
+  const amount = Number(value);
+  return value == null || !Number.isFinite(amount) ? "Unavailable"
+    : new Intl.NumberFormat("en-US", {style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4}).format(amount);
+}
+
+function renderCosts(report) {
+  const providers = $("#costs-providers"), alerts = $("#costs-alerts");
+  providers.replaceChildren(); alerts.replaceChildren();
+  $("#costs-checked").textContent = report && report.generated_at ? `Snapshot ${opsTime(report.generated_at)}` : "";
+  $("#costs-status").textContent = report && report.available
+    ? `Next collection due ${opsTime(report.next_refresh_due_at)}. Provider reporting can lag behind collection.`
+    : report && report.message || "Cost collection is not configured for this installation.";
+  if (!report || !report.available) return;
+  const names = {aws: "AWS", runpod: "Runpod", openrouter: "OpenRouter"};
+  const states = {ok: "Collected", partial: "Partial coverage", error: "Update failed", not_configured: "Not configured", no_data: "Not yet reported"};
+  const notes = {
+    aws: "Account-wide UnblendedCost, including other services in this AWS account. Credits and refunds are signed adjustments, not remaining promotional credit. Net cost is an estimate, not a final invoice. AWS data may lag more than 24 hours.",
+    runpod: "Account-wide usage and prepaid balance, including resources outside this application. The current hourly rate is not a forecast or monthly spending cap.",
+    openrouter: "Account totals cover all keys. Metrics labeled “This key” cover only the configured inference key. Credit balance is not the key’s remaining spending allowance; BYOK provider charges are not included here.",
+  };
+  (report.providers || []).forEach((provider) => {
+    const card = node("article", "costs-card"); card.dataset.provider = provider.id;
+    const heading = node("div", "ops-section-heading");
+    heading.append(node("h4", "", names[provider.id] || provider.id), node("span", "ops-badge", provider.stale ? "Stale figures" : states[provider.status] || "Unavailable"));
+    card.append(heading);
+    if (provider.message) card.append(node("p", "meta", provider.message));
+    if (provider.status === "error" && provider.observed_at) card.append(node("p", "meta", "Showing last successful figures, not current totals."));
+    if (provider.period) card.append(node("p", "meta", `${provider.period.start} to ${provider.period.end} (UTC, end exclusive; today's partial day is not included).${provider.estimated ? " Provider marks this period estimated." : ""}`));
+    const metrics = node("dl", "costs-metrics");
+    Object.entries(provider.metrics || {}).forEach(([metric, value]) => {
+      metrics.append(node("dt", "meta", provider.metric_labels && provider.metric_labels[metric] || metric), node("dd", "", costMoney(value)));
+    });
+    if (metrics.children.length) card.append(metrics);
+    else card.append(node("p", "meta", "No verified figures available. This does not mean zero spending."));
+    if (provider.observed_at) card.append(node("p", "meta", `Last successful collection ${opsTime(provider.observed_at)}.`));
+    if (provider.attempted_at && provider.attempted_at !== provider.observed_at) card.append(node("p", "meta", `Last attempt ${opsTime(provider.attempted_at)}.`));
+    card.append(node("p", "help", notes[provider.id] || ""));
+    providers.append(card);
+  });
+  (report.alerts || []).forEach((alert) => {
+    let text = `${names[alert.provider] || alert.provider}: `;
+    if (alert.kind === "threshold") text += `${alert.direction === "below" ? "Balance is at or below" : "Reported charges are at or above"} your ${costMoney(alert.threshold)} warning threshold.${alert.stale ? " Based on last successful figures; refresh is overdue or failed." : ""}`;
+    else text += alert.kind === "stale" ? "Cost figures are over 36 hours old." : "The latest billing update failed.";
+    alerts.append(node("p", "costs-warning", text));
+  });
+}
+
 function opsFeedback(message) {
   const target = $("#ops-feedback");
   target.textContent = message;
@@ -677,7 +735,7 @@ function renderPipeline(collection, ranking) {
   const target = $("#ranking-progress");
   clear(target);
   if (!ranking) return;
-  const labels = {running: "Ranking jobs", queued: "Ranking queued", idle: "Ranking is idle", paused: "Ranking is paused",
+  const labels = {running: "Checking for ranking updates", queued: "Ranking update check queued", idle: "Ranking is idle", paused: "Ranking is paused",
     dead: "Ranking needs attention", waiting_allowance: "Ranking is waiting for the model allowance", waiting_provider: "Ranking is waiting for the model service"};
   target.append(node("p", "", labels[ranking.state] || "Checking ranking"));
   if (ranking.retry_at && ["waiting_allowance", "waiting_provider"].includes(ranking.state)) target.append(node("p", "meta", `Next attempt ${opsTime(ranking.retry_at)}. Completed work is saved.`));
@@ -685,18 +743,36 @@ function renderPipeline(collection, ranking) {
   const number = (value) => Number(value || 0).toLocaleString();
   target.append(node("p", "meta", `${number(ranking.postings)} collected postings · ${number(ranking.total_families)} distinct job families`));
   for (const [policy, counts] of Object.entries(ranking.policies || {})) {
-    target.append(node("p", "meta", `${policy === "selective" ? "Selective" : "Broad"}: ${number(counts.ranked_families)} ranked · ${number(counts.unranked_families)} awaiting ranking`));
+    target.append(node("p", "meta", `${policy === "selective" ? "Selective" : "Broad"}: ${number(counts.ranked_families)} families with saved rankings · ${number(counts.unranked_families)} without rankings`));
   }
-  if (ranking.state === "running" && ranking.current_pass?.total_families) {
-    const progress = node("progress", "");
-    progress.max = ranking.current_pass.total_families;
-    progress.value = ranking.current_pass.processed_families || 0;
-    progress.setAttribute("aria-label", "Job families processed in this ranking pass");
-    target.append(progress, node("p", "meta", `Current pass: ${number(progress.value)} of ${number(progress.max)} families processed`));
+  const pass = ranking.state === "running" ? ranking.current_pass : ranking.state === "idle" ? ranking.last_pass : null;
+  if (pass?.reused && pass.status === "succeeded") {
+    target.append(node("p", "meta", ranking.state === "idle"
+      ? "Last check: saved rankings were current. No jobs needed recomputing."
+      : "Saved rankings are already current. No jobs needed recomputing."));
+  } else if (ranking.state === "running" && pass?.status !== "succeeded") {
+    const checked = pass?.checked_families, total = pass?.total_families;
+    if (Number.isInteger(checked) && checked >= 0 && Number.isInteger(total) && total > 0 && checked <= total) {
+      const progress = node("progress", "");
+      progress.max = total;
+      progress.value = checked;
+      progress.setAttribute("aria-label", "Job families checked for ranking updates");
+      target.append(progress, node("p", "meta", `Checked ${number(checked)} of ${number(total)} job families for changes`));
+    } else {
+      target.append(node("p", "meta", "Preparing to check saved rankings. Progress for this attempt is not available yet."));
+    }
+  } else if (pass?.status === "succeeded") {
+    target.append(node("p", "meta", "Ranking update check completed."));
   }
-  target.append(node("p", "help", "Unranked jobs are saved but do not appear in automatic model picks. Refresh the shortlist after ranking finishes."));
+  for (const [policy, counts] of Object.entries(pass?.policies || {})) {
+    if (!Number.isInteger(counts.recomputed_families) || counts.recomputed_families < 0) continue;
+    const reused = Number.isInteger(counts.reused_families) && counts.reused_families >= 0
+      ? ` · ${number(counts.reused_families)} saved rankings reused` : "";
+    target.append(node("p", "meta", `${policy === "selective" ? "Selective" : "Broad"} ${ranking.state === "idle" ? "last" : "this"} check: ${number(counts.recomputed_families)} rankings recomputed${reused}`));
+  }
+  target.append(node("p", "help", "Checking saved rankings does not mean every job is ranked again. New or changed jobs need updated rankings. Jobs without rankings are saved but do not appear in automatic model picks."));
   if (Object.values(ranking.policies || {}).some((p) => p.freshness !== "ready")) {
-    target.append(node("p", "meta", "Existing scores may still need refreshing for the latest scan."));
+    target.append(node("p", "meta", "Saved rankings may still need checking against the latest collection."));
   }
 }
 
@@ -747,6 +823,7 @@ async function loadHealth() {
   const health = ops.health;
   renderPipeline(ops.collection, ops.ranking);
   renderReadiness(ops.readiness);
+  renderCosts(ops.costs);
   const controls = $("#automation-controls");
   clear(controls);
   $("#automation-section").hidden = !(ops.automation || []).length;
@@ -923,8 +1000,9 @@ async function loadSettings() {
 }
 
 function renderSettingsSubview(subpage = "") {
-  const view = ["resumes", "stored-records"].includes(subpage) ? subpage : "home";
-  ["home", "resumes", "stored-records"].forEach((name) => { $(`#settings-${name}`).hidden = name !== view; });
+  subpage = subpage.split('?')[0];
+  const view = ["resumes", "stored-records", "chief"].includes(subpage) ? subpage : "home";
+  ["home", "resumes", "stored-records", "chief"].forEach((name) => { $(`#settings-${name}`).hidden = name !== view; });
   if (view === "stored-records") renderStoredRecords();
 }
 
@@ -987,12 +1065,17 @@ async function loadSavedResumes() {
 }
 async function loadResumeStandards() { return loadSavedResumes(); }
 async function loadSettingsPage(subpage = "") {
+  const [pageName, queryString] = subpage.split('?');
+  const briefingId = new URLSearchParams(queryString || '').get('briefing');
+  subpage = pageName;
   renderSettingsSubview(subpage);
-  if (subpage === "resumes") await loadSavedResumes();
+  if (subpage === "chief") await loadChief(briefingId);
+  else if (subpage === "resumes") await loadSavedResumes();
   else if (subpage === "stored-records") { await loadApplications(); renderStoredRecords(); }
   else await loadSettings();
 }
 function initializeSettingsView() {
+  initializeChief();
   $("#browser-connect-code").addEventListener("click", async () => {
     const button = $("#browser-connect-code"); button.disabled = true;
     try {

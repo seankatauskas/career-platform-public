@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from contextlib import closing
 import hashlib
 from html.parser import HTMLParser
 import json
+from itertools import groupby
 import math
 from pathlib import Path
 import re
 import sqlite3
+from tempfile import TemporaryDirectory
 import unicodedata
 from typing import Iterable, Sequence
 from urllib.parse import quote
@@ -523,42 +526,52 @@ def _upsert_derived_rows(
     )
 
 
-def prepared_families_are_current(db_path: str | Path) -> bool:
+def prepared_families_are_current(
+    db_path: str | Path, *, connection: sqlite3.Connection | None = None,
+) -> bool:
     """Verify raw source fingerprints before reusing expensive derived groups.
 
     This streams descriptions once without normalizing or comparing templates.
     New, edited, deleted, or reassigned jobs and old normalization versions force
     a rebuild, even if a caller changed content without updating its timestamp.
+    A supplied connection retains its transaction and lifetime; callers needing
+    a stable snapshot must begin their own transaction before passing it.
+    ``db_path`` is used only when opening an owned connection.
     """
-    from contextlib import closing
-    with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True)) as con:
-        con.execute('BEGIN')
-        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {'jobs', 'job_families', 'job_family_members', 'job_template_clusters'} <= tables:
+    if connection is not None:
+        return _prepared_families_are_current(connection)
+    with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)) as con:
+        con.execute("BEGIN")
+        return _prepared_families_are_current(con)
+
+
+def _prepared_families_are_current(con: sqlite3.Connection) -> bool:
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {'jobs', 'job_families', 'job_family_members', 'job_template_clusters'} <= tables:
+        return False
+    if con.execute('SELECT 1 FROM job_families WHERE normalization_version IS NOT ? LIMIT 1', (NORMALIZATION_VERSION,)).fetchone():
+        return False
+    if con.execute('SELECT 1 FROM job_template_clusters WHERE normalization_version IS NOT ? LIMIT 1', (NORMALIZATION_VERSION,)).fetchone():
+        return False
+    jobs = con.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
+    members = con.execute('SELECT COUNT(*) FROM job_family_members').fetchone()[0]
+    families = con.execute('SELECT COUNT(*) FROM job_families').fetchone()[0]
+    if jobs != members or families != con.execute('SELECT COUNT(DISTINCT family_id) FROM job_family_members').fetchone()[0]:
+        return False
+    if families != con.execute('SELECT COUNT(*) FROM job_template_clusters').fetchone()[0]:
+        return False
+    if con.execute('SELECT 1 FROM job_families f LEFT JOIN job_family_members m '
+                   'ON m.ats=f.canonical_ats AND m.job_id=f.canonical_job_id '
+                   'LEFT JOIN job_template_clusters t ON t.family_id=f.family_id '
+                   'WHERE m.family_id IS NULL OR m.family_id<>f.family_id OR t.family_id IS NULL LIMIT 1').fetchone():
+        return False
+    rows = con.execute('SELECT j.ats,j.id,j.company,j.title,j.description,m.source_fingerprint '
+                       'FROM jobs j LEFT JOIN job_family_members m ON m.ats=j.ats AND m.job_id=j.id')
+    for row in rows:
+        raw = ['' if value is None else str(value) for value in row[:5]]
+        if row[5] != _fingerprint('source-job', raw):
             return False
-        if con.execute('SELECT 1 FROM job_families WHERE normalization_version IS NOT ? LIMIT 1', (NORMALIZATION_VERSION,)).fetchone():
-            return False
-        if con.execute('SELECT 1 FROM job_template_clusters WHERE normalization_version IS NOT ? LIMIT 1', (NORMALIZATION_VERSION,)).fetchone():
-            return False
-        jobs = con.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
-        members = con.execute('SELECT COUNT(*) FROM job_family_members').fetchone()[0]
-        families = con.execute('SELECT COUNT(*) FROM job_families').fetchone()[0]
-        if jobs != members or families != con.execute('SELECT COUNT(DISTINCT family_id) FROM job_family_members').fetchone()[0]:
-            return False
-        if families != con.execute('SELECT COUNT(*) FROM job_template_clusters').fetchone()[0]:
-            return False
-        if con.execute('SELECT 1 FROM job_families f LEFT JOIN job_family_members m '
-                       'ON m.ats=f.canonical_ats AND m.job_id=f.canonical_job_id '
-                       'LEFT JOIN job_template_clusters t ON t.family_id=f.family_id '
-                       'WHERE m.family_id IS NULL OR m.family_id<>f.family_id OR t.family_id IS NULL LIMIT 1').fetchone():
-            return False
-        rows = con.execute('SELECT j.ats,j.id,j.company,j.title,j.description,m.source_fingerprint '
-                           'FROM jobs j LEFT JOIN job_family_members m ON m.ats=j.ats AND m.job_id=j.id')
-        for row in rows:
-            raw = ['' if value is None else str(value) for value in row[:5]]
-            if row[5] != _fingerprint('source-job', raw):
-                return False
-        return True
+    return True
 
 
 def prepare_families(db_path: str | Path) -> dict[str, int]:
@@ -566,28 +579,61 @@ def prepare_families(db_path: str | Path) -> dict[str, int]:
     path = Path(db_path)
     if not path.exists():
         raise FileNotFoundError(path)
-    with sqlite3.connect(path) as con:
+    # The deployment mounts /tmp as tmpfs. Explicitly place the private scratch
+    # database beside the catalog so text staging uses the persistent volume.
+    with TemporaryDirectory(prefix=".family-preparation-", dir=path.resolve().parent) as scratch, \
+            closing(sqlite3.connect(path)) as con, con:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
+        # Keep description-sized staging on disk, with a bounded page cache. Only
+        # a single template comparison block needs its text in Python memory.
+        con.execute("PRAGMA temp_store=FILE")
+        con.execute("PRAGMA temp.cache_size=-8192")
+        con.execute("ATTACH DATABASE ? AS preparation", (str(Path(scratch) / "source.db"),))
+        con.execute("PRAGMA preparation.cache_size=-8192")
+        # Hold a consistent source/lineage snapshot through publication. In WAL
+        # mode a concurrent source commit makes the later write upgrade fail;
+        # partial or stale derived metadata must never be published.
+        con.execute("BEGIN")
         _require_jobs_schema(con)
-        jobs = con.execute(
-            "SELECT ats,id,company,title,description FROM jobs ORDER BY ats,id"
+        con.execute(
+            "CREATE TABLE preparation.source ("
+            "block_ats TEXT,block_company TEXT,block_title TEXT,"
+            "ats TEXT,id TEXT,company TEXT,title TEXT,description TEXT,"
+            "PRIMARY KEY(block_ats,block_company,block_title,ats,id)) WITHOUT ROWID"
         )
-        family_rows, member_rows = _build_rows(jobs)
-        provisional_clusters = _template_components(family_rows)
+        con.executemany(
+            "INSERT INTO preparation.source VALUES (?,?,?,?,?,?,?,?)",
+            ((normalize_text(row[0]), normalize_text(row[2]), normalize_text(row[3]), *row)
+             for row in con.execute("SELECT ats,id,company,title,description FROM jobs")
+             if row[0] is not None and str(row[0]) and row[1] is not None and str(row[1])),
+        )
+        source = con.execute(
+            "SELECT * FROM preparation.source "
+            "ORDER BY block_ats,block_company,block_title,ats,id"
+        )
+        family_rows = []
+        member_rows = []
+        provisional_clusters = {}
+        for _, block in groupby(source, key=lambda row: tuple(row[:3])):
+            block_families, block_members = _build_rows(block)
+            provisional_clusters.update(_template_components(block_families))
+            for family in block_families:
+                description = str(family.pop("description_normalized"))
+                family["leakage_group_id"] = (
+                    _identifier("leak", "exact-description", [description]) if description
+                    else _identifier("leak", "empty-singleton", [family["family_id"]])
+                )
+            family_rows.extend(block_families)
+            member_rows.extend(block_members)
         cluster_by_family = _stable_template_lineages(
             con, provisional_clusters, member_rows,
         )
         template_rows = []
         for family in family_rows:
             family_id = str(family["family_id"])
-            description = str(family["description_normalized"])
-            if description:
-                leakage_id = _identifier("leak", "exact-description", [description])
-            else:
-                leakage_id = _identifier("leak", "empty-singleton", [family_id])
             template_rows.append(
-                (family_id, cluster_by_family[family_id], leakage_id, NORMALIZATION_VERSION)
+                (family_id, cluster_by_family[family_id], str(family["leakage_group_id"]), NORMALIZATION_VERSION)
             )
         _upsert_derived_rows(con, family_rows, member_rows, template_rows)
 

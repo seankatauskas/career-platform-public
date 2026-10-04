@@ -12,6 +12,7 @@ AUTHORITY = "https://login.microsoftonline.com/consumers"
 # a successful grant. Request read-only calendar access; writes remain opt-in.
 BASE_SCOPES = frozenset({"User.Read", "Mail.Read", "Calendars.Read"})
 DRAFT_SCOPES = frozenset(set(BASE_SCOPES) | {"Mail.ReadWrite"})
+SEND_SCOPES = frozenset(set(BASE_SCOPES) | {"Mail.Send"})
 HOLD_SCOPES = frozenset(set(BASE_SCOPES) | {"Calendars.ReadWrite"})
 
 
@@ -181,7 +182,7 @@ def _validate_scopes(scopes: Iterable[str]) -> FrozenSet[str]:
         raise OutlookAuthError("at least one Microsoft Graph scope is required")
     if any(not isinstance(scope, str) or not scope.strip() for scope in result):
         raise OutlookAuthError("Microsoft Graph scopes must be nonempty strings")
-    if result not in {BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES}:
+    if result not in {BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, SEND_SCOPES}:
         raise OutlookAuthError("Microsoft Graph scopes exceed the Outlook capability boundary")
     return result
 

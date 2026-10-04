@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
 import tempfile
 from unittest.mock import patch
@@ -114,6 +115,116 @@ def test_progress_counts_current_families_per_policy_and_handles_missing_state()
         with connect(config.application_db) as con:
             con.execute("UPDATE work_items SET status='succeeded'")
         assert ranking_progress(config)['state'] == 'idle'
+
+
+@contextmanager
+def progress_fixture():
+    with fixture() as (config, store):
+        with sqlite3.connect(config.jobs_db) as con:
+            con.executescript("CREATE TABLE jobs(ats,id,last_seen); INSERT INTO jobs VALUES ('a','1','2026-09-30T12:00:00Z'),('a','2','2026-09-30T12:00:00Z'); CREATE TABLE job_families(family_id,canonical_ats,canonical_job_id); INSERT INTO job_families VALUES ('f1','a','1'),('f2','a','2');")
+        with sqlite3.connect(config.proxy_db) as con:
+            con.executescript("CREATE TABLE proxy_students(policy_id,model_run_id,run_id,trained_at); CREATE TABLE proxy_runs(run_id,created_at); INSERT INTO proxy_runs VALUES ('p','now'); INSERT INTO proxy_students VALUES ('selective','s','p','now'),('broad','b','p','now');")
+        with sqlite3.connect(config.preference_db) as con:
+            con.executescript("CREATE TABLE preference_scores(run_id,family_id); INSERT INTO preference_scores VALUES ('s','f1'),('s','f2'),('b','f1'),('b','f2'); CREATE TABLE preference_state(key PRIMARY KEY,value);")
+        work = request_scan(config, store, 'progress-attempt')
+        with connect(config.application_db) as con:
+            # A retried work item retains its first start; job_runs tracks the active attempt.
+            con.execute("UPDATE work_items SET task_kind='opportunity.preference_refresh',status='running',recovery_revision=3,started_at='2026-09-20T12:00:00Z'")
+            con.execute("INSERT INTO job_runs(run_id,work_id,scheduled_for,started_at) VALUES ('attempt',?,'2026-09-20T12:00:00Z','2026-09-30T12:00:00Z')", (work['work_id'],))
+        yield config
+
+
+def save_progress(config, **changes):
+    with connect(config.application_db) as con:
+        work_id = con.execute("SELECT work_id FROM work_items").fetchone()[0]
+    progress = {'status': 'scoring', 'started_at': '2026-09-30T12:00:01Z',
+                'updated_at': '2026-09-30T12:00:02Z', 'checked_families': 1,
+                'total_families': 2, 'reused': False, 'invocation_work_id': work_id, 'invocation_revision': 3,
+                'policies': {'selective': {'recomputed_families': 0, 'reused_families': 1},
+                             'broad': {'recomputed_families': 1, 'reused_families': 0}}}
+    progress.update(changes)
+    with sqlite3.connect(config.preference_db) as con:
+        con.execute("INSERT OR REPLACE INTO preference_state VALUES ('policy_refresh_progress',?)", (json.dumps(progress),))
+
+
+def test_progress_separates_checks_from_updates_and_never_writes():
+    with progress_fixture() as config:
+        save_progress(config)
+        paths = [config.application_db, config.jobs_db, config.preference_db, config.proxy_db]
+        before = {p: p.read_bytes() for p in paths}
+        files = set(config.jobs_db.parent.iterdir())
+        for _ in range(3):
+            report = ranking_progress(config)
+            assert report['available'] and report['state'] == 'running'
+            assert report['policies']['selective']['unranked_families'] == 0
+            current = report['current_pass']
+            assert current['checked_families'] == 1 and current['total_families'] == 2
+            assert current['policies']['selective'] == {'recomputed_families': 0, 'reused_families': 1}
+            assert current['policies']['broad'] == {'recomputed_families': 1, 'reused_families': 0}
+            assert report['last_pass'] is None
+        assert {p: p.read_bytes() for p in paths} == before
+        assert set(config.jobs_db.parent.iterdir()) == files
+
+
+def test_progress_rejects_stale_attempts_and_invalid_journals_without_losing_coverage():
+    with progress_fixture() as config:
+        for changes in [
+            {'started_at': '2026-09-20T12:00:01Z'},  # Same work item, earlier attempt.
+            {'status': 'succeeded', 'started_at': '2026-09-20T12:00:01Z'},
+            {'started_at': None}, {'updated_at': '2026-09-30T11:59:59Z'},
+            {'updated_at': '2999-01-01T00:00:00Z'}, {'updated_at': 'invalid'},
+            {'updated_at': '2026-09-30T12:00:02'}, {'status': 'failed'},
+            {'sample': True}, {'checked_families': 3}, {'reused': True},
+            {'invocation_work_id': 'different-work'}, {'invocation_revision': 2},
+            {'invocation_revision': None}, {'invocation_revision': True},
+        ]:
+            save_progress(config, **changes)
+            report = ranking_progress(config)
+            assert report['available'] and report['current_pass'] is None, changes
+        for raw in ['broken json', '[]', 'null']:
+            with sqlite3.connect(config.preference_db) as con:
+                con.execute("UPDATE preference_state SET value=?", (raw,))
+            report = ranking_progress(config)
+            assert report['available'] and report['current_pass'] is None
+        save_progress(config, policies=['invalid'])
+        assert ranking_progress(config)['current_pass']['policies'] == {}
+
+
+def test_progress_requires_current_running_attempt_and_ignores_queued_journal():
+    with progress_fixture() as config:
+        save_progress(config)
+        with connect(config.application_db) as con:
+            con.execute("UPDATE work_items SET status='queued'")
+        report = ranking_progress(config)
+        assert report['state'] == 'queued' and report['current_pass'] is None and report['last_pass'] is None
+        with connect(config.application_db) as con:
+            con.execute("UPDATE work_items SET status='running'")
+            con.execute("UPDATE job_runs SET completed_at='2026-09-30T12:00:03Z',outcome='succeeded'")
+        assert ranking_progress(config)['current_pass'] is None
+        with connect(config.application_db) as con:
+            con.execute("DELETE FROM job_runs")
+        assert ranking_progress(config)['current_pass'] is None
+
+
+def test_completed_reuse_has_zero_scanned_families_and_only_matches_its_own_attempt():
+    with progress_fixture() as config:
+        save_progress(config, status='succeeded', checked_families=0, reused=True,
+                      policies={p: {'recomputed_families': 0, 'reused_families': 2} for p in ('selective', 'broad')})
+        with connect(config.application_db) as con:
+            con.execute("UPDATE work_items SET status='succeeded',recovery_revision=4")
+            con.execute("UPDATE job_runs SET completed_at='2026-09-30T12:00:03Z',outcome='succeeded'")
+        report = ranking_progress(config)
+        assert report['state'] == 'idle' and report['current_pass'] is None
+        assert report['last_pass']['checked_families'] == 0 and report['last_pass']['reused'] is True
+        assert report['last_pass']['policies']['selective']['reused_families'] == 2
+        save_progress(config, status='succeeded', updated_at='2026-09-30T12:00:03.900000Z')
+        assert ranking_progress(config)['last_pass'] is not None  # Worker stamp truncates fractions.
+        save_progress(config, status='succeeded', updated_at='2026-09-30T12:00:04Z')
+        assert ranking_progress(config)['last_pass'] is None  # Cannot belong to this completed attempt.
+        with connect(config.application_db) as con:
+            con.execute("UPDATE work_items SET status='running'")
+            con.execute("UPDATE job_runs SET started_at='2026-09-30T12:00:05Z',completed_at=NULL,outcome=NULL")
+        assert ranking_progress(config)['current_pass'] is None
 
 
 def main():

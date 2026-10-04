@@ -1,0 +1,22 @@
+[Unit]
+Description=Collect cached Career Platform billing summaries (explicit opt-in)
+After=network-online.target job-search-data.service
+Wants=network-online.target
+Requires=job-search-data.service
+ConditionPathExists=/opt/job-search/current/job_search/cost_collector.py
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/job-search/current
+ExecStart=/usr/bin/python3 -m job_search.cost_collector --config /etc/job-search/operations.json
+Environment=AWS_MAX_ATTEMPTS=1
+Environment=AWS_PAGER=
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/job-search
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal

@@ -263,59 +263,18 @@ function showView(name) {
   if (!labeling) loadRecommendations();
 }
 
-function formatScore(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "—";
-  return number >= 0 && number <= 1 ? `${Math.round(number * 100)}%` : number.toFixed(3);
-}
-
-function explanationText(explanation) {
-  if (!explanation || typeof explanation !== "object") return "";
-  if (typeof explanation.summary === "string") return explanation.summary;
-  const phrases = explanation.positive_sparse_phrases
-    || explanation.positive_phrases
-    || explanation.sparse_positive_phrases
-    || [];
-  if (Array.isArray(phrases) && phrases.length) {
-    return `Matching signals: ${phrases.slice(0, 5).map((item) => (
-      typeof item === "string" ? item : item.phrase || item.text || ""
-    )).filter(Boolean).join(", ")}.`;
-  }
-  const neighbors = explanation.similar_liked_family_ids
-    || explanation.nearest_liked_examples
-    || explanation.similar_liked
-    || [];
-  if (Array.isArray(neighbors) && neighbors.length) {
-    const names = neighbors.slice(0, 3).map((item) => (
-      typeof item !== "object" || item === null
-        ? ""
-        : item.title && item.company
-          ? `${item.title} at ${item.company}`
-          : item.title || item.company || item.label || ""
-    )).filter(Boolean);
-    if (names.length) return `Similar to jobs you liked: ${names.join(", ")}.`;
-  }
-  return "";
-}
-
 function recommendationCard(job) {
   const card = document.createElement("article");
-  card.className = `recommendation-card ${job.segment || ""}`;
+  card.className = "recommendation-card";
 
   const rank = document.createElement("div");
   rank.className = "recommendation-rank";
   rank.textContent = `#${job.rank}`;
   if (job.policy_id && job.policy_id !== "champion") {
     const policy = document.createElement("span");
-    policy.className = "explore-label";
+    policy.className = "policy-label";
     policy.textContent = job.policy_id;
     rank.append(policy);
-  }
-  if (job.segment === "explore") {
-    const explore = document.createElement("span");
-    explore.className = "explore-label";
-    explore.textContent = "Explore";
-    rank.append(explore);
   }
 
   const title = document.createElement("h2");
@@ -332,31 +291,8 @@ function recommendationCard(job) {
     fact("Employment", job.employmentType),
     fact("Posted", formatDate(job.publishedAt)),
     fact("Variants", String(job.variant_count || 1)),
+    fact("Salary", job.salary?.status),
   ].filter(Boolean));
-
-  const scores = document.createElement("div");
-  scores.className = "score-line";
-  const components = job.score_components || {};
-  [
-    ["Preference", formatScore(job.final_score)],
-    ["Combined", formatScore(job.ranking_score)],
-    ["Semantic", formatScore(components.dense_linear)],
-    ["Neighbors", formatScore(components.dense_neighbor)],
-    ["Lexical", formatScore(components.sparse)],
-    ["Salary", job.salary?.status || "unknown"],
-  ].forEach(([label, value]) => {
-    const item = document.createElement("span");
-    item.append(`${label} `);
-    const strong = document.createElement("strong");
-    strong.textContent = value;
-    item.append(strong);
-    scores.append(item);
-  });
-
-  const reason = document.createElement("p");
-  reason.className = "recommendation-explanation";
-  reason.textContent = explanationText(job.explanation)
-    || "Ranked from your learned interest signals; practical constraints are shown separately.";
 
   const actions = document.createElement("div");
   actions.className = "recommendation-actions";
@@ -383,7 +319,7 @@ function recommendationCard(job) {
     actions.append(button);
   });
 
-  card.append(rank, title, company, facts, scores, reason, actions);
+  card.append(rank, title, company, facts, actions);
   return card;
 }
 

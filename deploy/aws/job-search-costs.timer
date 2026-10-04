@@ -1,0 +1,13 @@
+[Unit]
+Description=Check whether the daily Career Platform billing snapshot is due
+
+[Timer]
+# Hourly wakeups recover after a deployment lock; the collector permits at most
+# one provider attempt per 24 hours. Disabled configuration makes no API calls.
+OnBootSec=10min
+OnCalendar=*-*-* *:15:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -52,6 +52,7 @@ from job_search.sync import OutlookMailCoordinator
 from job_search.system import build_dashboard_controller, build_hermes_sources_from_config
 from job_search.worker import ApprovedActionTaskHandler, OutlookMailTaskHandler
 from tests.test_career_resume import PROFILE, CareerModel, Toolchain
+from scripts.portfolio_demo import write_json_atomic
 
 
 class DemoPdfToolchain(Toolchain):
@@ -306,7 +307,7 @@ def run(args):
                         browser.request("POST", f"/api/v1/applications/{started['application']['application_id']}/submitted", {"resume_decision": "not_tracked"})
                 # Advance external fixture edges separately; all approvals stay in the dashboard.
                 report = {"fixture": True, "dashboard_url": f"http://127.0.0.1:{dashboard.server_address[1]}", "status": "ready", "stage": "discovery"}
-                (root / "demo-status.json").write_text(json.dumps(report))
+                write_json_atomic(root / "demo-status.json", report)
                 print(json.dumps(report), flush=True)
                 sequence = 0
                 try:
@@ -348,7 +349,7 @@ def run(args):
                                 report.pop("error", None)
                             except Exception as exc:
                                 report.update(status="error", error=str(exc), command_id=command["id"])
-                            (root / "demo-status.json").write_text(json.dumps(report))
+                            write_json_atomic(root / "demo-status.json", report)
                         time.sleep(.2)
                 except KeyboardInterrupt:
                     return report
@@ -385,8 +386,20 @@ def run(args):
             assert resume["available"] and resume["provenance"]["binding"] == "submitted"
             mail_results = mcp_call("search_mail", {"query": "Northstar", "limit": 5})
             assert "Northstar" in json.dumps(mail_results)
+            # Production now routes events through shadow attention. This fixture
+            # explicitly activates one current, user-requested reminder to exercise
+            # the receipt-aware delivery transport without historical alert replay.
+            from job_search.contracts import MutationContext
+            attention = core.worker.task_handlers["attention.tick"].ledger.attention
+            prefs = attention.preferences()
+            attention.update_preferences({"shadow": False}, prefs["revision"], MutationContext("fixture-notifications", "user", "fixture"))
+            from job_search.notifications import NotificationIntent
+            due = datetime.now(timezone.utc) + timedelta(minutes=1)
+            reminder = ledger.create_reminder({"application_id": app, "due_at": due.isoformat(timespec="seconds").replace("+00:00", "Z"), "note": "Review your application."}, MutationContext("fixture-reminder", "user", "fixture"))
+            clock[0] = due + timedelta(seconds=1)
+            attention.from_notification(NotificationIntent("reminder.due", "fixture-reminder", "Fixture reminder", "Review your application.", application_id=app, context={"reminder_id": "general:" + reminder["reminder"]["reminder_id"]}))
+            attention.evaluate()
             enqueue(config, "notification.deliver", "delivery")
-            clock[0] = datetime.now(timezone.utc)
             core.tick()
             delivered = ledger.list_notification_outbox(("delivered",))
             assert delivered, ledger.system_health()

@@ -165,6 +165,9 @@ class LedgerStore:
                     if created:
                         state = LedgerStore._project(con, application_id)
                         LedgerStore._insert_feedback_outbox(con, LedgerStore._application(con, application_id), event, utc_now())
+        if state.current_phase is ApplicationPhase.TERMINAL:
+            from .lifecycle.core import close_application_work
+            close_application_work(con, application_id, utc_now())
         return state
 
     @staticmethod
@@ -413,7 +416,7 @@ class LedgerStore:
     def resolve_reply_evidence(
         self, evidence_id: str, application_id: str, account_id: str
     ) -> Mapping[str, Any]:
-        """Resolve a reply target only after the evidence was applied to this app."""
+        """Resolve an incoming reply target through reviewed evidence or explicit linkage."""
 
         validate_identifier(evidence_id, "evidence_id")
         validate_identifier(application_id, "application_id")
@@ -423,14 +426,17 @@ class LedgerStore:
             saved = con.execute(
                 "SELECT e.evidence_id,e.account_id,e.immutable_message_id "
                 "FROM mail_evidence e WHERE e.evidence_id=? AND e.account_id=? "
-                "AND EXISTS ("
+                "AND NOT EXISTS (SELECT 1 FROM lifecycle_mail_observations m WHERE m.evidence_id=e.evidence_id AND m.direction IN ('outbound','draft')) "
+                "AND (EXISTS ("
                 "SELECT 1 FROM event_proposals p "
                 "JOIN application_events a ON a.event_id=p.applied_event_id "
                 "WHERE p.evidence_id=e.evidence_id "
                 "AND p.status IN ('accepted','auto_applied') "
                 "AND a.application_id=?"
-                ")",
-                (evidence_id, account_id, application_id),
+                ") OR EXISTS (SELECT 1 FROM lifecycle_mail_observations m "
+                "JOIN lifecycle_mail_links l USING(observation_id) WHERE m.evidence_id=e.evidence_id "
+                "AND m.account_id=e.account_id AND m.direction='inbound' AND l.application_id=?))",
+                (evidence_id, account_id, application_id, application_id),
             ).fetchone()
             if not saved:
                 raise ContractError(
@@ -843,6 +849,8 @@ class LedgerStore:
                 raise ContractError("temporal proposal was not found")
             if proposal["status"] != "pending":
                 raise ConflictError("temporal proposal has already been decided")
+            if decision == "accepted" and self._application(con, proposal["application_id"])["current_phase"] == "terminal":
+                raise ConflictError("terminal applications cannot accept new schedules or deadlines")
             schedule = None
             reminders = []
             status = decision
@@ -909,6 +917,8 @@ class LedgerStore:
                             con, proposal, kind, due, stamp, schedule_id
                         ))
             elif decision == "accepted":
+                from .lifecycle.core import ensure_deadline_task
+                ensure_deadline_task(con, self, proposal, context, stamp)
                 reminders.append(self._insert_local_reminder(
                     con,
                     proposal,
@@ -952,15 +962,21 @@ class LedgerStore:
         stamp: str,
         schedule_id: Optional[str],
     ) -> Mapping[str, Any]:
-        parse_utc(due_at)
+        due = parse_utc(due_at)
         reminder_id = _new_id()
+        # A reviewed historical deadline is useful application evidence, but its
+        # overdue alert was never scheduled prospectively. Keep the reminder for
+        # audit without enqueueing a notification when the old mail is accepted.
+        historical = kind == "deadline" and due < parse_utc(stamp)
         con.execute(
             "INSERT INTO local_reminders "
             "(reminder_id,temporal_proposal_id,interview_schedule_id,application_id,"
-            "kind,due_at,status,created_at) VALUES (?,?,?,?,?,?,'pending',?)",
+            "kind,due_at,status,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 reminder_id, proposal["temporal_proposal_id"], schedule_id,
-                proposal["application_id"], kind, due_at, stamp,
+                proposal["application_id"], kind, due_at,
+                "dismissed" if historical else "pending", stamp,
+                stamp if historical else None,
             ),
         )
         return _row(con.execute(
@@ -982,13 +998,36 @@ class LedgerStore:
                 (*selected, limit),
             ))
 
-    def list_interview_schedules(self, *, limit: int = 200) -> Sequence[Mapping[str, Any]]:
-        if not 1 <= limit <= 1000:
+    def list_interview_schedules(
+        self, *, limit: int = 200, application_id: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None, starts_after: Optional[str] = None,
+        starts_before: Optional[str] = None, offset: int = 0,
+    ) -> Sequence[Mapping[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise ContractError("interview schedule limit is invalid")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ContractError("interview schedule offset is invalid")
+        clauses, args = [], []
+        if application_id:
+            validate_identifier(application_id, "application_id")
+            clauses.append("application_id=?")
+            args.append(application_id)
+        normalized = tuple(dict.fromkeys(statuses or ()))
+        if any(value not in {"active", "cancelled", "completed"} for value in normalized):
+            raise ContractError("invalid interview schedule status")
+        if normalized:
+            clauses.append("status IN (" + ",".join("?" for _ in normalized) + ")")
+            args.extend(normalized)
+        for column, value in (("starts_at>=?", starts_after), ("starts_at<=?", starts_before)):
+            if value:
+                parse_utc(value)
+                clauses.append(column)
+                args.append(value)
         with connect(self.db_path) as con:
             return tuple(_row(row) for row in con.execute(
                 "SELECT * FROM accepted_interview_schedules "
-                "ORDER BY starts_at,interview_schedule_id LIMIT ?", (limit,)
+                + ("WHERE " + " AND ".join(clauses) + " " if clauses else "")
+                + "ORDER BY starts_at,interview_schedule_id LIMIT ? OFFSET ?", (*args, limit, offset)
             ))
 
     def list_due_local_reminders(
@@ -1373,8 +1412,15 @@ class LedgerStore:
                 if not application_id:
                     raise ContractError("acceptance requires an application selection")
                 candidates = json.loads(proposal["candidate_application_ids_json"])
+                if not proposal["proposed_application_id"]:
+                    # The browser may have delivered the application after this
+                    # email was processed. Resolve review choices from current
+                    # local evidence, without another provider call or auto-link.
+                    candidates = self._unassigned_mail_candidates(proposal["evidence_id"])
                 if candidates and application_id not in candidates:
                     raise ContractError("selected application is not a proposal candidate")
+                if not proposal["proposed_application_id"] and application_id not in candidates:
+                    raise ContractError("selected application has no supporting mail identity")
                 application = self._application(con, application_id)
                 event_type = ApplicationEventType(proposal["event_type"])
                 incoming_outcome = self._terminal_outcome(event_type)
@@ -1396,7 +1442,11 @@ class LedgerStore:
                     source_ref=proposal_id,
                 )
                 payload = json.loads(proposal["payload_json"])
-                occurred_at = payload.get("occurred_at", stamp)
+                evidence = con.execute(
+                    "SELECT received_at FROM mail_evidence WHERE evidence_id=?",
+                    (proposal["evidence_id"],),
+                ).fetchone()
+                occurred_at = payload.get("occurred_at") or (evidence["received_at"] if evidence else stamp)
                 parse_utc(occurred_at)
                 saved_event, created = self._append_event(
                     con,
@@ -1420,6 +1470,11 @@ class LedgerStore:
                     "decided_at=? WHERE proposal_id=?",
                     (saved_event["event_id"], stamp, proposal_id),
                 )
+                if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
+                    from .lifecycle.mail import link_accepted_evidence
+                    link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
+                from .lifecycle.core import ensure_event_task
+                ensure_event_task(con, self, saved_event, proposal["evidence_id"], stamp)
             else:
                 con.execute(
                     "UPDATE event_proposals SET status='rejected',decided_at=? "
@@ -1529,6 +1584,11 @@ class LedgerStore:
                 "automation_policy_id=?,decided_at=? WHERE proposal_id=?",
                 (event["event_id"], automation_policy_id, stamp, proposal_id),
             )
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
+                from .lifecycle.mail import link_accepted_evidence
+                link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
+            from .lifecycle.core import ensure_event_task
+            ensure_event_task(con, self, event, proposal["evidence_id"], stamp)
             # A newer rule can resolve an older pending match for the same evidence.
             # Keep the old proposal as audit history without leaving duplicate review work.
             con.execute(
@@ -2178,10 +2238,22 @@ class LedgerStore:
             ).fetchone()
             if not saved:
                 raise ContractError("reminder not found")
-            if saved["status"] == "cancelled":
+            queued = con.execute(
+                "SELECT notification_id FROM notification_outbox WHERE topic='reminder.due' "
+                "AND application_id=? AND json_extract(context_json,'$.reminder_id') IN (?,?) "
+                "AND status IN ('pending','delivering')",
+                (saved["application_id"], reminder_id, "general:" + reminder_id),
+            ).fetchall()
+            if saved["status"] == "cancelled" and not queued:
                 return {"cancelled": False, "reminder": _row(saved)}
-            if saved["status"] != "scheduled":
-                raise ConflictError("only a scheduled reminder can be cancelled")
+            if saved["status"] == "completed" and not queued:
+                raise ConflictError("delivered reminder cannot be cancelled")
+            for notification in queued:
+                con.execute(
+                    "UPDATE notification_outbox SET status='cancelled',lease_owner=NULL,"
+                    "lease_token=NULL,lease_expires_at=NULL WHERE notification_id=?",
+                    (notification["notification_id"],),
+                )
             con.execute(
                 "UPDATE reminders SET status='cancelled',cancelled_at=? "
                 "WHERE reminder_id=?",
@@ -2354,6 +2426,12 @@ class LedgerStore:
         con = connect(self.db_path)
         try:
             con.execute("BEGIN IMMEDIATE")
+            control = con.execute(
+                "SELECT enabled FROM automation_controls WHERE capability='notifications'"
+            ).fetchone()
+            if control is not None and not control["enabled"]:
+                con.commit()
+                return None
             con.execute(
                 "UPDATE notification_outbox SET status='dead',lease_owner=NULL,"
                 "lease_token=NULL,lease_expires_at=NULL,"
@@ -2369,14 +2447,17 @@ class LedgerStore:
                 "AND attempts<max_attempts",
                 (now,),
             )
-            saved = con.execute(
+            candidates = con.execute(
                 "SELECT * FROM notification_outbox WHERE status='pending' "
                 "AND attempts<max_attempts AND available_at<=? "
                 "ORDER BY available_at,created_at,notification_id "
-                "LIMIT 1",
+                "LIMIT 100",
                 (now,),
-            ).fetchone()
-            if not saved:
+            ).fetchall()
+            from .attention import AttentionService
+            saved = next((row for row in candidates
+                          if AttentionService.validate_delivery(con, dict(row), now)), None)
+            if saved is None:
                 con.commit()
                 return None
             lease_token = _new_id()
@@ -2398,6 +2479,37 @@ class LedgerStore:
             raise
         finally:
             con.close()
+
+    def defer_notification_for_receipt(self, notification_id, lease_token, now, retry_at):
+        """A queued Telegram ticket is not a failed send or a delivery receipt."""
+        parse_utc(now)
+        parse_utc(retry_at)
+        with connect(self.db_path) as con:
+            con.execute("BEGIN IMMEDIATE")
+            saved = con.execute("SELECT status,lease_token FROM notification_outbox WHERE notification_id=?", (notification_id,)).fetchone()
+            if saved is None:
+                raise ContractError("notification not found")
+            if saved['status'] in ('delivered', 'cancelled', 'dead'):
+                return saved['status']
+            if saved['status'] != 'delivering' or saved['lease_token'] != lease_token:
+                raise ConflictError("notification lease changed")
+            con.execute("UPDATE notification_outbox SET status='pending',available_at=?,attempts=MAX(0,attempts-1),lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE notification_id=?", (retry_at,notification_id))
+            return 'pending'
+
+    def validate_notification_claim(self, notification_id: str, lease_token: str, now: str) -> bool:
+        """Recheck authorization and source relevance immediately before external I/O."""
+        parse_utc(now)
+        with connect(self.db_path) as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM notification_outbox WHERE notification_id=?", (notification_id,)).fetchone()
+            if row is None or row['status'] != 'delivering' or row['lease_token'] != lease_token or row['lease_expires_at'] <= now:
+                return False
+            control = con.execute("SELECT enabled FROM automation_controls WHERE capability='notifications'").fetchone()
+            if control is not None and not control['enabled']:
+                con.execute("UPDATE notification_outbox SET status='pending',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE notification_id=?", (notification_id,))
+                return False
+            from .attention import AttentionService
+            return AttentionService.validate_delivery(con, dict(row), now)
 
     def complete_notification(
         self,
@@ -2577,22 +2689,35 @@ class LedgerStore:
     ) -> Sequence[Mapping[str, Any]]:
         """Read application history for local retrieval before bounding model context."""
         with connect(self.db_path) as con:
-            return [_row(row) for row in con.execute(
+            rows = [_row(row) for row in con.execute(
                 "SELECT a.*, "
                 "(SELECT b.created_at FROM browser_attempts b WHERE b.application_id=a.application_id "
                 "AND julianday(b.created_at)<=julianday(?) ORDER BY julianday(b.created_at) DESC LIMIT 1) "
                 "AS submission_attempted_at, "
                 "EXISTS(SELECT 1 FROM event_proposals p JOIN mail_evidence e USING(evidence_id) "
-                "WHERE p.proposed_application_id=a.application_id AND p.status IN ('accepted','auto_applied') "
+                "JOIN application_events ae ON ae.event_id=p.applied_event_id "
+                "WHERE ae.application_id=a.application_id AND p.status IN ('accepted','auto_applied') "
+                "AND NOT EXISTS(SELECT 1 FROM lifecycle_mail_observations o WHERE o.evidence_id=e.evidence_id) "
                 "AND e.account_id=? AND e.conversation_id=? AND ?<>'') AS same_conversation, "
                 "EXISTS(SELECT 1 FROM event_proposals p JOIN mail_evidence e USING(evidence_id) "
-                "WHERE p.proposed_application_id=a.application_id AND p.status IN ('accepted','auto_applied') "
+                "JOIN application_events ae ON ae.event_id=p.applied_event_id "
+                "WHERE ae.application_id=a.application_id AND p.status IN ('accepted','auto_applied') "
+                "AND (NOT EXISTS(SELECT 1 FROM lifecycle_mail_observations o WHERE o.evidence_id=e.evidence_id) "
+                "OR EXISTS(SELECT 1 FROM lifecycle_mail_observations o JOIN lifecycle_mail_links l USING(observation_id) "
+                "WHERE o.evidence_id=e.evidence_id AND l.application_id=a.application_id)) "
                 "AND e.account_id=? AND lower(e.sender)=lower(?) AND ?<>'') AS same_sender "
                 "FROM applications a WHERE a.submitted_at IS NOT NULL OR a.confirmed_at IS NOT NULL "
-                "OR EXISTS(SELECT 1 FROM browser_attempts b WHERE b.application_id=a.application_id) "
+                "OR a.ats='external' OR EXISTS(SELECT 1 FROM lifecycle_mail_links l WHERE l.application_id=a.application_id) OR EXISTS(SELECT 1 FROM browser_attempts b WHERE b.application_id=a.application_id) "
                 "ORDER BY a.updated_at DESC,a.application_id",
                 (received_at, account_id, conversation_id, conversation_id, account_id, sender, sender),
             )]
+
+            if conversation_id and account_id:
+                thread = payload_sha256({'account': account_id, 'conversation': conversation_id})
+                linked = {r[0] for r in con.execute('SELECT DISTINCT application_id FROM lifecycle_mail_links JOIN lifecycle_mail_observations USING(observation_id) WHERE account_id=? AND conversation_ref=?', (account_id, thread))}
+                for row in rows:
+                    row['same_conversation'] = bool(row['same_conversation'] or row['application_id'] in linked)
+            return rows
 
     def application_job_keys(self) -> Sequence[Tuple[str, str]]:
         with connect(self.db_path) as con:
@@ -2602,6 +2727,24 @@ class LedgerStore:
                     "SELECT ats,job_id FROM applications ORDER BY ats,job_id"
                 )
             ]
+
+    def recent_company_applications(self) -> Sequence[Mapping[str, Any]]:
+        """Actual submissions in the rolling 180-day window, newest first.
+
+        Keep terminal applications and avoid the paginated application-list limit.
+        A later confirmation must not renew an older submission's window.
+        """
+        now = parse_utc(utc_now())
+        cutoff = now - timedelta(days=180)
+        with connect(self.db_path) as con:
+            return [_row(row) for row in con.execute(
+                "SELECT application_id,ats,employer_snapshot,company_slug_snapshot,"
+                "COALESCE(submitted_at,confirmed_at) AS applied_at,180 AS window_days "
+                "FROM applications WHERE julianday(COALESCE(submitted_at,confirmed_at)) "
+                "BETWEEN julianday(?) AND julianday(?) "
+                "ORDER BY julianday(COALESCE(submitted_at,confirmed_at)) DESC,application_id",
+                (cutoff.isoformat(), now.isoformat()),
+            )]
 
     def list_actions(
         self, statuses: Optional[Sequence[str]] = None
@@ -2780,6 +2923,24 @@ class LedgerStore:
             return {"status":status, "action":action, "message_id":message_id}
         return self._idempotent("resolve_mail_failure", context, request, operation)
 
+    def _unassigned_mail_candidates(self, evidence_id: str) -> list[str]:
+        from .mail.context import CandidateApplication
+        from .mail.identity import supported_candidates
+        from .mail.matching import rank_mail_candidates
+        evidence = self.get_mail_evidence(evidence_id)
+        rows = rank_mail_candidates(self.list_mail_candidates(
+            received_at=evidence['received_at'], account_id=evidence['account_id'],
+            conversation_id=evidence['conversation_id'], sender=evidence['sender'],
+        ), evidence['excerpt'])
+        candidates = [CandidateApplication(
+            application_id=row['application_id'], ats=row['ats'], job_id=row['job_id'],
+            employer=row['employer_snapshot'], company_slug=row['company_slug_snapshot'],
+            title=row['title_snapshot'], phase=row['current_phase'],
+            match_context=row['mail_match_context'],
+        ) for row in rows]
+        return [c.application_id for c in supported_candidates(
+            candidates, evidence['subject'], evidence['excerpt'])][:20]
+
     def list_attention_items(self) -> Sequence[Mapping[str, Any]]:
         with connect(self.db_path) as con:
             rows: List[Mapping[str, Any]] = []
@@ -2788,7 +2949,7 @@ class LedgerStore:
                     "status": "review", "detail": "Submission has not been confirmed. Check the employer page or wait for a confirmation email.",
                     "created_at": attempt["created_at"], "employer": attempt["employer_snapshot"], "title": attempt["title_snapshot"]})
             for proposal in con.execute(
-                "SELECT proposal_id,proposed_application_id,event_type,confidence,"
+                "SELECT proposal_id,evidence_id,proposed_application_id,event_type,confidence,"
                 "evidence_quote,candidate_application_ids_json,created_at "
                 "FROM event_proposals WHERE status IN ('pending','conflict') "
                 "ORDER BY created_at,proposal_id"
@@ -2802,7 +2963,8 @@ class LedgerStore:
                         "detail": proposal["event_type"],
                         "confidence": proposal["confidence"],
                         "evidence_quote": proposal["evidence_quote"],
-                        "candidate_application_ids": json.loads(
+                        "candidate_application_ids": self._unassigned_mail_candidates(proposal['evidence_id'])
+                        if not proposal['proposed_application_id'] else json.loads(
                             proposal["candidate_application_ids_json"]
                         ),
                         "created_at": proposal["created_at"],

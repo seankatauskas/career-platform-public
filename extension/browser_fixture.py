@@ -67,10 +67,20 @@ document.querySelector('form').addEventListener('submit', async e=>{
  e.preventDefault(); window.submitCount++;
  const mode=new URL(location.href).searchParams.get('outcome');
  const parts=location.pathname.split('/').filter(Boolean);
- let endpoint=location.hostname.includes('lever') ? location.pathname+'/apply' : location.hostname.includes('ashby') ? '/api/non-user-graphql?op=ApiSubmitApplication' : '/applications';
+ let endpoint=location.hostname.includes('lever') ? location.pathname+'/apply' : location.hostname.includes('ashby') ? '/api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction' : '/applications';
+ if(mode==='embed_redirect') endpoint='/embed/acme/jobs/'+new URL(location.href).searchParams.get('token');
  const response=await fetch(endpoint+(endpoint.includes('?')?'&':'?')+'fixture_status='+(mode==='failed'?'500':'200'),{method:'POST',body:'{}',headers:{'Content-Type':'application/json'}});
  if(mode==='uncertain') return;
  if(mode==='redirect' && response.ok) {location.assign(location.pathname+'/confirmation'); return;}
+ if(mode==='embed_redirect' && response.ok) {
+   const params=new URLSearchParams(location.search);
+   location.assign('/embed/job_app/confirmation?for='+params.get('for')+'&token='+params.get('token'));
+   return;
+ }
+ if(location.hostname.includes('ashby') && response.ok) {
+   document.querySelector('#outcome').outerHTML='<div class="ashby-application-form-success-container"><div role="status" aria-live="polite"><h2>Success</h2><p>Thank you for applying to Acme! We will review your application.</p></div></div>';
+   return;
+ }
  document.querySelector('#outcome').textContent=response.ok ? 'Your application has been submitted.' : 'Unable to submit application.';
 });</script></body></html>"""
 

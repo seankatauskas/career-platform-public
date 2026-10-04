@@ -1369,6 +1369,87 @@ def test_proxy_policy_compare_and_passive_feedback_snapshots() -> None:
         assert stored[3] == result["session_id"]
 
 
+def test_derived_sparse_policy_requires_a_complete_matching_refresh() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        db = make_database(directory)
+        model_db = Path(directory) / "jobs-preference.db"
+        proxy_db = Path(directory) / "jobs-proxy.db"
+        seed_families_and_model(db, model_db)
+        backfill_locations(db)
+        with sqlite3.connect(proxy_db) as con:
+            con.executescript("""
+                CREATE TABLE proxy_runs (run_id TEXT,created_at TEXT);
+                CREATE TABLE proxy_students (run_id TEXT,policy_id TEXT,model_run_id TEXT,trained_at TEXT);
+                INSERT INTO proxy_runs VALUES ('proxy-1','2026-01-01');
+                INSERT INTO proxy_students VALUES ('proxy-1','selective','run-1','2026-01-02');
+            """)
+        with sqlite3.connect(model_db) as con:
+            con.execute("UPDATE preference_model_runs SET manifest_json=?", (
+                json.dumps({"derivation": {"kind": "sparse_component", "source_run_id": "old-run"}}),
+            ))
+        options = _recommendation_options({"limit": ["2"], "policy": ["selective"]})
+
+        def result_for(receipt):
+            with sqlite3.connect(model_db) as con:
+                con.execute("INSERT OR REPLACE INTO preference_state VALUES (?,?)", (
+                    "policy_refresh:selective", json.dumps(receipt),
+                ))
+            return policy_recommendations(db, model_db, proxy_db, options)
+
+        for receipt in (None, [], {"run_id": "old-run", "result": {"scored_families": 2}},
+                        {"run_id": "run-1", "result": {"scored_families": 1}},
+                        {"run_id": "run-1", "result": {"scored_families": True}}):
+            result = result_for(receipt)
+            assert not result["model"]["ready"], receipt
+            assert result["model"]["reason"] == "awaiting_complete_policy_refresh"
+            assert result["recommendations"] == []
+
+        complete = {"run_id": "run-1", "result": {"scored_families": 2}}
+        result = result_for(complete)
+        assert result["model"]["ready"] and result["recommendations"]
+        # Matching row counts alone do not establish coverage of the current families.
+        with sqlite3.connect(model_db) as con:
+            con.execute("UPDATE preference_scores SET family_id='obsolete-family' WHERE family_id='family-accounting'")
+        result = result_for(complete)
+        assert not result["model"]["ready"] and not result["recommendations"]
+        with sqlite3.connect(model_db) as con:
+            con.execute("DELETE FROM preference_scores WHERE family_id='obsolete-family'")
+        result = result_for(complete)
+        assert not result["model"]["ready"] and not result["recommendations"]
+
+
+def test_compare_withholds_incomplete_derived_policy_and_keeps_ready_policy() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        db = make_database(directory)
+        model_db = Path(directory) / "jobs-preference.db"
+        proxy_db = Path(directory) / "jobs-proxy.db"
+        seed_families_and_model(db, model_db)
+        backfill_locations(db)
+        with sqlite3.connect(model_db) as con:
+            con.execute("INSERT INTO preference_model_runs SELECT 'run-2',created_at,model_revision,"
+                        "text_version,training_examples,manifest_json,artifact_path FROM preference_model_runs")
+            con.execute("INSERT INTO preference_scores SELECT 'run-2',family_id,dense_linear_score,"
+                        "dense_neighbor_score,sparse_score,final_score,explanation_json,scored_at FROM preference_scores")
+            con.execute("UPDATE preference_model_runs SET manifest_json=? WHERE run_id='run-1'", (
+                json.dumps({"derivation": {"kind": "sparse_component"}}),
+            ))
+        with sqlite3.connect(proxy_db) as con:
+            con.executescript("""
+                CREATE TABLE proxy_runs (run_id TEXT,created_at TEXT);
+                CREATE TABLE proxy_students (run_id TEXT,policy_id TEXT,model_run_id TEXT,trained_at TEXT);
+                INSERT INTO proxy_runs VALUES ('proxy-1','2026-01-01');
+                INSERT INTO proxy_students VALUES ('proxy-1','selective','run-1','2026-01-02');
+                INSERT INTO proxy_students VALUES ('proxy-1','broad','run-2','2026-01-02');
+            """)
+        options = _recommendation_options({"limit": ["2"], "policy": ["compare"]})
+        result = policy_recommendations(db, model_db, proxy_db, options)
+        assert not result["model"]["ready"]
+        assert not result["model"]["policies"]["selective"]["ready"]
+        assert result["model"]["policies"]["broad"]["ready"]
+        assert result["recommendations"]
+        assert {row["policy_id"] for row in result["recommendations"]} == {"broad"}
+
+
 def test_terminal_feedback_suppresses_family_but_saved_does_not() -> None:
     with tempfile.TemporaryDirectory() as directory:
         db = make_database(directory)
@@ -1407,8 +1488,10 @@ def test_ui_submits_the_expanded_label_shape() -> None:
     assert 'id="stage-progress-bar"' in page
     assert 'id="recommendations-view"' in page
     assert "/api/recommendation-feedback" in script
-    assert "positive_sparse_phrases" in script
-    assert "similar_liked_family_ids" in script
+    # Legacy labeling/recommendation views must not bias judgments with model diagnostics.
+    assert "positive_sparse_phrases" not in script
+    assert "similar_liked_family_ids" not in script
+    assert "score-line" not in script
     for action in (
         "applied", "saved", "dismissed_preference", "blocked", "duplicate",
     ):

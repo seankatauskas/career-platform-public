@@ -13,24 +13,31 @@ import subprocess
 import tempfile
 
 
+def fixture_environment(directory):
+    """Supply isolated values for every required Compose setting."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("JOB_SEARCH_")}
+    env.update({k: directory for k in (
+        "JOB_SEARCH_MAINTENANCE_DIR", "JOB_SEARCH_STATE_DIR", "JOB_SEARCH_PRIVATE_DIR",
+        "JOB_SEARCH_COST_DIR", "JOB_SEARCH_TOOLCHAIN_DIR", "JOB_SEARCH_TOOL_RUNTIME_DIR",
+        "JOB_SEARCH_NOTIFICATION_RUNTIME_DIR", "JOB_SEARCH_HERMES_DATA_DIR",
+        "JOB_SEARCH_MCP_TOKEN_FILE")})
+    env.update(JOB_SEARCH_HERMES_BASE_IMAGE="fixture/base@sha256:" + "a" * 64,
+               JOB_SEARCH_NOTIFICATION_TARGET="fixture", JOB_SEARCH_TECTONIC_VERSION="fixture")
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path, default=Path(".cache/hermes-healthcheck.json"))
     args = parser.parse_args()
-    report = {"passed": False, "scope": "healthcheck executable and unavailable-bridge rejection; no gateway, credentials or network"}
+    report = {"passed": False, "scope": "healthcheck, private handoff, and native chief plugin contracts; fictional credentials only, no gateway or network"}
     try:
         image = json.loads(subprocess.check_output(["docker", "image", "inspect", args.image], text=True, timeout=20))[0]
         report["image_id"] = image["Id"]
         with tempfile.TemporaryDirectory(prefix="hermes-healthcheck-") as temp:
-            env = {k: v for k, v in os.environ.items() if not k.startswith("JOB_SEARCH_")}
-            env.update({k: temp for k in (
-                "JOB_SEARCH_MAINTENANCE_DIR", "JOB_SEARCH_STATE_DIR", "JOB_SEARCH_PRIVATE_DIR",
-                "JOB_SEARCH_TOOLCHAIN_DIR", "JOB_SEARCH_TOOL_RUNTIME_DIR", "JOB_SEARCH_NOTIFICATION_RUNTIME_DIR",
-                "JOB_SEARCH_HERMES_DATA_DIR", "JOB_SEARCH_MCP_TOKEN_FILE")})
-            env.update(JOB_SEARCH_HERMES_BASE_IMAGE="fixture/base@sha256:" + "a" * 64,
-                       JOB_SEARCH_NOTIFICATION_TARGET="fixture", JOB_SEARCH_TECTONIC_VERSION="fixture")
+            env = fixture_environment(temp)
             spec = json.loads(subprocess.check_output([
                 "docker", "compose", "-f", str(args.repo / "compose.cloud.yaml"),
                 "-f", str(args.repo / "compose.hermes.yaml"), "config", "--format", "json"
@@ -96,6 +103,20 @@ assert subprocess.run(hook,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).
             if private.returncode:
                 raise RuntimeError("Hermes private config permission check failed: " + private.stderr[-2000:])
             report["private_config_permissions"] = True
+            for script, user, key in (
+                ('native_hermes_contract.py', 'hermes', 'native_chief_plugin'),
+                ('native_hermes_init_contract.py', '0:0', 'native_chief_private_handoff'),
+            ):
+                command = probe[:probe.index('--entrypoint')]
+                command.extend(['--user', user, '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,mode=1777',
+                                '--env', 'PYTHONDONTWRITEBYTECODE=1',
+                                '--volume', str(args.repo.resolve()) + ':/work:ro',
+                                '--entrypoint', '/opt/hermes/.venv/bin/python', image['Id'],
+                                '/work/tests/' + script])
+                native = subprocess.run(command, text=True, capture_output=True, timeout=60)
+                if native.returncode:
+                    raise RuntimeError(script + ' failed: ' + native.stderr[-2000:])
+                report[key] = True
             report["passed"] = True
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         report["error"] = str(error)

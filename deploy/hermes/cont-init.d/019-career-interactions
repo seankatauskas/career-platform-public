@@ -1,0 +1,8 @@
+#!/command/with-contenv sh
+set -eu
+if [ -z "${JOB_SEARCH_INTERACTION_URL:-}" ]; then
+  exit 0
+fi
+/opt/hermes/.venv/bin/python /opt/job-search-hermes/interaction_bootstrap.py --install-runtime-token
+export JOB_SEARCH_INTERACTION_TOKEN_FILE=/run/job-search-interactions/token
+exec /command/s6-setuidgid hermes /opt/hermes/.venv/bin/python /opt/job-search-hermes/interaction_bootstrap.py

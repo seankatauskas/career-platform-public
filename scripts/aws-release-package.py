@@ -19,8 +19,8 @@ import tarfile
 
 
 ROOT_FILES = frozenset({
-    "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "Dockerfile", "Dockerfile.hermes", ".dockerignore", "requirements/cloud.txt",
-    "job_search/collection/boards.seed.json", "scripts/job-search-ops",
+    "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "compose.chief.yaml", "compose.briefing.yaml", "Dockerfile", "Dockerfile.hermes", "Dockerfile.codex-review", "Dockerfile.codex-review.dockerignore", ".dockerignore", "requirements/cloud.txt",
+    "job_search/collection/boards.seed.json", "job_search/job_reviews/reviewer_rubric.md", "scripts/job-search-ops",
     "scripts/job-search-seed",
 })
 IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}")
@@ -57,6 +57,8 @@ def build(repo: Path, output: Path, metadata: dict, *, evidence: dict | None = N
     for key in ("app_image", "hermes_image", "hermes_base_image"):
         if not IMAGE.fullmatch(metadata.get(key, "")):
             raise ValueError("all images must be pinned to SHA256 digests")
+    if "reviewer_image" in metadata and (not IMAGE.fullmatch(metadata["reviewer_image"]) or metadata["reviewer_image"].split("@", 1)[0] != metadata["app_image"].split("@", 1)[0]):
+        raise ValueError("reviewer image must use the pinned application repository")
     policy = validate_policy(json.loads(git(repo, "show", source + ":deploy/release-policy.json")))
     validate_evidence(policy, source, evidence)
     if "schema_compatibility" in metadata and metadata["schema_compatibility"] != policy["schema_compatibility"]:
@@ -116,6 +118,7 @@ def main() -> None:
     for field in ("release-id", "source-sha", "app-image", "hermes-image", "hermes-base-image",
                   "tectonic-version"):
         parser.add_argument("--" + field, required=True)
+    parser.add_argument("--reviewer-image", required=True)
     args = vars(parser.parse_args())
     repo, output = args.pop("repo"), args.pop("output")
     evidence = json.loads(args.pop("transition_evidence").read_text())

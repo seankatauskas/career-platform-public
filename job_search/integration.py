@@ -578,10 +578,11 @@ def make_hermes_sources(
     resume: Optional[ResumeLabGateway] = None,
     readiness: Optional[Any] = None,
     curated: Optional[Any] = None,
+    reviews: Optional[Any] = None,
 ) -> HermesSources:
     """The single explicit assembly point for the chief-of-staff capabilities."""
 
-    return HermesSources(jobs, shortlist, ledger, mail, proposals, resume, readiness=readiness, curated=curated)
+    return HermesSources(jobs, shortlist, ledger, mail, proposals, resume, readiness=readiness, curated=curated, reviews=reviews)
 
 
 __all__ = [

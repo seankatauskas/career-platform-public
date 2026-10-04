@@ -14,6 +14,18 @@ resource "aws_iam_instance_profile" "host" {
   name = "${var.name}-host"
   role = aws_iam_role.host.name
 }
+# A separate, opt-in read action, never a billing administrator role. The primary
+# account billing query does not select an explicit billing-view ARN.
+resource "aws_iam_role_policy" "cost_monitor" {
+  count = var.cost_monitor_enabled ? 1 : 0
+  name  = "${var.name}-cost-monitor"
+  role  = aws_iam_role.host.id
+  policy = jsonencode({
+    Version = "2012-10-17", Statement = [{
+      Effect = "Allow", Action = ["ce:GetCostAndUsage"], Resource = "*"
+    }]
+  })
+}
 resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.host.name
   policy_arn = "${local.prefix}:iam::aws:policy/AmazonSSMManagedInstanceCore"

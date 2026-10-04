@@ -8,3 +8,6 @@ for git_local_variable in $(git rev-parse --local-env-vars); do
 done
 python3 -m tests.test_job_search_aws_ops
 python3 scripts/check-system.py --match release --output .cache/pre-commit-release.json
+
+# Lifecycle authority and replay checks are dependency-free and also run in CI.
+python3 scripts/check-system.py --match lifecycle --output .cache/pre-commit-lifecycle.json

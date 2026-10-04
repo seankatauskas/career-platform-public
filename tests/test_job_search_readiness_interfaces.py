@@ -147,6 +147,21 @@ def test_shared_runtime_publishes_snapshot_without_cloud_wrapper():
         assert all(item["status"] == "disabled" for item in observed)
 
 
+def test_paused_ranking_keeps_details_without_stale_health_alarm():
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        config = replace(RuntimeConfigV1.defaults(Path(directory)), shortlist_policy="compare")
+        JobSearchLedger(config.application_db)
+        with sqlite3.connect(config.application_db) as con:
+            con.execute("INSERT OR REPLACE INTO automation_controls VALUES ('ranking',0,1,?)", (datetime.now(timezone.utc).isoformat(),))
+        stale = {"selective": {"status": "stale", "reason": "catalog_or_scores_stale", "artifact_present": True}}
+        with patch("job_search.ranking.refresh.inspect_policies", return_value=stale):
+            report = runtime_readiness(config, dependencies={})
+        item = next(v for v in report["capabilities"] if v["id"] == "ranking_selective")
+        assert item["status"] == "paused" and not item["enabled"]
+        assert report["ranking_policies"]["selective"]["status"] == "stale"
+        assert report["metrics"]["stale_capabilities"] == 0
+
+
 def main():
     tests = [value for name, value in globals().items() if name.startswith("test_")]
     for test in tests:

@@ -155,6 +155,7 @@ class OutlookMailCoordinator:
         self.secure_ingestor = secure_ingestor
         self.received_since = received_since
         self.recruiting_only = recruiting_only
+        self._sent_folders = {}
         if received_since:
             from .contracts import parse_utc
             parse_utc(received_since)
@@ -248,6 +249,13 @@ class OutlookMailCoordinator:
 
         junk = self.mail.read_mail_folder("junkemail")
         deleted = self.mail.read_mail_folder("deleteditems")
+        sent = self.mail.read_mail_folder("sentitems")
+        inbox = self.mail.read_mail_folder("inbox")
+        self._sent_folders[account_id] = sent.folder_id
+        from .db import connect
+        with connect(self.state.db_path) as con:
+            for folder, role in ((sent, 'sentitems'), (inbox, 'inbox')):
+                con.execute('INSERT INTO lifecycle_mail_folders VALUES (?,?,?) ON CONFLICT(account_id,role) DO UPDATE SET folder_id=excluded.folder_id', (account_id, folder.folder_id, role))
         discovered = {item.folder_id: item for item in self.mail.list_folder_tree(
             max_folders=max_folders
         )}
@@ -327,33 +335,39 @@ class OutlookMailCoordinator:
         transient_attempt: int = 1,
         transient_limit: int = 5,
         heartbeat: Optional[Callable[[], bool]] = None,
+        _replay_rows=None,
     ) -> ProcessingResult:
         if not 1 <= transient_attempt <= transient_limit <= 20:
             raise ValueError("invalid transient mail attempt bounds")
         processed = ignored = failed = proposed = auto_applied = 0
         pending_options = {"query_version":query_version}
-        if self.received_since: pending_options["received_since"] = self.received_since
-        for staged in self.state.pending_messages(limit, **pending_options):
+        historical = _replay_rows is not None
+        if self.received_since and not historical: pending_options["received_since"] = self.received_since
+        rows = _replay_rows if historical else self.state.pending_messages(limit, **pending_options)
+        def mark(*args, **kwargs):
+            if not historical:
+                self.state.mark_message(*args, **kwargs)
+        for staged in rows:
             identity = (
                 str(staged["account_id"]),
                 str(staged["folder_ref"]),
                 str(staged["immutable_message_id"]),
             )
-            if self.received_since:
+            if self.received_since and not historical:
                 from .contracts import parse_utc
                 try:
                     eligible = bool(staged["received_at"]) and parse_utc(str(staged["received_at"])) >= parse_utc(self.received_since)
                 except ValueError:
                     eligible = False
                 if not eligible:
-                    self.state.mark_message(*identity, "ignored", query_version=query_version)
+                    mark(*identity, "ignored", query_version=query_version)
                     ignored += 1
                     if heartbeat is not None and not heartbeat():
                         raise RuntimeError("Outlook sync worker lease was lost")
                     continue
             from .mail.rules import is_application_verification_email
             if is_application_verification_email(str(staged["sender"]), str(staged["subject"])):
-                self.state.mark_message(*identity, "ignored", query_version=query_version)
+                mark(*identity, "ignored", query_version=query_version)
                 ignored += 1
                 if heartbeat is not None and not heartbeat():
                     raise RuntimeError("Outlook mail worker lease was lost")
@@ -370,7 +384,7 @@ class OutlookMailCoordinator:
                 )
                 recruiting = any(item.match_context for item in context)
             if not recruiting and (self.recruiting_only or self.secure_ingestor is None):
-                self.state.mark_message(
+                mark(
                     *identity, "ignored", query_version=query_version
                 )
                 ignored += 1
@@ -379,30 +393,68 @@ class OutlookMailCoordinator:
                 continue
             try:
                 payload = self.mail.read_message_body(identity[2])
+                # Gate drafts before archiving or invoking either classifier. Draft
+                # edits return to pending through modified_at and are checked again.
+                if payload.get('isDraft') is True:
+                    self.service.lifecycle.observe_mail({
+                        'account_id': identity[0], 'immutable_message_id': identity[2],
+                        'conversation_id': str(payload.get('conversationId') or staged['conversation_id'] or ''),
+                        'folder_ref': identity[1], 'direction': 'draft',
+                        'subject': sanitize_mail(str(payload.get('subject') or staged['subject']), '').subject[:512],
+                        'source_at': str(payload.get('lastModifiedDateTime') or staged['modified_at'] or staged['received_at']),
+                        'modified_at': str(payload.get('lastModifiedDateTime') or staged['modified_at'] or staged['received_at']),
+                    }, MutationContext('draft-observation:' + payload_sha256({'id':identity,'modified':payload.get('lastModifiedDateTime') or staged['modified_at']}), 'system', 'outlook_sync'))
+                    mark(*identity, 'ignored', 'draft excluded from lifecycle evidence', query_version=query_version)
+                    ignored += 1
+                    continue
                 content, content_type = _body(payload)
                 subject = str(payload.get("subject") or staged["subject"])
                 sender = _sender(payload, str(staged["sender"]))
                 received_at = str(payload.get("receivedDateTime") or staged["received_at"] or "")
-                candidates = None
-                candidate_context_complete = False
+                folder = str(payload.get('parentFolderId') or identity[1])
+                from .db import connect
+                with connect(self.state.db_path) as con:
+                    known = con.execute('SELECT role FROM lifecycle_mail_folders WHERE account_id=? AND folder_id=?', (identity[0], folder)).fetchone()
+                    prior = con.execute('SELECT direction FROM lifecycle_mail_observations WHERE account_id=? AND immutable_message_id=?', (identity[0], identity[2])).fetchone()
+                role = known['role'] if known else folder
+                direction = 'outbound' if role == 'sentitems' else ('inbound' if role == 'inbox' else 'unknown')
+                if prior and prior['direction'] in {'inbound', 'outbound'}:
+                    direction = prior['direction']
+                recipients = []
+                for field in ('toRecipients', 'ccRecipients'):
+                    for recipient in (payload.get(field) or [])[:100]:
+                        address = recipient.get('emailAddress', {}).get('address', '') if isinstance(recipient, Mapping) else ''
+                        if address:
+                            recipients.append(str(address)[:512])
+                archive_id = None
+                candidates, candidate_context_complete = self._candidates(
+                    subject, content, content_type, received_at, sender=sender,
+                    account_id=identity[0], conversation_id=str(payload.get("conversationId") or staged["conversation_id"] or ""),
+                )
                 if self.secure_ingestor is not None:
                     candidates, candidate_context_complete = self._candidates(
                         subject, content, content_type, received_at, sender=sender,
                         account_id=identity[0], conversation_id=str(payload.get("conversationId") or staged["conversation_id"] or ""),
                     )
-                    self.secure_ingestor.ingest(
+                    from .mail.identity import supported_selection
+                    identity_mail = sanitize_mail(subject, content, body_kind=content_type)
+                    temporal_candidates = tuple(c for c in candidates if supported_selection(
+                        candidates, c.application_id, identity_mail.subject, identity_mail.body
+                    )) if candidate_context_complete else ()
+                    ingested = self.secure_ingestor.ingest(
                         account_id=identity[0],
                         immutable_message_id=identity[2],
                         subject=subject,
                         body=content,
                         body_kind=content_type,
                         received_at=received_at,
-                        candidates=candidates,
+                        candidates=temporal_candidates,
                         has_attachments=bool(payload.get("hasAttachments", False)),
-                        analyze_temporal=recruiting,
+                        analyze_temporal=recruiting and direction == 'inbound' and not historical and bool(temporal_candidates),
                     )
+                    archive_id = getattr(ingested, 'archive_id', None)
                 if not recruiting:
-                    self.state.mark_message(
+                    mark(
                         *identity, "ignored", query_version=query_version
                     )
                     ignored += 1
@@ -446,6 +498,28 @@ class OutlookMailCoordinator:
                         subject, content, content_type, received_at, sender=sender,
                         account_id=identity[0], conversation_id=str(payload.get("conversationId") or staged["conversation_id"] or ""),
                     )
+                observation_values = {
+                    'account_id': identity[0], 'immutable_message_id': identity[2],
+                    'conversation_id': str(payload.get('conversationId') or staged['conversation_id'] or ''),
+                    'folder_ref': folder, 'direction': direction, 'sender': sender[:512],
+                    'recipients': recipients[:100], 'subject': sanitized.subject[:512],
+                    'received_at': received_at, 'sent_at': payload.get('sentDateTime'),
+                    'source_at': received_at, 'modified_at': payload.get('lastModifiedDateTime') or staged['modified_at'] or received_at,
+                    'evidence_id': evidence_id, 'archive_id': archive_id,
+                }
+                observed = self.service.lifecycle.observe_mail(observation_values, MutationContext('observe:' + payload_sha256(observation_values), 'system', 'outlook_sync'))['observation']
+                from .mail.identity import supported_selection
+                linked = [c for c in candidates if 'previously linked email conversation' in c.match_context
+                          and candidate_context_complete and supported_selection(
+                              candidates, c.application_id, sanitized.subject, sanitized.body)]
+                if len(linked) == 1:
+                    self.service.lifecycle.link_mail({'observation_id': observed['observation_id'], 'application_id': linked[0].application_id, 'confidence':1.0, 'source':'accepted_conversation'}, MutationContext('mail-link:' + observed['observation_id'] + ':' + linked[0].application_id, 'system', 'outlook_sync'))
+                if direction in {'outbound', 'unknown'}:
+                    if direction == 'unknown' and not linked:
+                        self.service.lifecycle.propose_discovery({'observation_id': observed['observation_id']}, MutationContext('discovery:' + observed['observation_id'], 'system', 'outlook_sync'))
+                    mark(*identity, 'processed', query_version=query_version)
+                    processed += 1
+                    continue
                 proposal = analyze_mail(
                     evidence_id=evidence_id,
                     sender_address=sender,
@@ -474,7 +548,9 @@ class OutlookMailCoordinator:
                     # are more, application identity is incomplete and the proposal
                     # must remain visible for human review.
                     if (
-                        candidate_context_complete
+                        not historical
+                        and direction == 'inbound'
+                        and candidate_context_complete
                         and decision.disposition is ProposalDisposition.AUTO_APPLY
                     ):
                         self.service.auto_apply_event_proposal(
@@ -487,7 +563,11 @@ class OutlookMailCoordinator:
                             ),
                         )
                         auto_applied += 1
-                self.state.mark_message(
+                if proposal is not None and proposal.proposed_application_id and candidate_context_complete and (created['proposal']['status'] in {'accepted', 'auto_applied'} or (not historical and direction == 'inbound' and decision.disposition is ProposalDisposition.AUTO_APPLY)):
+                    self.service.lifecycle.link_mail({'observation_id': observed['observation_id'], 'application_id': proposal.proposed_application_id, 'confidence': proposal.confidence, 'source':'lifecycle_proposal'}, MutationContext('proposal-link:' + observed['observation_id'] + ':' + proposal.proposed_application_id, 'system', 'outlook_sync'))
+                elif proposal is None and not linked and recruiting:
+                    self.service.lifecycle.propose_discovery({'observation_id': observed['observation_id']}, MutationContext('discovery:' + observed['observation_id'], 'system', 'outlook_sync'))
+                mark(
                     *identity, "processed", query_version=query_version
                 )
                 processed += 1
@@ -507,7 +587,7 @@ class OutlookMailCoordinator:
                         next_attempt_at=exc.decision.next_attempt_at,
                     )
                     raise
-                self.state.mark_message(
+                mark(
                     *identity, "failed", str(exc), query_version=query_version
                 )
                 failed += 1
@@ -523,15 +603,62 @@ class OutlookMailCoordinator:
                         str(exc),
                     )
                     raise
-                self.state.mark_message(
+                mark(
                     *identity, "failed", str(exc), query_version=query_version
                 )
                 failed += 1
             except Exception as exc:
-                self.state.mark_message(
+                mark(
                     *identity, "failed", str(exc), query_version=query_version
                 )
                 failed += 1
             if heartbeat is not None and not heartbeat():
                 raise RuntimeError("Outlook mail worker lease was lost")
         return ProcessingResult(processed, ignored, failed, proposed, auto_applied)
+
+    def process_replay(self, replay_id: str, *, limit: int = 50, heartbeat: Optional[Callable[[], bool]] = None):
+        """Analyze a bounded explicit snapshot without changing normal activation."""
+        from .contracts import ConflictError, utc_now
+        from .db import connect
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError('replay limit must be between 1 and 100')
+        replay = self.service.lifecycle.get_mail_replay(replay_id)
+        if replay['status'] in {'completed','cancelled'}:
+            return replay
+        if replay['status'] == 'failed':
+            raise ConflictError('failed replay requires an explicit user retry')
+        with connect(self.state.db_path) as con:
+            rows = [dict(row) for row in con.execute(
+                'SELECT rowid AS stage_rowid,* FROM outlook_message_stage WHERE account_id=? AND query_version=? AND rowid>? AND rowid<=? AND removed=0 AND julianday(received_at)>=julianday(?) AND julianday(received_at)<julianday(?) ORDER BY rowid LIMIT ?',
+                (replay['account_id'], replay['query_version'], replay['after_stage_rowid'], replay['max_stage_rowid'], replay['since_at'], replay['until_at'], limit+1))]
+        for row in rows[:limit]:
+            if heartbeat is not None and not heartbeat():
+                raise RuntimeError('historical replay worker lease was lost')
+            current = self.service.lifecycle.get_mail_replay(replay_id)
+            if current['status'] == 'cancelled':
+                return current
+            try:
+                result = self.process_pending(1, query_version=replay['query_version'], _replay_rows=[row], heartbeat=heartbeat)
+                if result.failed:
+                    raise RuntimeError('historical replay failed; checkpoint retained for retry')
+            except Exception as exc:
+                # Respect existing worker retries and inference deferrals. Losing
+                # a lease cannot grant this worker authority to fail the replay.
+                if heartbeat is not None and not heartbeat():
+                    raise
+                if isinstance(exc, GraphHttpError) and exc.decision.retryable:
+                    raise
+                if isinstance(exc, InferenceTransportError) and (exc.retryable or getattr(exc, 'defer_without_attempt', False)):
+                    raise
+                with connect(self.state.db_path) as con:
+                    con.execute("UPDATE lifecycle_mail_replays SET status='failed',last_error=?,failure_count=failure_count+1,updated_at=? WHERE replay_id=? AND after_stage_rowid=? AND status IN ('pending','running')", ('mail processing failed; resolve the connector issue before retrying',utc_now(),replay_id,replay['after_stage_rowid']))
+                raise
+            with connect(self.state.db_path) as con:
+                changed = con.execute("UPDATE lifecycle_mail_replays SET after_stage_rowid=?,processed=processed+1,status='running',updated_at=? WHERE replay_id=? AND after_stage_rowid=? AND status IN ('pending','running')", (row['stage_rowid'], utc_now(), replay_id, replay['after_stage_rowid']))
+                if changed.rowcount != 1:
+                    raise ConflictError('historical replay checkpoint changed concurrently')
+            replay['after_stage_rowid'] = row['stage_rowid']
+        if len(rows) <= limit:
+            with connect(self.state.db_path) as con:
+                con.execute("UPDATE lifecycle_mail_replays SET status='completed',updated_at=? WHERE replay_id=? AND status IN ('pending','running')", (utc_now(), replay_id))
+        return self.service.lifecycle.get_mail_replay(replay_id)

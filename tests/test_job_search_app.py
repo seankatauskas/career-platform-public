@@ -581,6 +581,47 @@ def test_status_redacts_remote_preference_identity_migration_preflight():
         assert preflight["identity_match"] is True
 
 
+def test_cpu_ranking_health_does_not_require_embedding_provider_or_revision():
+    from types import SimpleNamespace
+    from job_search.dependency_health import dependency_health
+    from job_search.readiness import _dependency_capabilities
+    from job_search.runtime import RuntimeConfigV1
+
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        root = Path(directory)
+        for mode, policy in (("broad_cpu", "broad"), ("sparse_cpu", "selective")):
+            settings = {"version": 1, "project_root": str(root),
+                        "ranking_refresh_mode": mode, "shortlist_policy": policy}
+            config = RuntimeConfigV1.from_mapping(settings)
+            with patch("job_search.dependency_health._preference_embedding_preflight",
+                       side_effect=AssertionError("CPU ranking must not compare embedding revisions")):
+                report = dependency_health(config)
+                assert report["inference"]["status"] == "disabled"
+                assert report["inference"]["preference_embeddings"]["status"] == "not_required"
+                assert "preference_embedding_preflight" not in report["issues"]
+                assert "ranking_model" not in {row["id"] for row in _dependency_capabilities(report)}
+
+                configured = RuntimeConfigV1.from_mapping({**settings, "inference_config": "provider.json"})
+                provider = SimpleNamespace(credential_file=root / "unused-credential")
+                loaded = SimpleNamespace(structured_generation=None, embeddings=provider)
+                with patch("job_search.inference.load_inference_config", return_value=loaded), \
+                     patch("job_search.inference.config.load_credential", return_value="unused"):
+                    report = dependency_health(configured)
+                assert report["inference"]["status"] == "configuration_ready"
+                assert report["inference"]["preference_embeddings"]["status"] == "not_required"
+                assert report["inference"]["preference_embeddings"]["remote_configured"] is True
+                assert report["inference"]["preference_embeddings"]["identity_match"] is None
+                assert "preference_embedding_migration" not in report["issues"]
+                assert "ranking_model" not in {row["id"] for row in _dependency_capabilities(report)}
+
+                with patch("job_search.inference.load_inference_config", side_effect=ValueError("invalid provider")):
+                    report = dependency_health(configured)
+                assert report["inference"]["status"] == "blocked_setup"
+                assert "inference_configuration" in report["issues"]
+                assert report["inference"]["preference_embeddings"]["status"] == "not_required"
+                assert "ranking_model" not in {row["id"] for row in _dependency_capabilities(report)}
+
+
 def main():
     tests = [value for name, value in globals().items() if name.startswith("test_")]
     for test in tests:

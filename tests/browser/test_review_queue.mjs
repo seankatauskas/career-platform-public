@@ -35,7 +35,7 @@ try {
       if(path === '/api/v1/attention') { if (attentionFails) throw new Error('Fixture unavailable'); return attentionResponse; }
       if(path === '/api/v1/actions') return actionResponse;
       if(path === '/api/v1/curated-shortlists') return {lists:[]};
-      if(path.includes('/jobs/preview')) return {job:{title:'Engineer',company:'Example',jobUrl:'https://example.test/job',location:'Remote'},description_html:'<h3>Responsibilities</h3><ul><li>Build useful things.</li></ul>'};
+      if(path.includes('/jobs/preview')) return {job:{title:'Engineer',company:'Example',jobUrl:'https://example.test/job',location:'Remote',ranking_score:.987654,final_score:.876543,score_components:{sparse:.765432},explanation:{summary:'MODEL_DIAGNOSTIC_SENTINEL'}},description_html:'<h3>Responsibilities</h3><ul><li>Build useful things.</li></ul>'};
       return {};
     }
   `});
@@ -75,19 +75,42 @@ try {
   await page.getByRole('button',{name:'Confirm update',exact:true}).click();
   const proposalDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/p2/decision'));
   assert.equal(JSON.parse(proposalDecision.options.body).decision,'accepted');
+  await page.evaluate(()=>{ consoleState.reviews=[{id:'late',kind:'event_proposal',status:'pending',detail:'submission_confirmed',application_id:null,candidate_application_ids:[]}]; renderReviewQueue(); });
+  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isDisabled(),true);
+  assert.match(await page.locator('#attention-list').innerText(),/No matching application yet/);
+  await page.evaluate(()=>{ consoleState.reviews[0].candidate_application_ids=['app1']; renderReviewQueue(); });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isDisabled(),true);
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app1');
+  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isEnabled(),true);
+  await page.getByRole('button',{name:'Confirm update',exact:true}).click();
+  const lateDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/late/decision'));
+  assert.equal(JSON.parse(lateDecision.options.body).selected_application_id,'app1');
   await page.evaluate(()=>renderShortlist({recommendations:[],model:{ready:false},session_id:null}));
   assert.match(await page.locator('#shortlist-list').innerText(),/refresh to load saved model rankings/);
   await page.evaluate(()=>renderShortlist({recommendations:[],model:{ready:true},session_id:'saved',options:{days:7}}));
   assert.match(await page.locator('#shortlist-list').innerText(),/No jobs matched these filters/);
   await page.evaluate(()=>renderShortlist({source:'curated',recommendations:[]}));
   assert.match(await page.locator('#shortlist-list').innerText(),/No Codex picks/);
+  for (const policy of ['selective','broad','compare','champion']) {
+    await page.evaluate(policy=>renderShortlist({recommendations:[{title:'Engineer',ranking_score:.987654}],options:{days:7,policy},model:{ready:true}}),policy);
+    await page.locator('#shortlist-list .ranking-details summary').click();
+    assert.equal(await page.locator('#shortlist-list .shortlist-score').innerText(),'Ranking score 0.988');
+  }
+  await page.evaluate(()=>renderShortlist({source:'curated',recommendations:[{title:'Engineer',ranking_score:.987654,final_score:.876543,score_components:{sparse:.765432},explanation:'Close fit: your Python experience matches the role.'}],data_status:{broad:{status:'stale',latest_score_at:'2026-10-01'}},options:{days:7}}));
+  assert.equal(await page.locator('#shortlist-list .shortlist-score').count(),0);
+  assert.match(await page.locator('#shortlist-list').innerText(),/Close fit: your Python experience/);
+  assert.equal(await page.locator('#shortlist-freshness').isVisible(),false);
+  assert.doesNotMatch(await page.locator('#shortlist-list').textContent(),/0\.987|0\.876|0\.765|Ranking score/);
   await page.evaluate(()=>renderShortlist({recommendations:[{title:'Engineer',ranking_score:.987}],options:{days:7},model:{ready:true}}));
   assert.equal(await page.locator('.ranking-details').getAttribute('open'),null);
   assert.equal(await page.locator('.shortlist-advanced').getAttribute('open'),null);
-  await page.evaluate(()=>openJobPreview({id:'job1',ats:'greenhouse'}));
+  await page.evaluate(()=>openJobPreview({id:'job1',ats:'greenhouse',ranking_score:.987654,semantic_score:.876543,score_components:{sparse:.765432},explanation:{summary:'MODEL_DIAGNOSTIC_SENTINEL'}}));
   await page.locator('.job-preview-description h3').waitFor();
   assert.equal(await page.locator('.job-preview-header-actions a').getAttribute('href'),'https://example.test/job');
   assert.equal(await page.locator('.job-preview-description li').innerText(),'Build useful things.');
+  assert.doesNotMatch(await page.locator('#job-preview').textContent(),/Ranking score|0\.987|0\.876|0\.765|MODEL_DIAGNOSTIC_SENTINEL/);
+  assert.deepEqual(await page.evaluate(()=>previewPostingFacts({ats:'ashby',id:'j',ranking_score:.99,job_posting:{title:'Nested posting',score_components:{sparse:.8}},application_id:'app1'})),{ats:'ashby',id:'j',application_id:'app1',title:'Nested posting'});
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#job-preview').isVisible(),false);
   await page.evaluate(async () => {
@@ -112,6 +135,24 @@ try {
     return {guarded,preservesEdits,discovers:requests.length === before + 1};
   });
   assert.deepEqual(focusChecks,{guarded:true,preservesEdits:true,discovers:true});
+  // The legacy Ranking Lab retains jobs and order without duplicating score diagnostics.
+  const lab = await browser.newPage();
+  lab.on('pageerror',error=>errors.push(error.message));
+  const labHTML = (await readFile(new URL('../../job_search/ranking/web/index.html',import.meta.url),'utf8')).replace(/<script[^>]*>[\s\S]*?<\/script>/g,'');
+  await lab.setContent(labHTML);
+  await lab.addScriptTag({content:`window.fetch=async()=>({ok:true,json:async()=>({model:{ready:true,score_count:1},options:{limit:20},recommendations:[{title:'Legacy ranked role',company:'Example',rank:1,segment:'explore',final_score:.987654,ranking_score:.876543,score_components:{dense_linear:.765432,dense_neighbor:.654321,sparse:.543210},explanation:{summary:'MODEL_DIAGNOSTIC_SENTINEL'},salary:{status:'known'},jobUrl:'https://example.test/job'}]})});`});
+  await lab.addScriptTag({content:await readFile(new URL('../../job_search/ranking/web/app.js',import.meta.url),'utf8')});
+  await lab.locator('.recommendation-card').waitFor();
+  for (const width of [390,1280]) {
+    await lab.setViewportSize({width,height:900});
+    const text = await lab.locator('#recommendation-list').innerText();
+    assert.match(text,/Legacy ranked role/);
+    assert.match(text,/#1/);
+    assert.match(text,/Salary\s*known/);
+    assert.doesNotMatch(text,/Preference|Combined|Semantic|Neighbors|Lexical|Explore|MODEL_DIAGNOSTIC_SENTINEL|0\.987|99%|88%/);
+    assert.equal(await lab.locator('.score-line,.recommendation-explanation,.recommendation-card.explore').count(),0);
+  }
+  await lab.close();
   assert.deepEqual(errors,[]);
   console.log('ok (Review normalization, ordering, decision bodies, empty states, preview access)');
 } finally { await browser.close(); }

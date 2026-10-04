@@ -101,6 +101,90 @@ def test_attempts_do_not_count_and_success_deduplicates():
         raises(lambda:t.observe(device,observation('failed',first['attempt_id'],URL.replace('12345','789'))))
 
 
+def _assert_external_catalog_job_is_submitted_without_dashboard_handoff(ats, job_id, url, page_url):
+    import sqlite3
+    import threading
+    from job_search.dashboard import DashboardController, make_server
+    from job_search.integration import LocalJobCatalog
+    from tests.test_job_search_dashboard import FakePreferences, request
+
+    with tempfile.TemporaryDirectory() as d:
+        ledger,t,device,vault,enrollment=fixture(d)
+        jobs_path=Path(d)/'jobs.db'
+        with sqlite3.connect(jobs_path) as con:
+            con.execute('CREATE TABLE jobs (ats TEXT,id TEXT,title TEXT,company TEXT,description TEXT,jobUrl TEXT)')
+            con.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)',
+                        (ats,job_id,'Platform Engineer','Acme','A fictional role.',url))
+        catalog=LocalJobCatalog(jobs_path)
+        controller=DashboardController(ledger,FakePreferences(),autofill=t.autofill,jobs=catalog)
+        server=make_server(controller,0)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            # An external ATS tab supplies observations directly: no dashboard
+            # opening, application start, resolve request, or autofill handoff.
+            assert not ledger.list_applications()
+            attempted=observation(url=page_url,
+                                  title='Untrusted page title',employer='Page metadata')
+            headers={'Origin':EXTENSION_ORIGIN}
+            def send(body):
+                status,_,response=request(server,'POST','/api/v1/extension/observations',
+                    {**body,'device_token':enrollment['device_token']},headers)
+                assert status==200, response
+                return json.loads(response)
+            result=send(attempted)
+            aid=result['application_id']
+            app=ledger.get_application_timeline(aid)['application']
+            assert app['title_snapshot']=='Platform Engineer'
+            assert app['employer_snapshot']=='Acme'
+            assert app['ats']==ats and app['job_id']==job_id
+            assert app['submitted_at'] is None and app['confirmed_at'] is None
+            completed=observation('site_acknowledged',attempted['attempt_id'],url,
+                                  metadata={'signal':'success_dom'})
+            result=send(completed)
+            assert result['label']=='Submitted · awaiting email'
+            timeline=ledger.get_application_timeline(aid)
+            assert timeline['application']['submitted_at']==completed['occurred_at']
+            assert timeline['application']['confirmed_at'] is None
+            assert timeline['application']['current_phase']=='awaiting_confirmation'
+            assert not any(e['event_type']=='submission_confirmed' for e in timeline['events'])
+            assert send(completed)==result
+            restarted=BrowserTracking(ledger,catalog,t.autofill)
+            assert restarted.resolve(url)['application_id']==aid
+            assert restarted.resolve(url)['status']['status']=='site_acknowledged'
+            assert len(ledger.list_applications())==1
+            with connect(ledger.store.db_path) as con:
+                assert con.execute('SELECT count(*) FROM browser_jobs').fetchone()[0]==0
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
+
+def test_external_ashby_catalog_job_is_submitted_without_dashboard_handoff():
+    job_id='11111111-2222-3333-4444-555555555555'
+    url='https://jobs.ashbyhq.com/acme/'+job_id
+    _assert_external_catalog_job_is_submitted_without_dashboard_handoff(
+        'ashby',job_id,url,url+'/application?utm_source=external')
+
+
+def test_external_greenhouse_catalog_job_is_submitted_without_dashboard_handoff():
+    job_id='56789'
+    url='https://job-boards.greenhouse.io/acme/jobs/'+job_id
+    for host in ('boards.greenhouse.io','job-boards.greenhouse.io','job-boards.eu.greenhouse.io'):
+        _assert_external_catalog_job_is_submitted_without_dashboard_handoff(
+            'greenhouse',job_id,url,f'https://{host}/acme/jobs/{job_id}?utm_source=external')
+    _assert_external_catalog_job_is_submitted_without_dashboard_handoff(
+        'greenhouse',job_id,url,
+        f'https://boards.greenhouse.io/embed/job_app?for=acme&token={job_id}&utm_source=external')
+
+
+def test_external_lever_catalog_job_is_submitted_without_dashboard_handoff():
+    job_id='11111111-2222-3333-4444-555555555555'
+    url='https://jobs.lever.co/acme/'+job_id
+    for host in ('jobs.lever.co','jobs.eu.lever.co'):
+        _assert_external_catalog_job_is_submitted_without_dashboard_handoff(
+            'lever',job_id,url,f'https://{host}/acme/{job_id}/apply?utm_source=external')
+
+
 def test_email_first_and_encrypted_capture():
     with tempfile.TemporaryDirectory() as d:
         ledger,t,device,vault,_=fixture(d)

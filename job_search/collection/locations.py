@@ -296,20 +296,26 @@ def backfill(db_path: Path, limit: int | None = None) -> dict[str, int]:
         con.execute("PRAGMA foreign_keys=ON")
         prepare_schema(con)
         query = (
-            "SELECT ats,id,location,isRemote,workplaceType FROM jobs "
-            "ORDER BY ats,id" + (" LIMIT ?" if limit is not None else "")
+            "SELECT j.ats,j.id,j.location,j.isRemote,j.workplaceType,"
+            "e.source_fingerprint AS saved_fingerprint,e.status AS saved_status,"
+            "e.normalizer_version AS saved_version FROM jobs j "
+            "LEFT JOIN job_location_enrichment e ON e.ats=j.ats AND e.job_id=j.id "
+            "ORDER BY j.ats,j.id" + (" LIMIT ?" if limit is not None else "")
         )
         rows: Iterable[sqlite3.Row] = con.execute(query, (() if limit is None else (limit,)))
         for row in rows:
-            result = normalize_location(dict(row))
             processed += 1
-            statuses[result["status"]] = statuses.get(result["status"], 0) + 1
-            existing = con.execute(
-                "SELECT source_fingerprint FROM job_location_enrichment WHERE ats=? AND job_id=?",
-                (row["ats"], row["id"]),
-            ).fetchone()
-            if existing and existing[0] == result["source_fingerprint"]:
+            fingerprint = source_fingerprint(
+                row["ats"], row["location"], row["isRemote"], row["workplaceType"],
+            )
+            # The versioned fingerprint includes every normalizer input. Preserve
+            # cached evidence and timestamps without repeating regex/metro work.
+            if row["saved_version"] == NORMALIZER_VERSION and row["saved_fingerprint"] == fingerprint:
+                status = row["saved_status"]
+                statuses[status] = statuses.get(status, 0) + 1
                 continue
+            result = normalize_location(dict(row))
+            statuses[result["status"]] = statuses.get(result["status"], 0) + 1
             changed += 1
             now = _now()
             con.execute(

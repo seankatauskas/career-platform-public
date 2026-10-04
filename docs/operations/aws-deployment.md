@@ -135,6 +135,90 @@ executable from the laptop cannot be reused. The executable and bundle must be
 root-owned and not writable by UID 10001. Validate compilation and PDF extraction
 through the networkless tools container before activation.
 
+### Chief-of-staff secrets on an existing host
+
+The chief release adds three persistent Terraform-managed containers:
+`interaction-token`, `briefing-inference.json`, and `briefing-api-key`. Fresh hosts
+must populate these along with the existing inventory before materialization.
+Terraform stores their containers and ARNs only; values remain out of band.
+
+For an existing host, deploy the new application/Hermes release through the normal
+release workflows **before** expanding `/etc/job-search/operations.json`. Keep the
+existing secret inventory and runtime configuration during that first deployment.
+The new capabilities remain paused. Retain its predeployment backup and a protected
+copy of the original operations configuration for rollback.
+
+The new ARNs also change generated cloud-init data. Since this stack sets
+`user_data_replace_on_change = true`, a full Terraform apply can replace the host.
+For this bounded enrollment, the infrastructure operator uses the existing remote
+backend and reviewed production variables to create a saved targeted plan:
+
+```sh
+terraform -chdir=infra/aws plan -input=false -lock-timeout=5m \
+  -var-file=/PRIVATE/production.tfvars.json \
+  '-target=aws_secretsmanager_secret.runtime["interaction-token"]' \
+  '-target=aws_secretsmanager_secret.runtime["briefing-inference.json"]' \
+  '-target=aws_secretsmanager_secret.runtime["briefing-api-key"]' \
+  -target=aws_iam_role_policy.host -out=/PRIVATE/chief-secrets.tfplan
+terraform -chdir=infra/aws show /PRIVATE/chief-secrets.tfplan
+terraform -chdir=infra/aws apply -input=false /PRIVATE/chief-secrets.tfplan
+```
+
+Apply only after checking that the plan creates the three containers and updates
+the existing host read policy, with no compute, volume, or unrelated changes.
+IAM changes are operator-only; do not widen the application or release-deploy
+role to provision secrets or alter policies. The existing generic infrastructure
+workflow has no targeted-enrollment input and must not be used to apply an
+unreviewed replacement plan. Keep the remaining cloud-init difference explicit
+for the next deliberate host replacement; this targeted operation does not claim
+that a subsequent full plan is empty.
+
+Read the new ARNs from Terraform's `secret_arns` output. Prepare values in protected
+files without printing them, then upload versions through the operator's Secrets
+Manager write path using file inputs. Generate a fresh interaction bearer with
+`interaction-token-init`; never reuse the MCP bearer. A local enrollment config can
+point that command at an owner-only staging file. If an existing provider key is
+explicitly selected for briefing use, copy it through protected runtime files or
+an `asm-exec` dynamic reference, never through terminal output or a command-line
+literal. Do not retrieve Secrets Manager values into an agent's context.
+
+Create a dedicated briefing profile from the reviewed provider settings, preserving
+the selected model and limits and setting its `structured_generation.credential_file`
+to `/run/job-search/briefing-api-key`. Store that profile and key in their separate
+containers. The mail profile and its existing mount stay intact; the model worker
+does not receive the mail worker's credentials implicitly.
+
+Merge only these chief settings into the existing `config.json` secret version:
+`briefing_ai_enabled`, `briefing_inference_config`, `interaction_token_file`,
+`interaction_port`, and the three `telegram_*_id` fields shown in
+[the chief-of-staff guide](../hermes-chief-of-staff.md#configuration-and-activation).
+Bind the exact existing bot and owner's private user/chat identities; a bot token
+alone does not establish the owner. Preserve unrelated configuration, the portable
+key, and Hermes provider/Telegram settings. Container paths must be exactly
+`/run/job-search/briefing-inference.json` and `/run/job-search/interaction-token`.
+
+On the updated host, pause all application services using `job-search-ops pause`.
+Save a backup and the current root-owned operations file, then atomically merge the
+three new ARN entries into its `secret_arns` object, preserving every existing key
+and setting and mode `0600`. While still paused, run the **new release's**
+`job-search-ops secrets`, followed by `preflight`. Materialization writes the three
+new files under `/var/lib/job-search/private/`, owner UID/GID 10001 and mode `0600`,
+and atomically records the expanded inventory in `materialized-secrets.json`.
+Do not deploy or take a new backup between the map expansion and successful
+materialization: backups require exact agreement between both inventories. If
+materialization fails, remain paused and restore the saved operations map before
+using the prior inventory. Never hand-edit recorded secret version IDs.
+
+AWS operations select `compose.chief.yaml` and `compose.briefing.yaml` from the
+merged runtime configuration. The interaction broker receives only its explicit
+bearer mount. Hermes root init copies that mount into an owner-only Hermes runtime
+file; it does not change the existing bot credential. The briefing profile/key
+mounts go only to the model worker. Restart through the operations activation path
+to recreate mounts, verify identities and readiness, then enable the reviewed
+notification/model/send/calendar controls. Retain the saved operations map with
+its matching backup: restoring an older backup with a different secret inventory
+also requires its matching operations configuration while services remain paused.
+
 ### Board coverage, discovery, and collection-only operation
 
 The fresh seed below excludes the old job corpus and discovered company-board list.
@@ -325,18 +409,37 @@ A repeat request for an already installed healthy release does not reinstall it.
 Workers stop claiming work between jobs and acknowledge a drain while the dashboard
 stays available. The drain deadline is 70 minutes; exceeding it cancels the update
 before data changes and clears the drain request. Once drained, all writers stop,
-state is snapshotted, and the release is initialized. The local rollback archive
-uses gzip level 1 to reduce compression work during this pause; scheduled off-host
-backups retain their normal compression after services resume. Archive verification
-and recovery behavior are unchanged. Initialization is restricted
+state is snapshotted, and the release is initialized. Local rollback snapshots are
+now uncompressed, private directories (`backups/<backup-id>.snapshot`), eliminating
+archive compression, archive hashing, and a redundant full archive copy during the
+pause. They still retain all durable state, Hermes history, and the toolchain;
+the existing credential/cache exclusions are unchanged. SQLite is copied through
+its consistent backup API. Each retained file has a size and SHA-256 in the
+manifest; the receipt's `sha256` commits to that manifest. The snapshot is fsynced
+and atomically published before its receipt is journaled and migration can begin.
+The receipt reports file count, retained bytes, and capture/manifest/publication
+timings, so the remaining pause can be measured rather than guessed.
+Scheduled off-host backups remain gzip archives, compressed after services resume.
+Initialization is restricted
 to the recorded operation. Downloads and capacity checks precede the outage.
 The target is under five minutes between `stopping` and successful service health;
 drain time is measured separately. This remains a target until measured on AWS.
+For a bounded, reproducible local comparison of the old paused archive pipeline
+and directory capture, run `python3 -m tests.benchmark_deployment_snapshot
+--megabytes 64 --runs 2` from a development checkout. It uses only synthetic
+temporary data and reports local timings; it does not predict EBS or production
+downtime. Normal offline suites also inject corruption and kill child processes
+at snapshot/restore publication boundaries.
 
 A root-owned journal records intent before migration, secret publication, directory
 replacement and release switching. Container startup checks a separate read-only
 gate; incomplete destructive maintenance keeps application and Hermes writers out.
 Never manually clear that gate or delete a journal to make startup succeed.
+`status` reports `maintenance_active: true` and `wait_for_active_operation` while
+an incomplete operation still owns the existing maintenance lock. It does not
+create or modify a lock to inspect it. An unowned or uninspectable lock with an
+incomplete journal remains `recovery_required`; an uncertain lock is additionally
+marked `operation_lock_unverified`. Container liveness remains a separate signal.
 
 If `status` reports `recovery_required`, run the indicated exact operation:
 
@@ -347,6 +450,14 @@ sudo /opt/job-search/current/scripts/job-search-ops recover --operation OPERATIO
 
 If `current` is missing or points at an unusable release, invoke the same commands
 from `/opt/job-search/releases/VERIFIED_STAGED_RELEASE/scripts/job-search-ops`.
+For an interrupted deployment using `directory-v1`, **use the `recovery_tool`
+recorded in the journal/status**, which identifies the verified code that created
+the snapshot. `current` may still point at the older release; its operations tool
+only understands tar archives and cannot recover this new format. The journal is
+still protocol 1, with a format-tagged backup receipt: new tools support both
+formats, and unknown formats fail closed. Do not rename a directory to `.tar.gz`
+or change the journal to bypass this check. The staged candidate's `status`
+reports its exact recovery-tool path and snapshot receipt.
 Use the verified hardened release staged by the installer, not downloaded scripts.
 Recovery serializes with maintenance, stops project containers including one-shot
 initializers, validates its evidence, and is safe to repeat with the same operation
@@ -552,12 +663,22 @@ maintenance operation blocks automatic retries until recovery. The backup-age
 alarm threshold is 24 hours, with normal CloudWatch evaluation latency. A sustained
 backup failure can exceed the 24-hour recovery-point target.
 
+A scheduled timer encountering an actively held deployment/backup lock reports
+`deferred` with `maintenance_active`, without starting a backup or changing its
+last-success receipt. The next timer checks again. Manual maintenance commands
+still fail on lock contention; unreadable locks and incomplete operation journals
+remain errors, not successful deferrals.
+
 ```sh
 sudo /opt/job-search/current/scripts/job-search-ops backup
 ```
 
 Normal deployments take a predeployment rollback snapshot; successful deployments
-retain the two newest local archives. The release tracks
+retain the two newest published local snapshots across directory and legacy archive
+formats. Interrupted staging and unknown/operator-created paths are never pruned;
+inspect them explicitly before removing them. A cleanup failure is reported as
+`cleanup_failed_backups_preserved` without changing an already healthy deployment.
+The release tracks
 the previous image and backup. Once normal writes resume, do not automatically
 replace the database with the old snapshot. For a reviewed schema-compatible
 image rollback:
@@ -565,6 +686,14 @@ image rollback:
 ```sh
 sudo /opt/job-search/current/scripts/job-search-ops rollback --release PREVIOUS_RELEASE_ID
 ```
+
+Local directory recovery verifies the manifest digest, the exact directory/file
+sets, each file checksum, and SQLite integrity before replacing data. Symlinks,
+hard links and special files are rejected. It creates an independent restore
+staging copy, preserving the original snapshot for retries. Capacity checks
+reserve space for both the local snapshot and recovery staging plus a safety
+margin. This reduces avoidable archive work; it is not a filesystem snapshot or
+a zero-downtime deployment. AWS pause/recovery targets still require live timing.
 
 For a replacement-host restore, prepare a verified data volume and install the
 exact release named by the backup. Download the backup bundle and its separately

@@ -93,6 +93,28 @@ class PublicSnapshotTests(unittest.TestCase):
         self.assertFalse((output / '.github/workflows/public-snapshot.yml').exists())
         self.assertTrue((output / '.github/workflow-examples/public-snapshot.yml').is_file())
 
+    def test_review_source_is_exported_and_unknown_paths_still_require_review(self):
+        reviewed = {
+            'Dockerfile.codex-review': 'FROM python:3.12-slim\n',
+            'Dockerfile.codex-review.dockerignore': '**\n!job_search/\n',
+            'skills/career-job-review/SKILL.md': '# Review collected jobs\n',
+            'skills/career-job-review/references/interface.md': '# Review interface\n',
+        }
+        for name, content in reviewed.items():
+            self.write(name, content)
+        self.commit()
+        output = self.export()
+        for name, content in reviewed.items():
+            self.assertEqual((output / name).read_text(), content)
+        for name in ('skills/unreviewed/SKILL.md', 'Dockerfile.unreviewed'):
+            with self.subTest(name=name):
+                path = self.write(name, 'Needs review\n')
+                self.commit()
+                with self.assertRaisesRegex(SystemExit, 'Unreviewed source path'):
+                    self.export('rejected')
+                path.unlink()
+                self.commit()
+
     def test_private_content_and_nonregular_sources_rejected(self):
         sensitive = self.write('docs/note.md', 'sk-or-v1-' + 'a' * 64)
         self.commit()

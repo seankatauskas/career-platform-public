@@ -83,7 +83,7 @@ const server = createServer(async (request, response) => {
     };
     if (Object.hasOwn(api, pathname)) return json(api[pathname]);
     const assets = { '/': ['index.html', 'text/html'], '/assets/app.js': ['app.js', 'text/javascript'], '/assets/console.js': ['console.js', 'text/javascript'], '/assets/styles.css': ['styles.css', 'text/css'] };
-    for (const file of ['job-preview.js', 'applications-view.js', 'shortlist-view.js', 'review-view.js', 'settings-view.js', 'applications-view.css', 'shortlist-view.css', 'review-view.css', 'settings-view.css']) assets['/assets/' + file] = [file, file.endsWith('.js') ? 'text/javascript' : 'text/css'];
+    for (const file of ['chief-view.js', 'lifecycle-view.js', 'job-preview.js', 'applications-view.js', 'shortlist-view.js', 'review-view.js', 'settings-view.js', 'applications-view.css', 'shortlist-view.css', 'review-view.css', 'settings-view.css']) assets['/assets/' + file] = [file, file.endsWith('.js') ? 'text/javascript' : 'text/css'];
     if (!assets[pathname]) { response.writeHead(404); return response.end(); }
     const [file, mime] = assets[pathname];
     response.writeHead(200, { 'Content-Type': mime });
@@ -289,7 +289,7 @@ try {
     policies:{selective:{ranked_families:500,unranked_families:6200,freshness:'stale'},broad:{ranked_families:500,unranked_families:6200,freshness:'stale'}}};
   await refresh(page);
   assert.match(await page.locator('#ranking-progress').innerText(), /waiting for the model allowance/);
-  assert.match(await page.locator('#ranking-progress').innerText(), /6,200 awaiting ranking/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /6,200 without rankings/);
   assert.match(await page.locator('#ranking-progress').innerText(), /do not appear in automatic model picks/);
   scanFail = true;
   await page.locator('#scan-now').click();
@@ -301,11 +301,55 @@ try {
   assert.equal(await page.locator('#scan-now').isDisabled(), true);
   ops.collection.active = null;
   ops.ranking.state = 'running';
-  ops.ranking.current_pass = {processed_families:3000,total_families:6700};
-  ops.ranking.policies = {selective:{ranked_families:3000,unranked_families:3700,freshness:'stale'},broad:{ranked_families:3000,unranked_families:3700,freshness:'stale'}};
+  ops.ranking.current_pass = {status:'scoring',checked_families:3000,total_families:6700,reused:false,
+    policies:{selective:{recomputed_families:0,reused_families:3000},broad:{recomputed_families:0,reused_families:3000}}};
+  ops.ranking.policies = {selective:{ranked_families:6700,unranked_families:0,freshness:'stale'},broad:{ranked_families:6700,unranked_families:0,freshness:'stale'}};
   await refresh(page);
   assert.equal(await page.locator('#ranking-progress progress').getAttribute('value'), '3000');
   assert.doesNotMatch(await page.locator('#ranking-progress').innerText(), /Next attempt/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /Checking for ranking updates/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /Checked 3,000 of 6,700 job families for changes/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /6,700 families with saved rankings · 0 without rankings/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /Selective this check: 0 rankings recomputed · 3,000 saved rankings reused/);
+  assert.match(await page.locator('#ranking-progress').innerText(), /Broad this check: 0 rankings recomputed · 3,000 saved rankings reused/);
+  ops.ranking.current_pass.policies.broad = {recomputed_families:2,reused_families:2998};
+  await refresh(page);
+  assert.match(await page.locator('#ranking-progress').innerText(), /Broad this check: 2 rankings recomputed · 2,998 saved rankings reused/);
+  const progressPosts = posts.length;
+  for (const width of [390,1365]) {
+    await page.setViewportSize({width,height:1000});
+    ops.ranking.current_pass = {status:'checking',checked_families:0,total_families:null,reused:false,policies:{}};
+    await refresh(page);
+    assert.equal(await page.locator('#ranking-progress progress').count(), 0);
+    assert.match(await page.locator('#ranking-progress').innerText(), /Preparing to check saved rankings/);
+    // The server withholds the previous journal when a new attempt has not reported yet.
+    ops.ranking.current_pass = null;
+    await refresh(page);
+    assert.equal(await page.locator('#ranking-progress progress').count(), 0);
+    assert.doesNotMatch(await page.locator('#ranking-progress').innerText(), /Checked 3,000|this check:/);
+    const reusedPass = {status:'succeeded',checked_families:0,total_families:6700,reused:true,
+      policies:{selective:{recomputed_families:0,reused_families:6700},broad:{recomputed_families:0,reused_families:6700}}};
+    for (const state of ['running','idle']) {
+      ops.ranking.state = state;
+      ops.ranking.current_pass = reusedPass;
+      ops.ranking.last_pass = reusedPass;
+      await refresh(page);
+      assert.equal(await page.locator('#ranking-progress progress').count(), 0);
+      assert.match(await page.locator('#ranking-progress').innerText(), state === 'idle'
+        ? /Last check: saved rankings were current/ : /Saved rankings are already current/);
+      assert.match(await page.locator('#ranking-progress').innerText(), /0 rankings recomputed · 6,700 saved rankings reused/);
+      assert.doesNotMatch(await page.locator('#ranking-progress').innerText(), /Checked .* of|100%|Current pass/);
+    }
+    ops.ranking.state = 'queued';
+    await refresh(page);
+    assert.equal(await page.locator('#ranking-progress progress').count(), 0);
+    assert.match(await page.locator('#ranking-progress').innerText(), /Ranking update check queued/);
+    assert.doesNotMatch(await page.locator('#ranking-progress').innerText(), /already current|were current|this check:|last check:/);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    ops.ranking.state = 'running';
+  }
+  assert.equal(posts.length, progressPosts, 'Viewing ranking progress must not start work');
+  report.checks.push('Ranking progress separates checked families from recomputed/reused rankings, suppresses stale and queued counts, and never invents a percentage for fast reuse on mobile or desktop.');
   await page.locator('#scan-now').click();
   await notice(page, 'Scan queued');
   assert.notEqual(posts.at(-1).body.idempotency_key, firstScan.body.idempotency_key);
@@ -321,6 +365,39 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({path:path.join(output,'scan-progress-mobile.png')});
   report.checks.push('Scan requests retain their key after uncertainty, disable duplicate clicks, respect paused collection and show per-policy coverage and allowance waits.');
+  ops.costs = {available:true,generated_at:now,next_refresh_due_at:'2026-09-21T16:00:00Z',providers:[
+    {id:'aws',status:'ok',stale:false,observed_at:now,attempted_at:now,period:{start:'2026-09-01',end:'2026-09-20'},estimated:true,
+      metrics:{charges:'8.50',credits:'-8.00',refunds:'0.00',net:'0.50'},metric_labels:{charges:'Charges before credits / refunds',credits:'Credit adjustments',refunds:'Refund adjustments',net:'Net reported cost'}},
+    {id:'runpod',status:'error',stale:true,observed_at:'2026-09-18T16:00:00Z',attempted_at:now,message:'The billing service could not be reached. Previous figures are retained when available.',
+      metrics:{balance:'5.33',lifetime_usage:'4.67',hourly_rate:'0'},metric_labels:{balance:'Account credit balance',lifetime_usage:'Lifetime account usage',hourly_rate:'Current account rate / hour'}},
+    {id:'openrouter',status:'partial',stale:false,observed_at:now,attempted_at:now,message:'Account credit balance needs an OpenRouter management key on the host. Shown usage covers only the configured inference key.',
+      metrics:{key_usage:'0.014418',key_monthly_usage:'0.01'},metric_labels:{key_usage:'This key · lifetime usage',key_monthly_usage:'This key · provider-reported monthly usage'}},
+  ],alerts:[{provider:'runpod',kind:'stale'},{provider:'aws',kind:'threshold',direction:'above',threshold:'5',stale:false}]};
+  const postCountBeforeCosts = posts.length;
+  await refresh(page);
+  assert.equal(await page.locator('.costs-card').count(),3);
+  assert.match(await page.locator('[data-provider="aws"]').innerText(),/Net reported cost[\s\S]*\$0.50/);
+  assert.match(await page.locator('[data-provider="aws"]').innerText(),/not remaining promotional credit/);
+  assert.match(await page.locator('[data-provider="runpod"]').innerText(),/Stale figures/);
+  assert.match(await page.locator('[data-provider="runpod"]').innerText(),/last successful figures, not current totals/);
+  assert.match(await page.locator('[data-provider="openrouter"]').innerText(),/Partial coverage/);
+  assert.match(await page.locator('[data-provider="openrouter"]').innerText(),/\$0.0144/);
+  assert.equal(await page.locator('[data-provider="openrouter"] .costs-metrics dt').filter({hasText:'Account credit balance'}).count(),0);
+  assert.match(await page.locator('#costs-alerts').innerText(),/\$5.00 warning threshold/);
+  assert.match(await page.locator('#costs-section').innerText(),/not spending caps/);
+  assert.equal(posts.length,postCountBeforeCosts);
+  await page.locator('#costs-section').scrollIntoViewIfNeeded();
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#costs-section').screenshot({path:path.join(output,'costs-mobile.png')});
+  await page.setViewportSize({width:1365,height:1000});
+  await page.locator('#costs-section').scrollIntoViewIfNeeded();
+  await page.locator('#costs-section').screenshot({path:path.join(output,'costs-desktop.png')});
+  ops.costs = {available:false,message:'The host has not published a cost snapshot yet.'};
+  await refresh(page);
+  assert.equal(await page.locator('.costs-card').count(),0);
+  assert.match(await page.locator('#costs-status').innerText(),/has not published/);
+  assert.equal(await page.locator('#costs-alerts').innerText(),'');
+  report.checks.push('Cost cards distinguish AWS signed adjustments, prepaid balances and key usage; stale figures and threshold warnings remain explicit, refresh is read-only, and missing snapshots never show zero.');
   assert.deepEqual(errors, []);
   report.passed = true;
 } catch (error) {

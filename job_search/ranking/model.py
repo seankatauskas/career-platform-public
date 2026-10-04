@@ -35,10 +35,11 @@ import sqlite3
 import struct
 import sys
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 from urllib.parse import quote
 
 from job_search.inference import (
@@ -86,6 +87,9 @@ class FeatureDocument:
             "text_version": TEXT_VERSION,
             "title_metadata": self.title_metadata_text,
             "description_chunks": self.description_chunks,
+            # Sparse features use the entire cleaned description, including text
+            # between the bounded chunks chosen for dense embeddings.
+            "description_sha256": sha256_text(self.description_text),
         }
         return sha256_text(canonical_json(payload))
 
@@ -1014,6 +1018,9 @@ def _flush_embedding_texts(
     }
     missing = [(fingerprint, text) for fingerprint, text in ordered if fingerprint not in existing]
     if missing:
+        # Feature/reference bookkeeping may already own a write transaction.
+        # Release it before a potentially slow local or remote encoder call.
+        con.commit()
         texts = [text for _, text in missing]
         stream = getattr(encoder, "iter_encode_batches", None)
         batches = stream(texts) if callable(stream) else [(texts, encoder.encode(texts))]
@@ -2042,9 +2049,13 @@ def rollback_run(
     )
 
 
-def _load_artifact(state_db: Path, run_id: Optional[str]) -> tuple[dict[str, Any], sqlite3.Row]:
-    prepare_state(state_db)
-    with connect_state(state_db) as con:
+def _load_artifact(
+    state_db: Path, run_id: Optional[str], *, prepare_schema: bool = True,
+) -> tuple[dict[str, Any], sqlite3.Row]:
+    if prepare_schema:
+        prepare_state(state_db)
+    # Cost guards may inspect a frozen artifact before authorizing any state write.
+    with closing(connect_source(state_db)) as con:
         selected = run_id or _state_value(con, "champion_run_id")
         if not selected:
             raise PreferenceModelError("no champion model exists; run `train` first")
@@ -2094,41 +2105,79 @@ def _sparse_explanations(sparse_model: dict[str, Any], matrix: Any, limit: int =
     return explanations
 
 
+SCORE_COMPONENTS = ("dense_linear", "dense_neighbor", "sparse")
+
+
+def scoring_components(artifact: Mapping[str, Any], *, active_components_only: bool = False) -> tuple[str, ...]:
+    """Keep research diagnostics by default; production may request weighted parts only."""
+    if not active_components_only:
+        return SCORE_COMPONENTS
+    weights = artifact.get("weights")
+    if not isinstance(weights, Mapping) or set(weights) - set(SCORE_COMPONENTS):
+        raise PreferenceModelError("model has invalid scoring component weights")
+    active = []
+    for name in SCORE_COMPONENTS:
+        value = weights.get(name, 0.0)
+        if isinstance(value, bool):
+            raise PreferenceModelError("model has invalid scoring component weights")
+        try:
+            weight = float(value)
+        except (TypeError, ValueError) as exc:
+            raise PreferenceModelError("model has invalid scoring component weights") from exc
+        if not math.isfinite(weight) or weight < 0:
+            raise PreferenceModelError("model has invalid scoring component weights")
+        if weight:
+            active.append(name)
+    if not active:
+        raise PreferenceModelError("model must have a positive scoring component weight")
+    return tuple(active)
+
+
+def artifact_requires_embeddings(artifact: Mapping[str, Any], *, active_components_only: bool = False) -> bool:
+    return any(name != "sparse" for name in scoring_components(
+        artifact, active_components_only=active_components_only,
+    ))
+
+
 def _score_document_batch(
     state_db: Path,
     documents: Sequence[FeatureDocument],
     artifact: dict[str, Any],
     modules: dict[str, Any],
+    *,
+    active_components_only: bool = False,
 ) -> list[dict[str, Any]]:
-    numpy = modules["numpy"]
-    dense = numpy.asarray(
-        load_combined_vectors(state_db, documents, artifact["model_revision"]),
-        dtype=float,
-    )
-    dense_scores = artifact["dense_model"].predict_proba(dense)[:, 1]
-    neighbor_scores, liked_neighbors = _neighbor_predict_details(
-        artifact["neighbor_vectors"], artifact["neighbor_targets"],
-        artifact["neighbor_family_ids"], dense,
-        int(artifact["neighbor_k"]), numpy,
-        train_sample_weights=artifact.get("neighbor_sample_weights"),
-    )
-    sparse_matrix = _sparse_matrix(
-        artifact["sparse_model"], documents, modules["scipy_sparse"],
-    )
-    sparse_scores = artifact["sparse_model"]["classifier"].predict_proba(
-        sparse_matrix,
-    )[:, 1]
-    sparse_phrases = _sparse_explanations(artifact["sparse_model"], sparse_matrix)
+    components = scoring_components(artifact, active_components_only=active_components_only)
+    dense_scores = neighbor_scores = sparse_scores = [None] * len(documents)
+    liked_neighbors = [[] for _ in documents]
+    sparse_phrases = [[] for _ in documents]
+    if "dense_linear" in components or "dense_neighbor" in components:
+        numpy = modules["numpy"]
+        dense = numpy.asarray(
+            load_combined_vectors(state_db, documents, artifact["model_revision"]), dtype=float,
+        )
+        if "dense_linear" in components:
+            dense_scores = artifact["dense_model"].predict_proba(dense)[:, 1]
+        if "dense_neighbor" in components:
+            neighbor_scores, liked_neighbors = _neighbor_predict_details(
+                artifact["neighbor_vectors"], artifact["neighbor_targets"],
+                artifact["neighbor_family_ids"], dense, int(artifact["neighbor_k"]), numpy,
+                train_sample_weights=artifact.get("neighbor_sample_weights"),
+            )
+    if "sparse" in components:
+        sparse_matrix = _sparse_matrix(artifact["sparse_model"], documents, modules["scipy_sparse"])
+        sparse_scores = artifact["sparse_model"]["classifier"].predict_proba(sparse_matrix)[:, 1]
+        sparse_phrases = _sparse_explanations(artifact["sparse_model"], sparse_matrix)
     weights = artifact["weights"]
     results = []
     for index in range(len(documents)):
-        dense_score = float(dense_scores[index])
-        neighbor_score = float(neighbor_scores[index])
-        sparse_score = float(sparse_scores[index])
+        dense_score = float(dense_scores[index]) if dense_scores[index] is not None else None
+        neighbor_score = float(neighbor_scores[index]) if neighbor_scores[index] is not None else None
+        sparse_score = float(sparse_scores[index]) if sparse_scores[index] is not None else None
         final = (
-            float(weights.get("dense_linear", 0.0)) * dense_score
-            + float(weights.get("dense_neighbor", 0.0)) * neighbor_score
-            + float(weights.get("sparse", 0.0)) * sparse_score
+            float(weights.get("dense_linear", 0.0)) * (dense_score or 0.0)
+            + float(weights.get("dense_neighbor", 0.0)) * (neighbor_score or 0.0)
+            + float(weights.get("sparse", 0.0)) * (sparse_score or 0.0)
         )
         results.append({
             "dense_linear": dense_score,
@@ -2138,6 +2187,8 @@ def _score_document_batch(
             "similar_liked_family_ids": liked_neighbors[index],
             "positive_sparse_phrases": sparse_phrases[index],
         })
+        if active_components_only:
+            results[-1]["computed_components"] = list(components)
     return results
 
 
@@ -2160,47 +2211,63 @@ def score_and_store_batch(
     artifact: dict[str, Any],
     run: Any,
     modules: dict[str, Any],
+    *,
+    active_components_only: bool = False,
+    force_rescore: bool = False,
 ) -> int:
     """Store one batch; the caller controls the transaction boundary.
 
     This never prunes old families or certifies a whole-catalog refresh.
     """
     weights = artifact["weights"]
+    required = set(scoring_components(artifact, active_components_only=active_components_only))
     now = utc_now()
     family_ids = [document.family_id for document in documents]
     existing_rows = con.execute(
-        "SELECT family_id,feature_fingerprint FROM preference_scores "
+        "SELECT family_id,feature_fingerprint,explanation_json FROM preference_scores "
         "WHERE run_id=? AND family_id IN ("
         + ",".join("?" for _ in family_ids) + ")",
         (run["run_id"], *family_ids),
     ).fetchall()
-    existing = {str(row[0]): str(row[1]) for row in existing_rows}
+    existing = {}
+    for row in existing_rows:
+        try:
+            explanation = json.loads(row[2])
+            components = explanation.get("computed_components", list(SCORE_COMPONENTS))
+            complete = isinstance(components, list) and required.issubset(components)
+        except (TypeError, ValueError, AttributeError):
+            complete = False
+        if complete:
+            existing[str(row[0])] = str(row[1])
     changed = [
         document for document in documents
-        if existing.get(document.family_id) != document.fingerprint
+        if force_rescore or existing.get(document.family_id) != document.fingerprint
     ]
     if not changed:
         return 0
-    predictions = _score_document_batch(
-        state_db, changed, artifact, modules,
-    )
+    scoring_options = {"active_components_only": True} if active_components_only else {}
+    predictions = _score_document_batch(state_db, changed, artifact, modules, **scoring_options)
     rows = []
     for index, document in enumerate(changed):
         prediction = predictions[index]
         explanation = {
             "components": {
-                "dense_linear": round(prediction["dense_linear"], 6),
-                "dense_neighbor": round(prediction["dense_neighbor"], 6),
-                "sparse": round(prediction["sparse"], 6),
+                name: round(prediction[name], 6) if prediction[name] is not None else None
+                for name in SCORE_COMPONENTS
             },
             "similar_liked_family_ids": prediction["similar_liked_family_ids"],
             "positive_sparse_phrases": prediction["positive_sparse_phrases"],
             "weights": weights,
+            "computed_components": prediction.get("computed_components", list(SCORE_COMPONENTS)),
         }
         rows.append((
             run["run_id"], document.family_id, document.fingerprint,
-            prediction["dense_linear"],
-            prediction["dense_neighbor"], prediction["sparse"], prediction["final"],
+            # Legacy columns are NOT NULL. Consumers must use computed_components
+            # (and the nullable explanation values), never present omitted parts as zero.
+            prediction["dense_linear"] if prediction["dense_linear"] is not None else 0.0,
+            prediction["dense_neighbor"] if prediction["dense_neighbor"] is not None else 0.0,
+            prediction["sparse"] if prediction["sparse"] is not None else 0.0,
+            prediction["final"],
             canonical_json(explanation), now,
         ))
     con.executemany(

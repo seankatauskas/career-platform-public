@@ -1,4 +1,4 @@
-"""Small, non-sending Microsoft Graph HTTP transport."""
+"""Small Microsoft Graph transport with explicit operation and scope boundaries."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 
 from job_search.contracts import RetryDecision
 
-from .auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, TokenProvider
+from .auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, SEND_SCOPES, TokenProvider
 
 
 GRAPH_ORIGIN = "https://graph.microsoft.com"
@@ -41,12 +41,15 @@ _ALLOWED_OPERATIONS = {
         re.compile(r"^/v1\.0/me/messages/[^/]+/attachments$"),
         re.compile(r"^/v1\.0/me/messages/[^/]+/attachments/[^/]+$"),
         re.compile(r"^/v1\.0/me/calendar/calendarView$"),
+        re.compile(r"^/v1\.0/me/events/[^/]+$"),
     ),
     "POST": (
         re.compile(r"^/v1\.0/me/messages/[^/]+/createReply$"),
+        re.compile(r"^/v1\.0/me/messages/[^/]+/send$"),
         re.compile(r"^/v1\.0/me/events$"),
     ),
-    "PATCH": (re.compile(r"^/v1\.0/me/messages/[^/]+$"),),
+    "DELETE": (re.compile(r"^/v1\.0/me/events/[^/]+$"),),
+    "PATCH": (re.compile(r"^/v1\.0/me/messages/[^/]+$"), re.compile(r"^/v1\.0/me/events/[^/]+$")),
 }
 
 _TRANSACTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
@@ -193,12 +196,17 @@ def _validate_hold_payload(payload: Optional[Mapping[str, Any]]) -> None:
         "isReminderOn", "responseRequested", "allowNewTimeProposals",
         "attendees", "transactionId",
     }
-    if not isinstance(payload, Mapping) or set(payload) != expected:
+    if not isinstance(payload, Mapping) or set(payload) not in (expected, expected | {"location"}):
         raise GraphLinkError("calendar event payload exceeds the private-hold boundary")
     if (
-        payload.get("subject") != "Private hold"
-        or payload.get("body") != {"contentType": "text", "content": ""}
-        or payload.get("showAs") != "tentative"
+        payload.get("subject") not in {"Private hold", "Private career commitment"}
+        or not isinstance(payload.get("body"), Mapping)
+        or set(payload["body"]) != {"contentType", "content"}
+        or payload["body"].get("contentType") != "text"
+        or not isinstance(payload["body"].get("content"), str)
+        or len(payload["body"]["content"]) > 4000
+        or (payload.get("subject") == "Private hold" and payload["body"]["content"] != "")
+        or payload.get("showAs") not in {"tentative", "busy", "free"}
         or payload.get("sensitivity") != "private"
         or payload.get("isReminderOn") is not False
         or payload.get("responseRequested") is not False
@@ -208,6 +216,8 @@ def _validate_hold_payload(payload: Optional[Mapping[str, Any]]) -> None:
         or not _utc_graph_time(payload.get("end"))
     ):
         raise GraphLinkError("calendar event payload exceeds the private-hold boundary")
+    if "location" in payload and (not isinstance(payload["location"], Mapping) or set(payload["location"]) != {"displayName"} or not isinstance(payload["location"]["displayName"], str) or len(payload["location"]["displayName"])>1000):
+        raise GraphLinkError("private event location is invalid")
     transaction_id = payload.get("transactionId")
     if not isinstance(transaction_id, str) or not _TRANSACTION_ID_RE.fullmatch(transaction_id):
         raise GraphLinkError("calendar event requires a stable transactionId")
@@ -236,6 +246,19 @@ def _validate_operation(
         expected_scopes = DRAFT_SCOPES
         if payload is not None:
             raise GraphLinkError("createReply cannot include caller-controlled content")
+    elif method == "POST" and path.endswith("/send"):
+        expected_scopes = SEND_SCOPES
+        if payload is not None:
+            raise GraphLinkError("send must not include content")
+    elif method == "DELETE" and "/events/" in path:
+        expected_scopes = HOLD_SCOPES
+        if payload is not None:
+            raise GraphLinkError("owned event deletion cannot include content")
+    elif method == "PATCH" and "/events/" in path:
+        expected_scopes = HOLD_SCOPES
+        if not isinstance(payload, Mapping) or (set(payload)-{"location"}) != {"subject", "body", "start", "end", "showAs", "sensitivity", "isReminderOn", "responseRequested", "attendees"}:
+            raise GraphLinkError("event update exceeds private commitment boundary")
+        _validate_hold_payload({**payload, "allowNewTimeProposals": False, "transactionId": "conditional-owned-update"})
     elif method == "PATCH":
         expected_scopes = DRAFT_SCOPES
         _validate_patch_payload(payload)
@@ -334,20 +357,25 @@ class GraphSession:
         preferences: Sequence[str] = (),
         attempt: int = 1,
         expected_statuses: Sequence[int] = (200,),
+        if_match: str = "",
     ) -> Mapping[str, Any]:
         absolute = validate_graph_url(url)
         method = method.upper()
         _validate_operation(method, absolute, scopes, payload)
+        if if_match and (method not in {"PATCH", "DELETE"} or "/me/events/" not in absolute):
+            raise GraphLinkError("conditional updates only supported for owned events")
+        if method in {"PATCH", "DELETE"} and "/me/events/" in absolute and not if_match:
+            raise GraphLinkError("event updates require a version condition")
         body = None
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
                 raise ValueError("Microsoft Graph request exceeded size limit")
         token = self._tokens.get_token(scopes)
-        response = self._send(method, absolute, token, body, preferences, retry_class, attempt)
+        response = self._send(method, absolute, token, body, preferences, retry_class, attempt, if_match)
         if response.status == 401:
             token = self._tokens.get_token(scopes, force_refresh=True)
-            response = self._send(method, absolute, token, body, preferences, retry_class, attempt)
+            response = self._send(method, absolute, token, body, preferences, retry_class, attempt, if_match)
         if response.status not in set(expected_statuses):
             decision = retry_decision(
                 status=response.status,
@@ -357,6 +385,10 @@ class GraphSession:
             )
             error_type = GraphOutcomeUnknown if decision.outcome_unknown else GraphHttpError
             raise error_type(response.status, _error_code(response.body), decision)
+        if method == "POST" and urlsplit(absolute).path.endswith("/send"):
+            if response.status != 202 or response.body:
+                raise GraphOutcomeUnknown(response.status, "unexpected_send_response", RetryDecision(False, None, True, "outcome_unknown"))
+            return {"accepted": True}
         if not response.body:
             if retry_class is RetryClass.NON_IDEMPOTENT_WRITE:
                 decision = RetryDecision(False, None, True, "outcome_unknown")
@@ -394,6 +426,7 @@ class GraphSession:
         preferences: Sequence[str],
         retry_class: RetryClass,
         attempt: int,
+        if_match: str = "",
     ) -> RawHttpResponse:
         all_preferences = list(dict.fromkeys(("IdType=\"ImmutableId\"", *preferences)))
         headers = {
@@ -403,6 +436,10 @@ class GraphSession:
             "return-client-request-id": "true",
             "Prefer": ", ".join(all_preferences),
         }
+        if if_match:
+            headers["If-Match"] = if_match
+        if method == "POST" and urlsplit(url).path.endswith("/send"):
+            headers["Content-Length"] = "0"
         if body is not None:
             headers["Content-Type"] = "application/json"
         try:

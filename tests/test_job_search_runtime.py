@@ -934,6 +934,173 @@ def test_outlook_poll_interval_changes_only_mail_and_survives_reseeding() -> Non
                 raise AssertionError("invalid polling interval accepted")
 
 
+def test_broad_cpu_mode_is_explicit_and_cannot_enable_ranking() -> None:
+    from job_search.activation import initialize_paused, controls
+    from job_search.pipeline import build_opportunity_handlers, PREFERENCE_TASK
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        settings = {"version": 1, "project_root": str(root), "shortlist_policy": "broad"}
+        default = RuntimeConfigV1.from_mapping(settings)
+        assert default.ranking_refresh_mode == "full"
+        config = RuntimeConfigV1.from_mapping({**settings, "ranking_refresh_mode": "broad_cpu"})
+        assert config.public_mapping()["ranking_refresh_mode"] == "broad_cpu"
+        _, handlers = build_opportunity_handlers(
+            project_root=root, jobs_db=config.jobs_db, preference_db=config.preference_db,
+            proxy_db=config.proxy_db, policy_refresh=True,
+            ranking_refresh_mode=config.ranking_refresh_mode, environment_provider=lambda: {},
+        )
+        command = handlers[PREFERENCE_TASK].command.command
+        assert command[-4:] == ("--policy", "broad", "--active-components-only", "--no-embeddings")
+        database.prepare_database(config.application_db, "2026-09-02T12:00:00Z")
+        initialize_paused(config.application_db)
+        before = controls(config.application_db)
+        with connect(config.application_db) as con:
+            con.execute(
+                "INSERT INTO work_items "
+                "(work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,"
+                "attempts,max_attempts,created_at,lane,workflow_id) "
+                "VALUES ('paused-ranking','opportunity.preference_refresh','paused-ranking',"
+                "'{}','queued',60,?,0,5,?,'model','paused-ranking')",
+                ("2026-09-02T12:00:00Z", "2026-09-02T12:00:00Z"),
+            )
+        runtime = build_runtime(config, lane="model", now_provider=lambda: NOW,
+                                command_runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must stay paused")),
+                                base_environment={}, max_outbox_per_tick=0)
+        runtime.tick(NOW)
+        assert controls(config.application_db) == before
+        with connect(config.application_db) as con:
+            row = con.execute("SELECT status,attempts FROM work_items WHERE work_id='paused-ranking'").fetchone()
+            assert tuple(row) == ("queued", 0)
+        for invalid in ("cheap", None, [], True):
+            try:
+                RuntimeConfigV1.from_mapping({**settings, "ranking_refresh_mode": invalid})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid ranking mode accepted")
+        for policy in ("champion", "selective", "compare"):
+            try:
+                RuntimeConfigV1.from_mapping({**settings, "shortlist_policy": policy,
+                                             "ranking_refresh_mode": "broad_cpu"})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("CPU-only refresh could leave the notification policy stale")
+
+
+def test_sparse_cpu_refreshes_both_named_policies_without_activating_ranking() -> None:
+    from job_search.activation import initialize_paused, controls
+    from job_search.pipeline import build_opportunity_handlers, PREFERENCE_TASK
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        settings = {"version": 1, "project_root": str(root), "ranking_refresh_mode": "sparse_cpu"}
+        for policy in ("broad", "selective", "compare"):
+            config = RuntimeConfigV1.from_mapping({**settings, "shortlist_policy": policy})
+            assert config.public_mapping()["ranking_refresh_mode"] == "sparse_cpu"
+            _, handlers = build_opportunity_handlers(
+                project_root=root, jobs_db=config.jobs_db, preference_db=config.preference_db,
+                proxy_db=config.proxy_db, policy_refresh=True,
+                ranking_refresh_mode=config.ranking_refresh_mode, environment_provider=lambda: {},
+            )
+            command = handlers[PREFERENCE_TASK].command.command
+            assert command[1:3] == ("-m", "job_search.ranking.refresh")
+            assert command[-6:] == ("--policy", "broad", "--policy", "selective",
+                                    "--active-components-only", "--no-embeddings")
+        try:
+            RuntimeConfigV1.from_mapping({**settings, "shortlist_policy": "champion"})
+        except ValueError as exc:
+            assert "sparse_cpu" in str(exc) and "shortlist_policy" in str(exc)
+        else:
+            raise AssertionError("sparse refresh cannot maintain an unrelated champion")
+        for mode in ("broad_cpu", "sparse_cpu"):
+            try:
+                build_opportunity_handlers(
+                    project_root=root, jobs_db=config.jobs_db, preference_db=config.preference_db,
+                    policy_refresh=False, ranking_refresh_mode=mode, environment_provider=lambda: {},
+                )
+            except ValueError as exc:
+                assert "requires named policy refresh" in str(exc)
+            else:
+                raise AssertionError("CPU-only refresh must not fall back to the champion")
+
+        config = RuntimeConfigV1.from_mapping({**settings, "shortlist_policy": "selective"})
+        database.prepare_database(config.application_db, "2026-09-02T12:00:00Z")
+        initialize_paused(config.application_db)
+        before = controls(config.application_db)
+        with connect(config.application_db) as con:
+            con.execute(
+                "INSERT INTO work_items "
+                "(work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,"
+                "attempts,max_attempts,created_at,lane,workflow_id) "
+                "VALUES ('paused-sparse','opportunity.preference_refresh','paused-sparse',"
+                "'{}','queued',60,?,0,5,?,'model','paused-sparse')",
+                ("2026-09-02T12:00:00Z", "2026-09-02T12:00:00Z"),
+            )
+        runtime = build_runtime(config, lane="model", now_provider=lambda: NOW,
+                                command_runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must stay paused")),
+                                base_environment={}, max_outbox_per_tick=0)
+        runtime.tick(NOW)
+        assert controls(config.application_db) == before
+        with connect(config.application_db) as con:
+            row = con.execute("SELECT status,attempts FROM work_items WHERE work_id='paused-sparse'").fetchone()
+            assert tuple(row) == ("queued", 0)
+
+
+def test_full_ranking_refresh_keeps_its_existing_command() -> None:
+    from job_search.pipeline import build_opportunity_handlers, PREFERENCE_TASK
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for named in (False, True):
+            _, handlers = build_opportunity_handlers(
+                project_root=root, jobs_db=root / "jobs.db", preference_db=root / "state.db",
+                proxy_db=root / "proxy.db", policy_refresh=named,
+                ranking_refresh_mode="full", environment_provider=lambda: {},
+            )
+            command = handlers[PREFERENCE_TASK].command.command
+            assert "--no-embeddings" not in command
+            assert "--active-components-only" not in command
+            assert "--policy" not in command
+            assert command[2] == ("job_search.ranking.refresh" if named else "job_search.ranking.model")
+
+
+def test_sparse_cpu_dispatch_does_not_require_inference_readiness_or_budget() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = RuntimeConfigV1.from_mapping({
+            "version": 1, "project_root": str(root), "ranking_refresh_mode": "sparse_cpu",
+            "shortlist_policy": "selective", "inference_config": "missing-provider.json",
+            "inference_usage_limits": {"daily_requests": 1, "daily_tokens": 1, "max_inflight": 1},
+        })
+        commands = []
+
+        def runner(command, **kwargs):
+            commands.append(command)
+            assert command[-6:] == ("--policy", "broad", "--policy", "selective",
+                                    "--active-components-only", "--no-embeddings")
+            return subprocess.CompletedProcess(command, 0, stdout='{"status":"ok"}', stderr="")
+
+        runtime = build_runtime(config, lane="model", now_provider=lambda: NOW,
+                                command_runner=runner, base_environment={}, max_outbox_per_tick=0)
+        with connect(config.application_db) as con:
+            con.execute(
+                "INSERT INTO work_items "
+                "(work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,"
+                "attempts,max_attempts,created_at,lane,workflow_id) "
+                "VALUES ('sparse-ready','opportunity.preference_refresh','sparse-ready',"
+                "'{}','queued',60,?,0,5,?,'model','')",
+                ("2026-09-02T12:00:00Z", "2026-09-02T12:00:00Z"),
+            )
+        with patch("job_search.dependency_health.dependency_health", side_effect=AssertionError("provider readiness")), \
+             patch("job_search.inference.load_inference_config", side_effect=AssertionError("provider config")), \
+             patch("job_search.inference.usage.begin_invocation", side_effect=AssertionError("no inference budget")):
+            report = runtime.tick(NOW)
+        assert report["work"]["succeeded"] == 1, report
+        assert len(commands) == 1
+        with connect(config.application_db) as con:
+            assert con.execute("SELECT status FROM work_items WHERE work_id='sparse-ready'").fetchone()[0] == "succeeded"
+            assert con.execute("SELECT COUNT(*) FROM inference_invocations").fetchone()[0] == 0
+
+
 def main() -> None:
     tests = [
         value for name, value in sorted(globals().items()) if name.startswith("test_")

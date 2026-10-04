@@ -61,7 +61,10 @@ async function flushAnswers() {
     try {
       const body=await openAnswers(connection,item);
       const result=await trackingPost('answers',body);
-      if(result.saved!==true) throw new Error('The dashboard did not confirm saving application answers.');
+      if(result.saved!==true || result.capture_id!==body.capture_id ||
+          result.application_id!==all[`tracking-result-${item.attempt_id}`].application_id ||
+          result.field_count!==body.snapshot.fields.length)
+        throw new Error('The dashboard did not confirm saving these application answers.');
       await chrome.storage.local.set({[`tracking-answer-result-${item.attempt_id}`]:{saved:true,field_count:result.field_count,captured_at:body.captured_at,
         incomplete:!!(body.snapshot.omitted_fields||body.snapshot.truncated_values)}});
       await chrome.storage.local.remove(key);

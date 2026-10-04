@@ -28,6 +28,22 @@ const recordingStarted=Date.now();
 const page = await context.newPage();
 const pageErrors=[]; page.on('pageerror',error=>pageErrors.push(error.message));
 const report={passed:false, checks:[], fixture:'Real dashboard, ledger, workers and MCP; fictional records and external responses.', screenshots:[]};
+// Poison historical application provenance to prove it never becomes visible UI.
+const modelDiagnostics = {ranking_score:.987654,semantic_score:.876543,final_score:.765432,
+  score_components:{sparse:.654321},explanation:{summary:'MODEL_DIAGNOSTIC_SENTINEL'}};
+for (const pattern of ['**/api/v1/applications','**/api/v1/applications/*/workspace']) {
+  await page.route(pattern,async route=>{
+    const response=await route.fetch();
+    const body=await response.json();
+    if(body.application) Object.assign(body.application,modelDiagnostics);
+    for(const application of body.applications || []) Object.assign(application,modelDiagnostics);
+    await route.fulfill({response,json:body});
+  });
+}
+async function assertNoModelScores(selector) {
+  assert.doesNotMatch(await page.locator(selector).textContent(),/Ranking score|0\.987654|0\.876543|0\.765432|0\.654321|MODEL_DIAGNOSTIC_SENTINEL/);
+}
+
 async function snapshot(name) {
   if (/^#applications\/[^/]+/.test(new URL(page.url()).hash) && name !== 'failure') {
     await page.waitForFunction(() => consoleState.workspace?.application.application_id === decodeURIComponent(location.hash.split('/')[1])
@@ -35,6 +51,40 @@ async function snapshot(name) {
   }
   await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({path:path.join(output,name+'.png')}); report.screenshots.push(name+'.png');
+}
+async function assertCompanyApplied(card, applicationId, appliedAt) {
+  const companyLine = card.locator('.shortlist-company');
+  const badge = companyLine.locator('.shortlist-company-applied');
+  await badge.waitFor({state:'visible'});
+  // A background refresh can replace the card after the locator resolves.
+  // Read one connected DOM snapshot; retry detachment, never incorrect styles.
+  let actual = null;
+  const deadline = Date.now() + 5000;
+  do {
+    actual = await badge.evaluate(element => {
+      if (!element.isConnected || !element.getClientRects().length) return null;
+      const style = getComputedStyle(element);
+      return {
+        text: element.innerText,
+        href: element.getAttribute('href'),
+        title: element.getAttribute('title'),
+        ariaLabel: element.getAttribute('aria-label'),
+        company: element.closest('.shortlist-company').querySelector('.job-company').innerText,
+        style: {weight:style.fontWeight, background:style.backgroundColor, border:style.borderTopWidth},
+      };
+    });
+    if (actual) break;
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+  } while (Date.now() < deadline);
+  assert(actual, 'Applied-company badge did not remain connected for a DOM snapshot');
+  assert.equal(actual.text, 'Applied recently');
+  assert.equal(actual.href, `#applications/${applicationId}/overview`);
+  const date = await page.evaluate(value => new Date(value).toLocaleString(undefined,
+    {year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}), appliedAt);
+  assert.equal(actual.title, `Applied to this company within the last 180 days. Applied to ${actual.company} on ${date}. View application.`);
+  assert.equal(actual.ariaLabel, `Applied recently. Applied to this company within the last 180 days. Applied to ${actual.company} on ${date}. View application.`);
+  assert.deepEqual(actual.style, {weight:'400', background:'rgba(0, 0, 0, 0)', border:'0px'});
+  return badge;
 }
 async function advance(step) {
   const id=randomUUID();
@@ -68,6 +118,7 @@ try {
   assert.equal(await page.locator('#application-scope').count(), 0);
   assert.equal(await page.locator('#application-list .application-link').count(), 1);
   assert.equal(await page.locator('#application-count').innerText(), '1 application');
+  await assertNoModelScores('#application-list');
   assert.deepEqual(await page.locator('.sidebar a').allTextContents(), ['Applications', 'Shortlist', 'Review', 'Settings']);
   assert(!/Waypoint/.test(await page.locator('#application-list').innerText()));
   await page.fill('#application-search', 'Cedar');
@@ -82,6 +133,8 @@ try {
   await page.getByRole('button', {name:'Preview job description', exact:true}).click();
   await page.locator('#job-preview').filter({hasText:'No saved job description'}).waitFor();
   assert.equal(await page.locator('#job-preview').getByRole('link', {name:'Open original posting'}).count(), 1);
+  await assertNoModelScores('#job-preview');
+  await assertNoModelScores('#application-workspace');
   await page.getByRole('button', {name:'Close job preview'}).click();
   assert.equal(await page.locator('#application-list').isVisible(), false);
   assert.deepEqual(await page.locator('.workspace-tabs a').allTextContents(), ['Overview', 'Messages', 'Answers', 'Documents']);
@@ -118,6 +171,9 @@ try {
   await page.getByRole('button',{name:'Refresh shortlist'}).click();
   const role=page.locator('#shortlist-list .card').filter({hasText:'Northstar Labs'});
   await role.waitFor();
+  assert.equal(await page.getByRole('checkbox', {name:'Exclude recently applied companies'}).isChecked(), true);
+  assert.equal(await role.locator('.shortlist-company-applied').count(), 0);
+  assert.equal(await page.locator('#shortlist-list .card').filter({hasText:'Harbor Systems'}).locator('.shortlist-company-applied').count(), 0);
   assert.equal(await role.locator('time.posting-date').first().innerText(), 'Posted today');
   assert(await role.locator('time.posting-date').first().getAttribute('datetime'));
   const relativeDates = await page.evaluate(() => {
@@ -142,7 +198,7 @@ try {
   assert.match(await page.locator('#shortlist-loading').innerText(), /Loading saved rankings/);
   const refreshed = await refresh;
   await page.getByRole('button', {name:'Refresh shortlist', exact:true}).waitFor();
-  assert.match(await page.locator('#shortlist-loading').innerText(), /jobs shown from saved rankings/);
+  assert.match(await page.locator('#shortlist-loading').innerText(), /jobs loaded from saved rankings/);
   await page.unroute('**/api/v1/shortlist');
   report.checks.push('Prominent Today/Yesterday date labels use local calendar days; refresh shows a loading state and restores its button.');
 
@@ -215,7 +271,7 @@ try {
   await page.getByRole('button',{name:'Close job preview'}).click();
   // Historical resume records are seeded through the real API. Their old
   // generation/selection controls must remain absent from the product UI.
-  const applicationId = await page.evaluate(async () => {
+  const preparedApplication = await page.evaluate(async () => {
     const job = state.shortlist.recommendations.find(job => job.company === 'Northstar Labs');
     const prepared = await api('/api/v1/resume-lab/prepare', {method:'POST', body:JSON.stringify({
       session_id:state.shortlist.session_id, impression_id:job.impression_id, idempotency_key:'browser-existing-draft'
@@ -232,9 +288,14 @@ try {
     const candidate = result.comparisons[0];
     await api(`/api/v1/resume-lab/runs/${runId}/approve`, {method:'POST',body:JSON.stringify({comparison_kind:'grounded_rewrite',idempotency_key:'browser-recorded-approval'})});
     await api(`/api/v1/applications/${id}/resume-selection`, {method:'POST',body:JSON.stringify({artifact_id:candidate.artifact_id,evaluation_id:candidate.evaluation_id,idempotency_key:'browser-recorded-selection'})});
-    await api(`/api/v1/applications/${id}/submitted`, {method:'POST',body:JSON.stringify({resume_decision:'selected',idempotency_key:'browser-recorded-submit'})});
-    return id;
+    const draftShortlist = await api('/api/v1/shortlist');
+    return {id, draftShortlist};
   });
+  const applicationId = preparedApplication.id;
+  assert.equal(preparedApplication.draftShortlist.recommendations.find(job => job.company === 'Northstar Labs').recent_company_application, null);
+  await page.evaluate(async id => {
+    await api(`/api/v1/applications/${id}/submitted`, {method:'POST',body:JSON.stringify({resume_decision:'selected',idempotency_key:'browser-recorded-submit'})});
+  }, applicationId);
   await page.goto(url+`/#applications/${applicationId}/documents`);
   await page.locator('#workspace-documents').getByRole('link', {name:'View PDF'}).waitFor();
   assert.equal(await page.getByRole('button', {name:'I submitted',exact:true}).count(), 0);
@@ -267,6 +328,25 @@ try {
   assert.equal(await page.locator('#application-workspace .applied-date').count(), 0);
   assert.equal(await page.locator('#application-list').getByRole('link', {name:'Open posting'}).count(), 0);
   await snapshot('submitted'); await pace(page);
+  await page.goto(url+'/#shortlist');
+  await page.waitForFunction(() => state.shortlist?.recommendations.some(job => job.company === 'Northstar Labs' && job.recent_company_application));
+  const modelRoleCount = await page.evaluate(() => state.shortlist.recommendations.length);
+  assert.equal(await page.locator('#exclude-recent-companies').isChecked(), true);
+  assert.equal(await role.count(), 0);
+  assert.equal(await page.locator('#shortlist-company-filter-status').innerText(), `${modelRoleCount - 1} of ${modelRoleCount} roles shown · 1 hidden.`);
+  await snapshot('shortlist-company-exclusion');
+  const refreshedCompanyApplication = await page.evaluate(() => state.shortlist.recommendations.find(job => job.company === 'Northstar Labs').recent_company_application);
+  assert.deepEqual(refreshedCompanyApplication, {application_id:applicationId, applied_at:submittedAt, window_days:180});
+  await page.locator('#exclude-recent-companies').uncheck();
+  const appliedBadge = await assertCompanyApplied(role, applicationId, submittedAt);
+  assert.equal(await page.evaluate(() => localStorage.getItem('career-platform:exclude-recent-companies')), 'false');
+  assert.equal(await page.locator('#shortlist-list .card').filter({hasText:'Harbor Systems'}).locator('.shortlist-company-applied').count(), 0);
+  await snapshot('shortlist-applied');
+  await appliedBadge.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForURL(`**/#applications/${applicationId}/overview`);
+  await page.locator('#workspace-company').filter({hasText:'Northstar Labs'}).waitFor();
+  report.checks.push('Company application badge excludes drafts/no history, refreshes on cached model reads after submission, shows the exact date and opens the application by keyboard.');
   runFixturePython(['-c', `
 import sqlite3,sys
 from job_search.collection.boards import _prepare
@@ -372,8 +452,31 @@ for name in ['retry','dismiss']:
   const failedMail = page.locator('#attention-list article').filter({hasText:'Mail failure retry'});
   await failedMail.getByRole('button',{name:'Retry processing',exact:true}).waitFor();
   assert.equal(await failedMail.getByRole('link',{name:'Open in Outlook'}).getAttribute('href'),'https://outlook.live.com/mail/0/inbox/id/fixture');
-  await failedMail.getByText('Technical details',{exact:true}).click();
+  // Settle the route load before starting the controlled refresh race below.
+  await page.waitForLoadState('networkidle');
+  // Reproduce the production race: open a disclosure while an async refresh is
+  // waiting on actions, then let that response replace the review cards.
+  let releaseReviewActions, reviewActionsStarted;
+  const actionsHeld = new Promise(resolve => { releaseReviewActions = resolve; });
+  const actionsStarted = new Promise(resolve => { reviewActionsStarted = resolve; });
+  const holdReviewActions = async route => {
+    const response = await route.fetch();
+    reviewActionsStarted();
+    await actionsHeld;
+    await route.fulfill({response});
+  };
+  await page.route('**/api/v1/actions', holdReviewActions);
+  await page.evaluate(() => { window.__reviewRefreshForTest = loadReviewQueue(); });
+  await actionsStarted;
+  try {
+    await failedMail.getByText('Technical details',{exact:true}).click();
+    await failedMail.getByText('evidence quote and span do not match sanitized mail',{exact:true}).waitFor({state:'visible'});
+  } finally { releaseReviewActions(); }
+  await page.evaluate(() => window.__reviewRefreshForTest);
+  await page.unroute('**/api/v1/actions', holdReviewActions);
   await failedMail.getByText('evidence quote and span do not match sanitized mail',{exact:true}).waitFor({state:'visible'});
+  assert.equal(await page.locator('#attention-list article').filter({hasText:'Mail failure dismiss'}).locator('details').getAttribute('open'), null);
+  report.checks.push('An in-flight Review refresh preserves expanded technical details without opening unrelated records.');
   await snapshot('mail-failure-review');
   const retryResponse = page.waitForResponse(response => response.url().endsWith('/api/v1/mail/failures/resolve'));
   await failedMail.getByRole('button',{name:'Retry processing',exact:true}).click();
@@ -422,11 +525,16 @@ for name in ['retry','dismiss']:
       if (await page.locator('html').getAttribute('data-theme') !== theme) await toggle.click();
       for(const hash of [`#applications/${applicationId}/messages`,'#review','#shortlist','#career','#ops','#settings']) {
         await page.goto(url+'/'+hash); await page.waitForTimeout(200);
+        if (hash === '#shortlist') {
+          await assertCompanyApplied(role, applicationId, submittedAt);
+          if (width === 390) await snapshot(`shortlist-applied-mobile-${theme}`);
+        }
         assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth), `overflow at ${width} ${theme} ${hash}`);
       }
     }
     await page.goto(url+`/#applications/${applicationId}/messages`); await page.locator('#workspace-messages .message-body').waitFor(); await snapshot(`mobile-${width}`);
     assert.equal(await page.locator('#application-list').isVisible(), false);
+    await assertNoModelScores('#application-workspace');
     await page.locator('.workspace-back').click();
     await page.locator('#application-search').waitFor();
     assert.equal(await page.locator('#application-workspace').isVisible(), false);
@@ -439,14 +547,24 @@ for name in ['retry','dismiss']:
   assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
   // Disabling browser storage must not disable theme selection or the application.
   const restricted=await browser.newContext();
+  // Reuse the authenticated session's saved model list, without its storage preferences.
+  await restricted.addCookies(await context.cookies());
   await restricted.addInitScript(()=>Object.defineProperty(window,'localStorage',{get(){throw new DOMException('Blocked','SecurityError');}}));
   const restrictedPage=await restricted.newPage();
   restrictedPage.on('pageerror',error=>pageErrors.push(error.message));
   await restrictedPage.goto(url);
   await restrictedPage.getByRole('button',{name:'Dark mode',exact:true}).click();
   assert.equal(await restrictedPage.locator('html').getAttribute('data-theme'),'dark');
+  await restrictedPage.goto(url+'/#shortlist');
+  await restrictedPage.selectOption('#shortlist-source', 'model');
+  await restrictedPage.waitForFunction(() => state.shortlist?.recommendations.some(job => job.recent_company_application));
+  assert.equal(await restrictedPage.locator('#exclude-recent-companies').isChecked(), true);
+  assert.equal(await restrictedPage.locator('#shortlist-list .card').count(), modelRoleCount - 1);
+  await restrictedPage.locator('#exclude-recent-companies').uncheck();
+  assert.equal(await restrictedPage.locator('#shortlist-list .card').count(), modelRoleCount);
   await restricted.close();
   report.checks.push('Light preference persists and theme selection works with browser storage blocked.');
+  report.checks.push('Company exclusion defaults on and can be toggled when browser storage is blocked.');
   // Publish over the real authenticated MCP boundary while the dashboard is running.
   await page.goto(url+'/#shortlist');
   await advance('curated');
@@ -462,12 +580,74 @@ for name in ['retry','dismiss']:
   assert(firstList);
   const savedCards=page.locator('#shortlist-list .card');
   assert.equal(await savedCards.count(), 2);
-  assert.equal(await savedCards.nth(1).getByRole('link',{name:'View application'}).count(), 1);
+  assert.equal(await savedCards.nth(1).getByRole('link',{name:'View application',exact:true}).count(), 1);
+  await assertCompanyApplied(role, applicationId, submittedAt);
+  assert.equal(await savedCards.filter({hasText:'Harbor Systems'}).locator('.shortlist-company-applied').count(), 0);
   assert(!/Ranking score/.test(await page.locator('#shortlist-list').innerText()));
+  // A fresh browser defaults to exclusion for both actual API sources; the
+  // opt-out persists through source changes and reload without changing lists.
+  const freshContext = await browser.newContext();
+  await freshContext.addCookies(await context.cookies());
+  const freshPage = await freshContext.newPage();
+  freshPage.on('pageerror', error => pageErrors.push(error.message));
+  await freshPage.goto(url+'/#shortlist');
+  await freshPage.selectOption('#shortlist-source', 'curated');
+  await freshPage.locator('.curated-explanation').first().waitFor();
+  assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), true);
+  assert.equal(await freshPage.locator('#shortlist-list .card').count(), 1);
+  assert.equal(await freshPage.locator('#shortlist-list .card .job-company').innerText(), 'Harbor Systems');
+  await freshPage.selectOption('#shortlist-source', 'model');
+  await freshPage.waitForFunction(() => state.shortlist?.source !== 'curated' && state.shortlist?.recommendations.some(job => job.recent_company_application));
+  assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), true);
+  assert.equal(await freshPage.locator('#shortlist-list .card').count(), modelRoleCount - 1);
+  await freshPage.locator('#exclude-recent-companies').uncheck();
+  assert.equal(await freshPage.locator('#shortlist-list .card').count(), modelRoleCount);
+  await freshPage.selectOption('#shortlist-source', 'curated');
+  await freshPage.locator('.curated-explanation').first().waitFor();
+  assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), false);
+  assert.equal(await freshPage.locator('#shortlist-list .card').count(), 2);
+  await freshPage.reload();
+  await freshPage.locator('.curated-explanation').first().waitFor();
+  assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), false);
+  assert.equal(await freshPage.locator('#shortlist-list .card').count(), 2);
+  await freshContext.close();
+  report.checks.push('Fresh browsers exclude recently applied companies in Codex and model lists; opting out persists across source switches and reload.');
   // Date sorting must be independent of publication/ranking and never invent dates.
   // Isolate the temporary date fixture from in-flight loads and window-focus refresh.
   // Reload below restores normal routing and verifies preference persistence.
   await page.evaluate(() => { ++shortlistLoadEpoch; consoleState.view = 'sort-fixture'; });
+  const originalShortlist = await page.evaluate(() => state.shortlist);
+  for (const source of ['curated', 'model']) {
+    await page.evaluate(({result, source}) => renderShortlist({...result, source}), {result:originalShortlist, source});
+    const originalRanks = await page.locator('#shortlist-list .rank').allTextContents();
+    const remainingRanks = await page.evaluate(() => state.shortlist.recommendations
+      .filter(job => !job.recent_company_application).map(job => String(job.rank).padStart(2, '0')));
+    let writes = 0;
+    const countWrite = request => { if (request.method() !== 'GET' && /\/api\/v1\//.test(request.url())) writes++; };
+    page.on('request', countWrite);
+    await page.locator('#exclude-recent-companies').check();
+    assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(), remainingRanks);
+    assert.equal(await page.locator('#shortlist-company-filter-status').innerText(), '1 of 2 roles shown · 1 hidden.');
+    assert.deepEqual(await page.evaluate(() => state.shortlist.recommendations), originalShortlist.recommendations);
+    await page.locator('#exclude-recent-companies').uncheck();
+    assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(), originalRanks);
+    // Filtering follows the API's exact company-history marker, including a
+    // different role at the same company, and explains a fully hidden list.
+    await page.evaluate(() => {
+      const marker = state.shortlist.recommendations.find(job => job.recent_company_application).recent_company_application;
+      renderShortlist({...state.shortlist, recommendations:state.shortlist.recommendations.map(job => ({...job, recent_company_application:marker}))});
+    });
+    await page.locator('#exclude-recent-companies').check();
+    assert.equal(await page.locator('#shortlist-list .card').count(), 0);
+    assert.equal(await page.locator('#shortlist-company-filter-status').innerText(), '0 of 2 roles shown · 2 hidden.');
+    assert.equal(await page.locator('#shortlist-list').innerText(), 'All roles in this list are from companies you applied to in the last 180 days. Uncheck “Exclude recently applied companies” to show them.');
+    await page.locator('#exclude-recent-companies').uncheck();
+    assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(), originalRanks);
+    page.off('request', countWrite);
+    assert.equal(writes, 0, 'company exclusion must not publish, rank, or alter saved data');
+  }
+  await page.evaluate(result => renderShortlist(result), originalShortlist);
+  report.checks.push('Company exclusion retains original ranks and recommendations, explains all-hidden lists, restores every role on opt-out, and performs no writes for either source.');
   const dateOrders = await page.evaluate(() => {
     const jobs = [
       {id:'missing', first_seen:'2026-10-01T00:00:00Z'},
@@ -520,6 +700,7 @@ for name in ['retry','dismiss']:
   await page.waitForURL('**/#shortlist/'+firstList);
   await page.reload(); await page.locator('.curated-explanation').first().waitFor();
   assert.equal(await page.locator('#curated-list').inputValue(), firstList);
+  await assertCompanyApplied(role, applicationId, submittedAt);
   await page.selectOption('#shortlist-source', 'model');
   await page.locator('#shortlist-form').waitFor({state:'visible'});
   await page.selectOption('#shortlist-source', 'curated');
@@ -536,6 +717,7 @@ for name in ['retry','dismiss']:
   assert.equal(await page.locator('#job-preview').getByRole('button',{name:'Prepare application'}).count(), 0);
   await page.getByRole('button',{name:'Close job preview'}).click();
   report.checks.push('Authenticated agent publishing appears on saved-list refresh and curated focus, survives reload, preserves order/history, escapes explanations, switches sources and previews roles without a preparation action.');
+  report.checks.push('Saved curated lists retain the company application badge and application link across reload; badges fit light/dark layouts from 390 to 1440px.');
   await page.setViewportSize(viewport);
   runFixturePython(['-c', `
 import sys

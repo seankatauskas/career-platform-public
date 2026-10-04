@@ -1,0 +1,59 @@
+# Opt-in authenticated Telegram interactions. Add after cloud and Hermes overlays.
+services:
+  interactions:
+    platform: "${JOB_SEARCH_PLATFORM:-linux/amd64}"
+    image: "${JOB_SEARCH_IMAGE:-job-search-control-plane:local}"
+    user: "${JOB_SEARCH_UID:-10001}:${JOB_SEARCH_GID:-10001}"
+    init: true
+    read_only: true
+    command: ["--config", "/run/job-search/config.json", "serve", "interactions", "--bind-host", "0.0.0.0", "--allowed-host", "127.0.0.1", "--allowed-host", "interactions"]
+    networks: [agent-boundary]
+    environment:
+      JOB_SEARCH_MAINTENANCE_GATE: /run/job-search-maintenance/gate.json
+      HOME: /var/lib/job-search/home
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_MAINTENANCE_DIR:?set JOB_SEARCH_MAINTENANCE_DIR}"
+        target: /run/job-search-maintenance
+        read_only: true
+      - type: bind
+        source: "${JOB_SEARCH_STATE_DIR:?set JOB_SEARCH_STATE_DIR}"
+        target: /var/lib/job-search
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/config.json"
+        target: /run/job-search/config.json
+        read_only: true
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/interaction-token"
+        target: /run/job-search/interaction-token
+        read_only: true
+        bind: {create_host_path: false}
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-m", "job_search.cloud", "--config", "/run/job-search/config.json", "healthcheck", "interactions"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  hermes:
+    environment:
+      JOB_SEARCH_INTERACTION_URL: http://interactions:8768
+      JOB_SEARCH_INTERACTION_TOKEN_FILE: /run/job-search-interaction-token
+      JOB_SEARCH_TELEGRAM_BOT_ID: "${JOB_SEARCH_TELEGRAM_BOT_ID:?set JOB_SEARCH_TELEGRAM_BOT_ID}"
+      JOB_SEARCH_TELEGRAM_USER_ID: "${JOB_SEARCH_TELEGRAM_USER_ID:?set JOB_SEARCH_TELEGRAM_USER_ID}"
+      JOB_SEARCH_TELEGRAM_CHAT_ID: "${JOB_SEARCH_TELEGRAM_CHAT_ID:?set JOB_SEARCH_TELEGRAM_CHAT_ID}"
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/interaction-token"
+        target: /run/job-search-interaction-token
+        read_only: true
+        bind: {create_host_path: false}
+    depends_on:
+      interactions: {condition: service_healthy}

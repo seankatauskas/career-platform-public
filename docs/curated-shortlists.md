@@ -4,6 +4,10 @@ A Codex session chooses jobs from the existing catalog, then publishes its order
 selection to Shortlist. Each publication creates one durable database record with
 ordered job entries. The app does not choose, rerank, or train on these selections.
 
+For recurring, evidence-backed reviews, use the [agent review workspace](agent-job-reviews.md).
+It adds coverage tracking, independent checks, and atomic broad/targeted publication.
+The direct publishing contract below remains available for other caller-selected lists.
+
 ## Agent workflow
 
 1. Wait for the requested collection refresh to finish. Use the configured `jobs_db`

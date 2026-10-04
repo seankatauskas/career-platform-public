@@ -38,3 +38,13 @@
   #applications .workspace-heading h3 { font-size: 22px; }
   #applications .workspace-tabs { gap: 16px; }
 }
+
+#workspace-lifecycle { margin-bottom: 24px; }
+.lifecycle-item { border-top: 1px solid var(--line); padding: 14px 0; }
+.lifecycle-item h5 { margin: 0 0 8px; font-size: 15px; }
+.lifecycle-form { margin: 16px 0; }
+.lifecycle-form > summary { cursor: pointer; font-weight: 600; }
+.lifecycle-form form { margin-top: 16px; flex-wrap: wrap; }
+.lifecycle-proposal { overflow-wrap: anywhere; }
+.lifecycle-proposal dt { font-weight: 600; margin-top: 10px; }
+.lifecycle-proposal dd { margin: 4px 0 8px; }

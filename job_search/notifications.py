@@ -267,14 +267,19 @@ class HermesSendClient:
                 input_text=encoded,
                 timeout_seconds=self.timeout_seconds,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            raise NotificationSendError(
+                "delivery_reconciliation_required", retryable=False
+            ) from exc
+        except OSError as exc:
             raise NotificationSendError(
                 "hermes send is temporarily unavailable", retryable=True
             ) from exc
         if result.returncode:
             raise NotificationSendError(
-                f"hermes send exited with status {result.returncode}",
-                retryable=result.returncode not in {2, 64},
+                f"hermes send exited with status {result.returncode}"
+                if result.returncode in {2, 64} else "delivery_reconciliation_required",
+                retryable=False,
             )
 
 
@@ -374,6 +379,8 @@ class NotificationOutboxHandler:
             if heartbeat is not None and not heartbeat():
                 raise RuntimeError("notification task lease was lost")
 
+        from .interactions.notifications import InteractionDeliveryPending
+
         delivered = retried = dead = 0
         for _ in range(raw_limit):
             keep_work_lease()
@@ -386,8 +393,20 @@ class NotificationOutboxHandler:
             )
             if claimed is None:
                 break
+            revalidate = getattr(self._ledger, "validate_notification_claim", None)
+            if revalidate is not None and not revalidate(
+                str(claimed["notification_id"]), str(claimed["lease_token"]), _utc_text(self._now())
+            ):
+                continue
             try:
                 self._sender.send(claimed)
+            except InteractionDeliveryPending as exc:
+                state = self._ledger.defer_notification_for_receipt(
+                    str(claimed["notification_id"]), str(claimed["lease_token"]), stamp,
+                    _utc_text(now + timedelta(seconds=exc.retry_after_seconds)),
+                )
+                if state == "delivered":
+                    delivered += 1
             except NotificationSendError as exc:
                 retryable = exc.retryable and int(claimed["attempts"]) < int(
                     claimed["max_attempts"]
@@ -417,19 +436,16 @@ class NotificationOutboxHandler:
                 else:
                     dead += 1
             except Exception:
-                retry_at = _utc_text(now + timedelta(seconds=60))
-                completion = self._ledger.complete_notification(
+                # An unexpected failure can happen after external acceptance.
+                # Preserve uncertainty rather than blindly issuing another send.
+                self._ledger.complete_notification(
                     str(claimed["notification_id"]),
                     str(claimed["lease_token"]),
-                    "retryable_failure",
+                    "permanent_failure",
                     stamp,
-                    retry_at=retry_at,
-                    error="notification sender failed",
+                    error="delivery_reconciliation_required",
                 )
-                if completion.get("status") == "dead":
-                    dead += 1
-                else:
-                    retried += 1
+                dead += 1
             else:
                 self._ledger.complete_notification(
                     str(claimed["notification_id"]),

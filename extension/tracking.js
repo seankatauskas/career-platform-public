@@ -14,7 +14,7 @@
     let board = '', id = '';
     if (ats === 'greenhouse') {
       if ((p.length === 3 || (p.length === 4 && p[3] === 'confirmation')) && p[1] === 'jobs') [board, , id] = p;
-      if (['embed/job_app', 'embed/job_board/job'].includes(p.join('/'))) {
+      if (['embed/job_app', 'embed/job_app/confirmation', 'embed/job_board/job'].includes(p.join('/'))) {
         board = u.searchParams.get('for') || ''; id = u.searchParams.get('token') || u.searchParams.get('gh_jid') || '';
       }
       if (!/^\d+$/.test(id)) return null;
@@ -28,21 +28,36 @@
     return {ats, job_id: id, board, canonical_url: `${u.origin}/${board}${ats === 'greenhouse' ? '/jobs' : ''}/${id}`};
   }
   function sameJob(a, b) { return !!a && !!b && a.ats === b.ats && a.job_id === b.job_id && a.board.toLowerCase() === b.board.toLowerCase(); }
-  function submissionRequest(details, job) {
+  function submissionRequest(details, job, exactEndpoint = false) {
     if (details.method !== 'POST' || !job) return false;
     const u = new URL(details.url);
     if (u.protocol !== 'https:') return false;
     if (job.ats === 'lever' && hosts.lever.includes(u.hostname))
       return u.pathname === `/${job.board}/${job.job_id}/apply`;
     if (job.ats === 'greenhouse' && [...hosts.greenhouse, 'boards-api.greenhouse.io'].includes(u.hostname))
-      return /\/(?:submit_app|applications)(?:\/|$)/.test(u.pathname) || u.pathname === `/v1/boards/${job.board}/jobs/${job.job_id}`;
+      return (exactEndpoint ? /\/(?:submit_app|applications)\/?$/ : /\/(?:submit_app|applications)(?:\/|$)/).test(u.pathname)
+        || u.pathname === `/v1/boards/${job.board}/jobs/${job.job_id}`
+        || u.pathname === `/embed/${job.board}/jobs/${job.job_id}`;
     if (job.ats === 'ashby' && hosts.ashby.includes(u.hostname))
-      return u.pathname === '/api/non-user-graphql' && ['ApiSubmitApplication', 'SubmitApplication'].includes(u.searchParams.get('op'));
+      return u.pathname === '/api/non-user-graphql' && [
+        'ApiSubmitApplication', 'SubmitApplication',
+        'ApiSubmitSingleApplicationFormAction', 'ApiSubmitMultipleFormsAction'
+      ].includes(u.searchParams.get('op'));
     return false;
   }
   function outcome(doc, url, job) {
     const current = identify(url);
     if (job && sameJob(current, job) && /\/thanks\/?$/.test(new URL(url).pathname)) return 'success_route';
+    if (current?.ats === 'ashby' && sameJob(current, job)) {
+      // Ashby prefixes its customizable acknowledgment with a separate "Success"
+      // heading. Detect its scoped status container, including localized copy.
+      for (const el of doc.querySelectorAll('.ashby-application-form-success-container [role="status"]')) {
+        if (el.getClientRects().length && el.textContent.trim()) return 'success_dom';
+      }
+      for (const el of doc.querySelectorAll('.ashby-application-form-failure-container, .ashby-application-form-blocked-application-container')) {
+        if (el.getClientRects().length && el.textContent.trim()) return 'validation_error';
+      }
+    }
     // Scope text checks to visible status/headline elements, not job descriptions.
     const nodes = doc.querySelectorAll('[role="alert"], [role="status"], h1, h2, h3, .application-confirmation, .application-success, .post-apply-message, #application_confirmation');
     for (const el of nodes) {

@@ -167,7 +167,9 @@ try {
   await grant.evaluate(({id, origin})=>chrome.developerPrivate.addHostPermission(id,`${origin}/*`),{id,origin:hosts.cloud});
   await grant.close();
   const browserCode = await command({action:'autopair',cloud:true});
-  await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4100?fixture=tracking');
+  // Open directly before pairing, then submit without refreshing or visiting a
+  // dashboard posting. Enrollment must activate this existing content script.
+  await atsPage.goto('https://jobs.ashbyhq.com/acme/00000000-0000-4000-8000-000000000001?fixture=tracking');
   await atsPage.bringToFront(); await popup.goto(popupUrl);
   await popup.locator('#dashboard-base').fill(hosts.cloud);
   await popup.locator('#pairing-code').fill(browserCode.pairing_code);
@@ -175,12 +177,13 @@ try {
   await waitFor(async()=>!!(await worker.evaluate(()=>chrome.storage.local.get('browser_connection'))).browser_connection,'persistent browser connected');
   const initial = (await command({action:'applications'})).applications.length;
   const pages = [
-    ['greenhouse','https://job-boards.greenhouse.io/acme/jobs/4100?fixture=tracking'],
     ['ashby','https://jobs.ashbyhq.com/acme/00000000-0000-4000-8000-000000000001?fixture=tracking'],
+    ['greenhouse','https://job-boards.greenhouse.io/acme/jobs/4100?fixture=tracking'],
     ['lever','https://jobs.lever.co/acme/00000000-0000-4000-8000-000000000002?fixture=tracking']
   ];
   for(const [ats,url] of pages) {
-    await atsPage.goto(url); await atsPage.bringToFront();
+    if(ats!=='ashby') await atsPage.goto(url);
+    await atsPage.bringToFront();
     await waitFor(async()=>Object.values(await worker.evaluate(()=>chrome.storage.local.get(null))).some(v=>v?.job?.ats===ats && v.job.canonical_url===url.split('?')[0]),'job recognized');
     assert.equal((await command({action:'applications'})).applications.length,initial+pages.findIndex(p=>p[0]===ats));
     await atsPage.bringToFront(); await popup.goto(popupUrl);
@@ -238,7 +241,7 @@ try {
     assert.equal(timeline.application.current_phase,'active');
     assert.equal(timeline.events.filter(e=>e.event_type==='submission_observed').length,1);
   }
-  report.checks.push('All three ATS fixtures automatically recognize, track submission, and attach separate email confirmation; no Mark submitted action.');
+  report.checks.push('All three ATS fixtures automatically recognize direct URLs, track submission, and attach separate email confirmation; Ashby uses current Success markup on a tab opened before browser pairing, with no dashboard handoff or Mark submitted action.');
   report.checks.push('All three ATS forms retain exact prose, rich text, salary, choices, attestations, contact fields and filenames; secrets excluded; dashboard renders safely after reload.');
   // Modern Greenhouse performs a full navigation to /confirmation after verification.
   const confirmationUrl='https://job-boards.greenhouse.io/acme/jobs/4104/confirmation';
@@ -272,6 +275,27 @@ try {
   const embeddedApp=(await command({action:'applications'})).applications.find(a=>a.job_id.endsWith('000003'));
   await waitFor(async()=>(await command({action:'state',application_id:embeddedApp.application_id})).answers.some(a=>a.snapshot.fields.some(f=>f.value==='Embedded form answer.')),'embedded answers retained');
   report.checks.push('ATS form embedded on an ungranted company host is tracked in its own frame.');
+  const embeddedConfirmation='https://job-boards.greenhouse.io/embed/job_app/confirmation?for=acme&token=4106';
+  const embedPage=url=>'https://employer.fixture.test/embed?url='+encodeURIComponent(url);
+  await atsPage.goto(embedPage(embeddedConfirmation));
+  await frame.locator('h1').waitFor();
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert(!(await command({action:'applications'})).applications.some(a=>a.job_id==='4106'), 'a direct embedded confirmation visit is not a submission');
+  await atsPage.goto(embedPage('https://job-boards.greenhouse.io/embed/job_app?for=acme&token=4106&fixture=tracking&outcome=embed_redirect'));
+  await frame.locator('#email').fill('sean@example.test');
+  await frame.locator('#why').fill('Saved before embedded Greenhouse redirect.');
+  await new Promise(resolve=>setTimeout(resolve,300));
+  await frame.locator('#submit').click();
+  await frame.getByRole('heading',{name:'Thank you for applying.'}).waitFor();
+  await waitFor(async()=>(await command({action:'applications'})).applications.some(a=>a.job_id==='4106' && a.submitted_at),'embedded Greenhouse confirmation tracked');
+  const greenhouseEmbedded=(await command({action:'applications'})).applications.find(a=>a.job_id==='4106');
+  assert.equal(greenhouseEmbedded.current_phase,'awaiting_confirmation');
+  assert.equal(greenhouseEmbedded.confirmed_at,null);
+  await waitFor(async()=>(await command({action:'state',application_id:greenhouseEmbedded.application_id})).answers.some(a=>a.snapshot.fields.some(f=>f.value==='Saved before embedded Greenhouse redirect.')),'embedded Greenhouse answers retained');
+  await atsPage.frames().find(f=>f.url()===embeddedConfirmation).goto(embeddedConfirmation);
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert.equal((await command({action:'state',application_id:greenhouseEmbedded.application_id})).timeline.events.filter(e=>e.event_type==='submission_observed').length,1);
+  report.checks.push('Embedded Greenhouse confirmation navigation preserves the job, records submission awaiting email, retains answers, and deduplicates reloads; direct confirmation visits create no application.');
   await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4101?fixture=tracking&outcome=failed');
   await atsPage.locator('#email').fill('sean@example.test');
   await new Promise(resolve=>setTimeout(resolve,300));
@@ -290,6 +314,26 @@ try {
   await command({action:'mailconfirm',application_id:uncertain.application_id});
   assert.equal((await command({action:'state',application_id:uncertain.application_id})).timeline.application.current_phase,'active');
   report.checks.push('Failed requests never count as submitted; a generic HTTP 200 remains unconfirmed until email evidence.');
+  // Button copy is not a reliable submission detector. Only a recognized ATS
+  // submission request (not an arbitrary click or form step) should recover it.
+  await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4105?fixture=tracking');
+  await atsPage.locator('#email').fill('sean@example.test');
+  await atsPage.locator('#why').fill('Captured with a nonstandard final button.');
+  await atsPage.evaluate(()=>fetch('/applications/draft',{method:'POST',body:'{}'}));
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert(!(await command({action:'applications'})).applications.some(a=>a.job_id==='4105'),'draft autosave must not create an application');
+  await atsPage.evaluate(()=>document.querySelector('#submit').textContent='Finish');
+  await atsPage.locator('#submit').click();
+  await waitFor(async()=>(await command({action:'applications'})).applications.some(a=>a.job_id==='4105' && a.submitted_at),'nonstandard final button tracked');
+  const nonstandard=(await command({action:'applications'})).applications.find(a=>a.job_id==='4105');
+  await waitFor(async()=>(await command({action:'state',application_id:nonstandard.application_id})).answers.some(a=>a.snapshot.fields.some(f=>f.value==='Captured with a nonstandard final button.')),'nonstandard submit answers retained');
+  assert.equal((await command({action:'state',application_id:nonstandard.application_id})).answers.length,1);
+  await atsPage.locator('#why').fill('Changed answer for a second manual attempt.');
+  await atsPage.locator('#submit').click();
+  await waitFor(async()=>(await command({action:'state',application_id:nonstandard.application_id})).answers.length===2,'nonstandard retry preserves its own answers');
+  const retriedAnswers=(await command({action:'state',application_id:nonstandard.application_id})).answers;
+  assert(retriedAnswers.some(a=>a.snapshot.fields.some(f=>f.value==='Changed answer for a second manual attempt.')));
+  report.checks.push('Recognized ATS submission requests recover nonstandard final buttons without losing answers or treating intermediate steps as submissions.');
   await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4103?fixture=tracking');
   await atsPage.locator('#email').fill('sean@example.test'); await new Promise(resolve=>setTimeout(resolve,300));
   const longAnswer='Prior step prose\n'+('Experience across multiple services.\n'.repeat(1400));
@@ -306,6 +350,14 @@ try {
   await waitFor(async()=>Object.keys(await worker.evaluate(()=>chrome.storage.local.get(null))).filter(k=>k.startsWith('tracking-event-')).length>=2,'offline observations queued');
   await waitFor(async()=>Object.values(await worker.evaluate(()=>chrome.storage.local.get(null))).some(v=>v?.item?.kind==='site_acknowledged'),'offline success retained');
   await waitFor(async()=>Object.keys(await worker.evaluate(()=>chrome.storage.local.get(null))).some(k=>k.startsWith('tracking-answer-')&&!k.startsWith('tracking-answer-result-')),'offline answers queued');
+  const pendingBefore=await worker.evaluate(()=>chrome.storage.local.get(null));
+  assert.equal((await worker.evaluate(()=>trackingPopup({type:'trackingDisconnect'}))).discard_required,true);
+  assert.deepEqual(await worker.evaluate(()=>chrome.storage.local.get('browser_connection')),{browser_connection:pendingBefore.browser_connection});
+  assert(Object.keys(await worker.evaluate(()=>chrome.storage.local.get(null))).some(k=>k.startsWith('tracking-answer-')&&!k.startsWith('tracking-answer-result-')));
+  await worker.evaluate(origin=>chrome.permissions.remove({origins:[`${origin}/*`]}),hosts.cloud);
+  await new Promise(resolve=>setTimeout(resolve,100));
+  assert.deepEqual(await worker.evaluate(()=>chrome.storage.local.get('browser_connection')),{browser_connection:pendingBefore.browser_connection});
+  assert(Object.keys(await worker.evaluate(()=>chrome.storage.local.get(null))).some(k=>k.startsWith('tracking-answer-')&&!k.startsWith('tracking-answer-result-')));
   assert(!JSON.stringify(await worker.evaluate(()=>chrome.storage.local.get(null))).includes('Prior step prose'));
   await context.close();
   await command({action:'offline',value:false});
@@ -318,6 +370,17 @@ try {
     ]
   });
   worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
+  // Restore permission only once the dashboard is online. Retrying against the
+  // intentional outage first correctly increases backoff beyond this test's wait.
+  const restoreAccess=await context.newPage();
+  await restoreAccess.goto('chrome://extensions');
+  await restoreAccess.evaluate(({id,origin})=>chrome.developerPrivate.addHostPermission(id,`${origin}/*`),{id,origin:hosts.cloud});
+  await restoreAccess.close();
+  popup=await context.newPage();await popup.goto(popupUrl);
+  await popup.getByRole('button',{name:'Restore dashboard access'}).click();
+  await waitFor(async()=>await worker.evaluate(origin=>chrome.permissions.contains({origins:[`${origin}/*`]}),hosts.cloud),'same pairing regains dashboard permission');
+  assert.deepEqual(await worker.evaluate(()=>chrome.storage.local.get('browser_connection')),{browser_connection:pendingBefore.browser_connection});
+  report.checks.push('Disconnect warns before data loss; revoked dashboard access can be restored using the same pairing without deleting queued answers.');
   await waitFor(async()=>{
     await worker.evaluate(()=>flushTracking());
     return (await command({action:'applications'})).applications.some(a=>a.job_id==='4103' && a.submitted_at);

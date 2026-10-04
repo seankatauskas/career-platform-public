@@ -15,6 +15,7 @@ import mimetypes
 import secrets
 import sqlite3
 import struct
+from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -820,11 +821,19 @@ def _candidate_scores(
                 marks = ",".join("?" for _ in group)
                 rows = con.execute(
                     "SELECT family_id,final_score,dense_linear_score,"
-                    "dense_neighbor_score,sparse_score FROM preference_scores "
+                    "dense_neighbor_score,sparse_score,explanation_json FROM preference_scores "
                     f"WHERE run_id=? AND family_id IN ({marks})",
                     (champion["value"], *group),
                 ).fetchall()
-                scores.update({str(row["family_id"]): dict(row) for row in rows})
+                for row in rows:
+                    score = dict(row)
+                    try:
+                        explanation = json.loads(score.pop("explanation_json") or "{}")
+                    except (TypeError, ValueError):
+                        explanation = {}
+                    for name, value in _visible_score_components(score, explanation).items():
+                        score[name + "_score"] = value
+                    scores[str(row["family_id"])] = score
             return scores
     except sqlite3.Error:
         return {}
@@ -1260,14 +1269,20 @@ def choose_job(
         if strategy == "uncertainty":
             selected = min(scored, key=lambda row: abs(value(row, "final_score") - 0.5))
         elif strategy == "dense_sparse_disagreement":
+            def measured_parts(row: dict[str, Any]) -> list[float]:
+                return [value(row, name) for name in (
+                    "dense_linear_score", "dense_neighbor_score", "sparse_score",
+                ) if available[row["family_id"]].get(name) is not None]
+
             def disagreement(row: dict[str, Any]) -> float:
-                parts = [
-                    value(row, "dense_linear_score"),
-                    value(row, "dense_neighbor_score"),
-                    value(row, "sparse_score"),
-                ]
+                parts = measured_parts(row)
                 return max(parts) - min(parts)
-            selected = max(scored, key=disagreement)
+            comparable = [row for row in scored if len(measured_parts(row)) >= 2]
+            if comparable:
+                selected = max(comparable, key=disagreement)
+            else:
+                selected = min(scored, key=lambda row: abs(value(row, "final_score") - 0.5))
+                strategy = "disagreement_uncertainty_fallback"
         elif strategy == "high_score":
             selected = max(scored, key=lambda row: value(row, "final_score"))
         elif strategy in {"diversity", "diversity_fallback"}:
@@ -2007,6 +2022,14 @@ def _resolved_explanations(
     return parsed
 
 
+def _visible_score_components(score: Any, explanation: Any) -> dict[str, Any]:
+    names = ("dense_linear", "dense_neighbor", "sparse")
+    computed = explanation.get("computed_components", names) if isinstance(explanation, dict) else names
+    if not isinstance(computed, (list, tuple)):
+        computed = ()
+    return {name: score[name + "_score"] if name in computed else None for name in names}
+
+
 def _recommendation_candidates(
     con: sqlite3.Connection,
     score_rows: list[sqlite3.Row],
@@ -2126,11 +2149,7 @@ def _recommendation_candidates(
             "location_score": location_score,
             "salary_signal": salary_signal,
             "ranking_score": ranking_score,
-            "score_components": {
-                "dense_linear": score["dense_linear_score"],
-                "dense_neighbor": score["dense_neighbor_score"],
-                "sparse": score["sparse_score"],
-            },
+            "score_components": _visible_score_components(score, explanations.get(family_id, {})),
             "explanation": explanations.get(family_id, {}),
             "model_run_id": score["run_id"],
         })
@@ -2379,6 +2398,44 @@ def _proxy_profile(proxy_db_path: Path) -> dict[str, Any]:
         return {}
 
 
+def _derived_policy_has_complete_scores(
+    db_path: Path, preference_db_path: Path, policy: str, run_id: str,
+) -> bool:
+    """Keep a newly mapped sparse version hidden until its full refresh completes."""
+    try:
+        with closing(sqlite3.connect(
+            preference_db_path.resolve().as_uri() + "?mode=ro", uri=True,
+        )) as con:
+            con.execute("ATTACH DATABASE ? AS catalog", (db_path.resolve().as_uri() + "?mode=ro",))
+            con.execute("PRAGMA query_only=ON")
+            con.execute("BEGIN")
+            row = con.execute(
+                "SELECT value FROM preference_state WHERE key=?", ("policy_refresh:" + policy,),
+            ).fetchone()
+            receipt = json.loads(row[0]) if row else {}
+            if not isinstance(receipt, dict) or receipt.get("run_id") != run_id:
+                return False
+            result = receipt.get("result")
+            if not isinstance(result, dict):
+                return False
+            completed_count = result.get("scored_families")
+            if isinstance(completed_count, bool) or not isinstance(completed_count, int):
+                return False
+            total = con.execute("SELECT COUNT(*) FROM catalog.job_families").fetchone()[0]
+            stored = con.execute(
+                "SELECT COUNT(*) FROM preference_scores WHERE run_id=?", (run_id,),
+            ).fetchone()[0]
+            if not total or completed_count != total or stored != total:
+                return False
+            covered = con.execute(
+                "SELECT COUNT(*) FROM catalog.job_families f JOIN preference_scores s "
+                "ON s.family_id=f.family_id AND s.run_id=?", (run_id,),
+            ).fetchone()[0]
+            return covered == total
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return False
+
+
 def policy_recommendations(
     db_path: Path,
     preference_db_path: Path,
@@ -2414,12 +2471,23 @@ def policy_recommendations(
         compensation_low_usd=float(compensation.get("low_usd", 120_000.0)),
         compensation_high_usd=float(compensation.get("high_usd", 220_000.0)),
     )
-    results = {
-        name: recommendations(
-            db_path, preference_db_path, constrained, runs[name], excluded_job_keys
-        )
-        for name in requested
-    }
+    results = {}
+    for name in requested:
+        status = _model_status(preference_db_path, runs[name])
+        derivation = status.get("manifest", {}).get("derivation", {})
+        derived_sparse = isinstance(derivation, dict) and derivation.get("kind") == "sparse_component"
+        if derived_sparse and not _derived_policy_has_complete_scores(
+            db_path, preference_db_path, name, runs[name],
+        ):
+            status.update(ready=False, reason="awaiting_complete_policy_refresh", policy_id=name)
+            results[name] = {
+                "recommendations": [], "model": status, "options": options,
+                "candidate_pool_examined": 0, "candidate_pool_truncated": False,
+            }
+        else:
+            results[name] = recommendations(
+                db_path, preference_db_path, constrained, runs[name], excluded_job_keys,
+            )
     for name, result in results.items():
         for row in result["recommendations"]:
             row["policy_id"] = name

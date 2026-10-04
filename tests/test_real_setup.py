@@ -30,7 +30,7 @@ class RealSetupTests(unittest.TestCase):
             before=config.read_bytes(); c=load_runtime_config(config,required=True)
             self.assertEqual(c.resume_mode,'standard'); self.assertEqual(c.shortlist_policy,'selective')
             self.assertTrue(c.outlook_new_messages_only)
-            self.assertEqual(len(controls(c.application_db)),7)
+            self.assertEqual(len(controls(c.application_db)),10)
             self.assertFalse(any(r['enabled'] for r in controls(c.application_db)))
             self.assertEqual(initialize(config,root,ROOT)['status'],'already_initialized')
             self.assertEqual(config.read_bytes(),before)

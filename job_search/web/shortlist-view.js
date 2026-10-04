@@ -14,6 +14,10 @@ document.querySelector("#shortlist").innerHTML = `
         <button id="refresh-curated" class="quiet" type="button">Refresh saved lists</button>
         <button id="older-curated" class="quiet" type="button" hidden>Earlier lists</button>
       </div>
+      <div class="shortlist-company-filter">
+        <label class="check"><input id="exclude-recent-companies" type="checkbox" checked aria-describedby="shortlist-company-filter-help"> Exclude recently applied companies</label>
+        <span class="help" id="shortlist-company-filter-help">Last 180 days</span>
+      </div>
       <form id="shortlist-form" class="shortlist-filters">
         <div class="controls">
           <label>Posting window<select id="shortlist-days">
@@ -34,6 +38,13 @@ document.querySelector("#shortlist").innerHTML = `
       <p id="shortlist-feedback" class="notice" role="status" hidden></p>
       <p class="help" id="shortlist-window">Open postings from the last 30 days, sorted by relevance. Older Greenhouse records may use an update date.</p>
       <p class="help" id="shortlist-loading" role="status" aria-live="polite" hidden></p>
+      <p class="meta" id="agent-review-status" hidden></p>
+      <details class="agent-review-history" id="agent-review-details" hidden><summary>Review details</summary>
+        <div id="agent-review-summary" hidden></div>
+        <button class="quiet" type="button" id="refresh-agent-reviews">Refresh review progress</button>
+        <div id="agent-review-history" aria-live="polite"></div>
+      </details>
+      <p class="meta" id="shortlist-company-filter-status" role="status" hidden></p>
       <div id="shortlist-list" class="card-grid empty">Refresh to find roles that match your search.</div>
 `;
 
@@ -42,6 +53,17 @@ let shortlistLoadEpoch = 0;
 let curatedBefore = null;
 let modelShortlist = null;
 const shortlistSortKey = "career-platform:shortlist-sort";
+const shortlistCompanyFilterKey = "career-platform:exclude-recent-companies";
+let excludeRecentCompanies = true;
+try {
+  excludeRecentCompanies = localStorage.getItem(shortlistCompanyFilterKey) !== "false";
+} catch (_) { /* The default still applies when browser storage is blocked. */ }
+document.querySelector("#exclude-recent-companies").checked = excludeRecentCompanies;
+document.querySelector("#exclude-recent-companies").addEventListener("change", (event) => {
+  excludeRecentCompanies = event.target.checked;
+  try { localStorage.setItem(shortlistCompanyFilterKey, String(excludeRecentCompanies)); } catch (_) { /* Session-only preference. */ }
+  if (state.shortlist) renderShortlist(state.shortlist, true);
+});
 const shortlistSortLabels = {
   "posted-newest": "Newest posted first",
   "posted-oldest": "Oldest posted first",
@@ -87,6 +109,7 @@ function setShortlistControls(source) {
   $("#curated-list-label").hidden = source !== "curated";
   $("#refresh-curated").hidden = source !== "curated";
   $("#older-curated").hidden = source !== "curated" || !curatedBefore;
+  $("#agent-review-details").hidden = source !== "curated";
 }
 
 async function loadSavedShortlists(older = false) {
@@ -125,7 +148,18 @@ async function loadSavedShortlists(older = false) {
 }
 
 function renderShortlist(result, preserveFilters = false) {
+  if (state.shortlist?.review?.review_id !== result.review?.review_id) $("#agent-review-details").open = false;
   state.shortlist = result;
+  renderAgentReviewSummary(result.review, $("#agent-review-summary"));
+  const reviewStatus = $("#agent-review-status");
+  const review = result.review;
+  reviewStatus.hidden = !review;
+  reviewStatus.textContent = !review ? ""
+    : review.disagreement_count > 0 ? "Review needs attention. See review details."
+    : review.metadata?.publication?.profile_changed_since_start ? "Reviewed using an earlier version of your profile."
+    : review.status === "published" ? "Reviewed by Codex"
+    : review.status === "abandoned" ? "Review closed before completion."
+    : "Review in progress";
   const curated = result.source === "curated";
   $("#shortlist-sort").value = shortlistSort;
   $("#shortlist-sort option[value=original]").textContent = curated ? "Codex order" : "Relevance";
@@ -143,20 +177,28 @@ function renderShortlist(result, preserveFilters = false) {
     ? `${shortlistSortLabels[shortlistSort]}. Original ranks shown; jobs without this date appear last.`
     : curated ? "Ordered by Codex." : "Sorted by relevance.";
   $("#shortlist-window").textContent = curated
-    ? (result.list_id ? `${result.title} · Saved ${displayDate(result.created_at)}${result.window_start ? ` · Reviewed ${displayDate(result.window_start)} – ${displayDate(result.window_end)}` : ""}. ${ordering}` : "Codex can publish its selected jobs here after reviewing the catalog.")
+    ? (result.list_id ? `${result.title} · Saved ${displayDate(result.created_at)}${result.window_start && !result.review ? ` · Reviewed ${displayDate(result.window_start)} – ${displayDate(result.window_end)}` : ""}. ${ordering}` : "Codex can publish its selected jobs here after reviewing the catalog.")
     : `Open postings from the last ${days === 1 ? "24 hours" : `${days} days`}. ${ordering} Older Greenhouse records may use an update date for filtering.`;
   const list = $("#shortlist-list");
   clear(list);
   const freshness = document.getElementById("shortlist-freshness") || node("p", "help");
   freshness.id = "shortlist-freshness";
-  const stale = Object.values(result.data_status || {}).find((item) => item.status === "stale" || !item.freshness_verified);
+  const stale = !curated && Object.values(result.data_status || {}).find((item) => item.status === "stale" || !item.freshness_verified);
   freshness.textContent = stale ? `Saved model scores: ${postingDate(stale.latest_score_at) || "date unavailable"}. Latest posting check: ${postingDate(stale.source_last_seen) || "unknown"}. Ranking refresh is incomplete; newly collected or changed jobs may be missing.` : "";
   freshness.hidden = !stale;
   list.before(freshness);
-  const recommendations = sortedShortlistJobs(result.recommendations || [], shortlistSort);
+  const allRecommendations = result.recommendations || [];
+  const visibleRecommendations = excludeRecentCompanies
+    ? allRecommendations.filter(job => !job.recent_company_application) : allRecommendations;
+  const recommendations = sortedShortlistJobs(visibleRecommendations, shortlistSort);
+  const hiddenCount = allRecommendations.length - recommendations.length;
+  const filterStatus = $("#shortlist-company-filter-status");
+  filterStatus.hidden = !allRecommendations.length;
+  filterStatus.textContent = `${recommendations.length} of ${allRecommendations.length} roles shown${hiddenCount ? ` · ${hiddenCount} hidden` : ""}.`;
   if (!recommendations.length) {
     list.classList.add("empty");
-    list.textContent = curated ? (result.list_id ? "No jobs were selected for this list." : "No Codex picks have been published yet.") : !result.session_id && !result.options
+    list.textContent = hiddenCount ? 'All roles in this list are from companies you applied to in the last 180 days. Uncheck “Exclude recently applied companies” to show them.'
+      : curated ? (result.list_id ? "No jobs were selected for this list." : "No Codex picks have been published yet.") : !result.session_id && !result.options
       ? "Choose your posting window and refresh to load saved model rankings."
       : result.model?.ready ? "No jobs matched these filters. Try a wider posting window or adjust Advanced filters."
       : "Model rankings are not available for this policy yet. Try another policy in Advanced filters or browse Codex picks.";
@@ -169,7 +211,50 @@ function renderShortlist(result, preserveFilters = false) {
     rank.title = curated ? "Original Codex rank" : "Original relevance rank";
     card.append(rank);
     const content = jobSummary({...job, session_id: job.session_id || result.session_id});
+    const recentApplication = job.recent_company_application;
+    const company = content.querySelector(".job-company");
+    if (company && recentApplication) {
+      const companyLine = node("span", "shortlist-company");
+      company.replaceWith(companyLine);
+      const badge = node("a", "shortlist-company-applied", "Applied recently");
+      badge.href = `#applications/${encodeURIComponent(recentApplication.application_id)}/overview`;
+      const detail = `Applied to this company within the last 180 days. Applied to ${company.textContent} on ${displayDate(recentApplication.applied_at)}. View application.`;
+      badge.title = detail;
+      badge.setAttribute("aria-label", `Applied recently. ${detail}`);
+      companyLine.append(company, badge);
+    }
     if (curated && job.explanation) content.append(node("p", "curated-explanation", job.explanation));
+    if (curated && result.review && job.review_ordinal) {
+      const details = node("details", "ranking-details");
+      details.append(node("summary", "", "Assessment evidence"));
+      const body = node("div", "agent-assessment"); details.append(body);
+      let loading = false, loaded = false;
+      details.addEventListener("toggle", async () => {
+        if (!details.open || loaded || loading) return;
+        loading = true; body.textContent = "Loading assessment…";
+        try {
+          let offset = 0, text = "";
+          do {
+            const page = await api("/api/v1/job-reviews/assessment", {method: "POST", body: JSON.stringify({
+              review_id: result.review.review_id, ordinal: job.review_ordinal, offset,
+            })});
+            text += page.text; offset = page.next_offset;
+          } while (offset !== null);
+          const assessment = JSON.parse(text);
+          body.replaceChildren(node("p", "meta", `${assessment.decision.replaceAll("_", " ")} · ${assessment.alignment} alignment`));
+          for (const [label, entries] of [["Strengths", assessment.strengths], ["Gaps", assessment.gaps], ["Unknowns", assessment.unknowns]]) {
+            if (entries.length) body.append(node("h4", "", label), ...entries.map(value => node("p", "help", value)));
+          }
+          if (assessment.evidence.length) {
+            body.append(node("h4", "", "Posting evidence"));
+            for (const evidence of assessment.evidence) body.append(node("blockquote", "", evidence.quote));
+          }
+          loaded = true;
+        } catch (error) { body.textContent = error.message; }
+        finally { loading = false; }
+      });
+      content.append(details);
+    }
     if (curated && job.closed_at) content.append(node("p", "meta", "Posting closed"));
     const score = job.ranking_score ?? job.final_score;
     if (!curated && score !== undefined && score !== null) {
@@ -233,7 +318,7 @@ async function refreshShortlist(event) {
     modelShortlist = result;
     if (epoch === shortlistLoadEpoch) {
       renderShortlist(result);
-      status.textContent = `${(result.recommendations || []).length} jobs shown from saved rankings.`;
+      status.textContent = `${(result.recommendations || []).length} jobs loaded from saved rankings.`;
       status.hidden = false;
     }
   } catch (error) {
@@ -252,3 +337,49 @@ async function refreshShortlist(event) {
     button.textContent = "Refresh shortlist";
   }
 }
+
+function renderAgentReviewSummary(review, root) {
+  root.replaceChildren(); root.hidden = !review;
+  if (!review) return;
+  const pending = review.counts?.pending || 0;
+  const panel = node('section', 'agent-review-summary');
+  panel.append(node('h3', '', review.status === 'published' ? 'Reviewed by agents' : 'Review in progress'));
+  panel.append(node('p', 'help', `${displayDate(review.window_start)} to ${displayDate(review.window_end)} · Strict posting window`));
+  panel.append(node('p', 'meta', `${review.total - pending} of ${review.total} postings assessed · ${review.audit_remaining_count} independent checks remaining · ${review.disagreement_count} disagreements`));
+  const details = node('details', 'ranking-details');
+  details.append(node('summary', '', 'Coverage and collection freshness'));
+  const counts = review.counts || {};
+  details.append(node('p', 'meta', `Assessed close: ${counts.close || 0} · Slight stretch: ${counts.slight_stretch || 0} · Bigger stretch: ${counts.bigger_stretch || 0} · Broad only: ${counts.broad_only || 0} · Needs information: ${counts.needs_info || 0}`));
+  const late = review.metadata?.late_arrivals || {};
+  details.append(node('p', 'help', `Late arrivals excluded from this window: ${late.recent || 0} recent, ${late.older || 0} older, ${late.undated || 0} undated.`));
+  const scan = review.metadata?.collection?.last_scan_at;
+  details.append(node('p', 'help', scan ? `Last completed scan at review start: ${displayDate(scan)}` : 'Completed scan time unavailable. Recommendations use collected posting data.'));
+  const publication = review.metadata?.publication;
+  if (publication) details.append(node('p', 'help', `Published ${publication.broad_count} broad and ${publication.targeted_count} targeted roles; ${publication.omitted_count} unavailable or already-applied selections omitted.`));
+  if (publication?.profile_changed_since_start) details.append(node('p', 'help', 'Your profile changed during this review; these assessments use the version frozen at review start.'));
+  panel.append(details);
+  root.append(panel);
+}
+
+document.querySelector('#refresh-agent-reviews').addEventListener('click', async () => {
+  const root = $('#agent-review-history'), button = $('#refresh-agent-reviews');
+  button.disabled = true;
+  try {
+    const response = await api('/api/v1/job-reviews');
+    root.replaceChildren();
+    if (!response.reviews.length) root.append(node('p', 'help', 'No agent review sessions yet. Existing saved lists remain available above.'));
+    for (const review of response.reviews) {
+      const details = node('details', 'agent-review-entry');
+      details.append(node('summary', '', `${review.status} · ${displayDate(review.window_start)} to ${displayDate(review.window_end)}`));
+      const body = node('div'); details.append(body); root.append(details);
+      details.addEventListener('toggle', async () => {
+        if (!details.open) return;
+        try {
+          const status = await api(`/api/v1/job-reviews/${encodeURIComponent(review.review_id)}`);
+          renderAgentReviewSummary(status, body);
+        } catch (error) { body.textContent = error.message; }
+      });
+    }
+  } catch (error) { root.textContent = error.message; }
+  finally { button.disabled = false; }
+});

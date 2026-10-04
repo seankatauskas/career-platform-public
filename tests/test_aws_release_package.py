@@ -70,6 +70,18 @@ def test_package_uses_commit_blobs_preserves_modes_and_excludes_private_files() 
         assert raw == (root / "output2/release.tar.gz").read_bytes()
 
 
+def test_cost_monitor_code_and_units_are_in_the_release_allowlist() -> None:
+    for name in ("job_search/cost_snapshot.py", "job_search/cost_collector.py",
+                 "deploy/aws/job-search-costs.service", "deploy/aws/job-search-costs.timer",
+                 "Dockerfile.codex-review", "Dockerfile.codex-review.dockerignore",
+                 "job_search/review_host.py", "job_search/job_reviews/reviewer_rubric.md",
+                 "deploy/aws/job-search-review.service", "deploy/aws/job-search-review.timer"):
+        assert package.allowed(name), name
+    for name in ("deploy/aws/billing-secret.key", "deploy/aws/snapshot.json",
+                 "job_search/openrouter-api-key"):
+        assert not package.allowed(name), name
+
+
 def test_symlinks_and_unpinned_images_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -108,6 +120,7 @@ def test_committed_personal_artifacts_block_release() -> None:
 
 if __name__ == "__main__":
     test_package_uses_commit_blobs_preserves_modes_and_excludes_private_files()
+    test_cost_monitor_code_and_units_are_in_the_release_allowlist()
     test_symlinks_and_unpinned_images_fail_closed()
     test_committed_personal_artifacts_block_release()
-    print("ok (3 release packaging security tests)")
+    print("ok (4 release packaging security tests)")

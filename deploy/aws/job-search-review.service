@@ -1,0 +1,24 @@
+[Unit]
+Description=Run isolated Career Platform job reviews
+After=network-online.target docker.service job-search-data.service
+Requires=docker.service job-search-data.service
+Wants=network-online.target
+ConditionPathExists=/opt/job-search/current/job_search/review_host.py
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/job-search/current
+ExecStart=/usr/bin/python3 -m job_search.review_host run --scheduled
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/job-search
+TimeoutStartSec=3700
+TimeoutStopSec=660
+KillSignal=SIGTERM
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal

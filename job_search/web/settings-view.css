@@ -57,6 +57,24 @@
 #ops .ops-activity > .ops-grid { margin-top: 16px; }
 #ops #automation-controls .stack-item { padding: 16px 24px; }
 #ops #automation-controls h3 { font-size: 14px; margin-bottom: 4px; }
+#ops .costs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 16px; margin-top: 16px; }
+#ops .costs-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
+#ops .costs-card h4 { margin: 0; font-size: 16px; }
+#ops .costs-card p { margin: 12px 0; }
+#ops .costs-metrics { margin: 20px 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: baseline; }
+#ops .costs-metrics dd { margin: 0; font-variant-numeric: tabular-nums; }
+#ops .costs-warning { padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--panel); margin: 4px 0; }
+#settings-chief .settings-group { margin-bottom: 24px; }
+#settings-chief .chief-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 16px; }
+#settings-chief label { display: grid; gap: 8px; }
+#settings-chief .chief-check { display: flex; align-items: center; gap: 10px; }
+#settings-chief .chief-check input { width: auto; }
+#settings-chief .chief-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; }
+#settings-chief .chief-card h4 { margin-top: 0; }
+#settings-chief .chief-prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+#settings-chief textarea { width: 100%; margin: 8px 0; }
+#settings-chief .chief-fact { border-top: 1px solid var(--line); padding: 12px 0; }
+#settings-chief .chief-coverage { margin: 16px 0; }
 @media (max-width: 600px) {
   #settings .settings-group, #settings .settings-resume-record, #settings .settings-stored-record,
   #career .career-summary-section, #career .career-import-options { padding: 16px; }

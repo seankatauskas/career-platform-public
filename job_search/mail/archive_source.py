@@ -113,6 +113,52 @@ class EncryptedArchiveMailSource:
                 break
         return tuple(results)
 
+    def search_mail_page(self, query: str, limit: int = 25, *, cursor=None) -> Mapping[str, Any]:
+        """Scan a bounded archive page; a negative result is scoped to this page."""
+        import base64
+        import json
+        from job_search.contracts import payload_sha256
+        from job_search.db import connect
+        normalized = self._query(query)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_SEARCH_RESULTS:
+            raise ContractError('mail search limit must be between 1 and 25')
+        query_hash = payload_sha256({'query': normalized.casefold()})
+        after = ''
+        with connect(self._ledger.store.db_path) as con:
+            high = con.execute('SELECT COALESCE(MAX(rowid),0) FROM mail_archive').fetchone()[0]
+            if cursor is not None:
+                try:
+                    if not isinstance(cursor, str) or len(cursor) > 2048:
+                        raise ValueError('invalid cursor')
+                    decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+                    if decoded['query'] != query_hash or not isinstance(decoded['high'], int) or isinstance(decoded['high'], bool) or decoded['high'] < 0:
+                        raise ValueError('cursor query mismatch')
+                    high, after = decoded['high'], decoded['after']
+                    validate_identifier(after, 'cursor archive id')
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise ContractError('invalid mail search cursor') from exc
+            records = con.execute('SELECT archive_id,truncated FROM mail_archive WHERE rowid<=? AND archive_id>? ORDER BY archive_id LIMIT ?', (high, after, self.scan_limit+1)).fetchall()
+        results = []
+        scanned = 0
+        last = after
+        for record in records[:self.scan_limit]:
+            scanned += 1
+            last = str(record['archive_id'])
+            subject, body = _parts(self._archive.read_message(last))
+            text = subject + '\n' + body
+            location = text.casefold().find(normalized.casefold())
+            if location >= 0:
+                results.append({'message_id': last, 'subject': subject,
+                                'excerpt': _excerpt(text, location, len(normalized), MAX_RESULT_EXCERPT),
+                                'archive_truncated': bool(record['truncated'])})
+            if len(results) >= limit:
+                break
+        more = scanned < len(records)
+        continuation = base64.urlsafe_b64encode(json.dumps({'query': query_hash, 'high': high, 'after': last}, separators=(',', ':')).encode()).decode() if more else None
+        return {'items': results, 'next_cursor': continuation, 'complete': not more,
+                'scanned': scanned, 'scan_limit': self.scan_limit,
+                'coverage': 'encrypted archived text only; unarchived messages and truncated content are not searchable'}
+
     def get_mail_message(self, message_id: str) -> Mapping[str, Any]:
         validate_identifier(message_id, "message_id")
         text = self._archive.read_message(message_id)

@@ -7,6 +7,7 @@ import json
 import plistlib
 import subprocess
 import tempfile
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -167,7 +168,7 @@ def test_default_schedules_are_exact_central_time_and_contact_gated() -> None:
             assert con.execute(
                 "SELECT COUNT(*) FROM schedule_specs "
                 "WHERE schedule_key LIKE 'outlook.%' AND enabled=1"
-            ).fetchone()[0] == 2
+            ).fetchone()[0] == 4
         seed_default_schedules(
             db_path, NOW, {"JOB_SEARCH_NOTIFICATION_TARGET": "ntfy"}
         )
@@ -225,6 +226,10 @@ def test_materialized_outlook_work_runs_through_bounded_worker_handlers() -> Non
                 service, object(), now_provider=lambda: NOW + timedelta(minutes=5)
             ),
         }
+        # This fixture exercises mail/actions only; lifecycle workers have their
+        # own acceptance suite and must not consume this fixture's three slots.
+        with connect(db_path) as con:
+            con.execute("UPDATE schedule_specs SET enabled=0 WHERE task_kind IN ('outlook.calendar.sync','outlook.mail.replay','attention.tick','career.mail.reconcile')")
         report = Worker(
             db_path,
             task_handlers=handlers,
@@ -247,6 +252,8 @@ def test_schedule_materialization_coalesces_missed_and_outstanding_ticks() -> No
     with tempfile.TemporaryDirectory() as directory:
         db_path = make_db(directory)
         seed_default_schedules(db_path, NOW, {})
+        with connect(db_path) as con:
+            con.execute("UPDATE schedule_specs SET enabled=0 WHERE task_kind='attention.tick'")
         later = NOW + timedelta(minutes=25)
         first = materialize_due_schedules(db_path, later)
         assert first == {"schedules": 1, "created": 1, "coalesced": 0}
@@ -349,6 +356,44 @@ def test_retry_after_beats_exponential_delay_then_success_reuses_run() -> None:
         with connect(db_path) as con:
             assert con.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0] == 1
             assert con.execute("SELECT outcome FROM job_runs").fetchone()[0] == "succeeded"
+
+
+def test_long_work_records_finish_time_and_retries_after_completion():
+    for fails in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            db = make_db(directory)
+            enqueue_work(db, "a-long", "long.task")
+            enqueue_work(db, "b-next", "next.task")
+            elapsed = [100.0]
+            def long_task(payload, context):
+                elapsed[0] += 600
+                if fails:
+                    raise RetryableTaskError("retry after finishing")
+                return {}
+            worker = Worker(db, task_handlers={"long.task": long_task, "next.task": lambda p, c: {}},
+                            owner="clock-test", now_provider=lambda: NOW,
+                            max_work_per_tick=2, max_outbox_per_tick=0)
+            with patch("job_search.worker.time.monotonic", side_effect=lambda: elapsed[0]):
+                worker.tick(now=NOW)
+            with connect(db) as con:
+                assert con.execute("SELECT completed_at FROM job_runs WHERE work_id='a-long'").fetchone()[0] == utc_stamp(NOW + timedelta(minutes=10))
+                assert con.execute("SELECT started_at FROM job_runs WHERE work_id='b-next'").fetchone()[0] == utc_stamp(NOW + timedelta(minutes=10))
+                if fails:
+                    assert con.execute("SELECT due_at FROM work_items WHERE work_id='a-long'").fetchone()[0] == utc_stamp(NOW + timedelta(minutes=11))
+
+
+def test_ats_failure_keeps_error_tail_and_redacts_before_truncation():
+    diagnostic = "progress " * 1000 + "token=" + "private" * 300 + "\nFatal discovery error: HTTP 502"
+    handler = ATSCommandHandler("refresh_recent", project_root=ROOT, jobs_db=ROOT / "unused.db",
+        environment_provider=lambda: {"JOB_SCRAPER_CONTACT": "person@katauskas.dev"},
+        runner=lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", diagnostic))
+    try:
+        handler({}, TaskContext("work-1", "ats.refresh_recent", 1, utc_stamp(NOW), lambda: True))
+        raise AssertionError("failed command accepted")
+    except RetryableTaskError as exc:
+        assert "Fatal discovery error: HTTP 502" in str(exc)
+        assert "private" not in str(exc)
+        assert len(str(exc)) < 900
 
 
 def test_permanent_failure_is_dead_without_replay() -> None:

@@ -149,6 +149,9 @@ services:
 
   dashboard:
     <<: *control-plane
+    environment:
+      <<: *control-environment
+      JOB_SEARCH_COST_SNAPSHOT: /run/job-search-costs/snapshot.json
     network_mode: host
     command:
       ["--config", "/run/job-search/config.json", "serve", "dashboard"]
@@ -163,6 +166,11 @@ services:
       - *resume-model-volume
       - *tool-socket-volume
       - *notification-socket-volume
+      # Only normalized billing summaries; provider credentials stay on the host.
+      - type: bind
+        source: "${JOB_SEARCH_COST_DIR:?set JOB_SEARCH_COST_DIR}"
+        target: /run/job-search-costs
+        read_only: true
     depends_on:
       initialize:
         condition: service_completed_successfully

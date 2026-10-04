@@ -94,6 +94,11 @@ class RuntimeConfigV1:
     dashboard_https_origin: str = ""
     dashboard_allowed_tailscale_login: str = ""
     mcp_port: int = DEFAULT_MCP_PORT
+    interaction_port: int = 8768
+    interaction_token_file: Optional[Path] = field(default=None, repr=False, compare=False)
+    telegram_bot_id: str = ""
+    telegram_user_id: str = ""
+    telegram_chat_id: str = ""
     mcp_token_file: Path = field(
         default_factory=lambda: Path.home() / ".config/job-search/mcp-token"
     )
@@ -115,6 +120,8 @@ class RuntimeConfigV1:
     # Optional AWS secret projection source; never exposed in public diagnostics.
     mail_inference_profile: Optional[Mapping[str, Any]] = field(default=None, repr=False)
     inference_config: Optional[Path] = None
+    briefing_inference_config: Optional[Path] = None
+    briefing_ai_enabled: bool = True
     inference_usage_limits: Mapping[str, Any] = field(default_factory=dict)
     remote_mail_inference_enabled: bool = False
     remote_mail_temporal_enabled: bool = True
@@ -123,6 +130,8 @@ class RuntimeConfigV1:
     )
     shortlist_limit: int = 20
     shortlist_policy: str = "champion"
+    # Selects computation only; automation activation remains separately controlled.
+    ranking_refresh_mode: str = "full"
     shortlist_days: int = 30
     shortlist_salary_floor: Optional[float] = None
     shortlist_remote_only: bool = False
@@ -284,6 +293,11 @@ class RuntimeConfigV1:
                 optional=True,
             ),
             timezone=_text(value.get("timezone", default.timezone), "timezone", 100),
+            interaction_port=_port(value.get("interaction_port", default.interaction_port), "interaction_port"),
+            interaction_token_file=_path(value.get("interaction_token_file"), "interaction_token_file", root, optional=True),
+            telegram_bot_id=_text(value.get("telegram_bot_id", ""), "telegram_bot_id", 24),
+            telegram_user_id=_text(value.get("telegram_user_id", ""), "telegram_user_id", 24),
+            telegram_chat_id=_text(value.get("telegram_chat_id", ""), "telegram_chat_id", 24),
             dashboard_port=_port(
                 value.get("dashboard_port", default.dashboard_port), "dashboard_port"
             ),
@@ -341,6 +355,8 @@ class RuntimeConfigV1:
                 value.get("mail_inference_config"), "mail_inference_config", root,
                 optional=True,
             ),
+            briefing_inference_config=_path(value.get("briefing_inference_config"), "briefing_inference_config", root, optional=True),
+            briefing_ai_enabled=value.get("briefing_ai_enabled", True),
             mail_inference_profile=value.get("mail_inference_profile"),
             remote_mail_inference_enabled=remote_mail_inference,
             remote_mail_temporal_enabled=value.get("remote_mail_temporal_enabled", True),
@@ -355,6 +371,7 @@ class RuntimeConfigV1:
             ),
             shortlist_limit=limit,
             shortlist_policy=policy,
+            ranking_refresh_mode=value.get("ranking_refresh_mode", "full"),
             shortlist_days=bounded_int(
                 "shortlist_days", default.shortlist_days, 1, 3650
             ),
@@ -432,6 +449,26 @@ class RuntimeConfigV1:
         return result
 
     def validate(self) -> None:
+        if not isinstance(self.briefing_ai_enabled, bool):
+            raise ValueError("briefing_ai_enabled must be a boolean")
+        _port(self.interaction_port, "interaction_port")
+        if self.interaction_port in {self.dashboard_port, self.mcp_port}:
+            raise ValueError("interaction_port must differ from dashboard and MCP ports")
+        identity = (self.telegram_bot_id, self.telegram_user_id, self.telegram_chat_id)
+        if any(identity) or self.interaction_token_file is not None:
+            if self.interaction_token_file is None or not all(
+                isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,23}", value)
+                for value in identity
+            ):
+                raise ValueError("Telegram interactions require a bearer file and explicit private-chat owner identity")
+            if self.interaction_token_file == self.mcp_token_file:
+                raise ValueError("interaction and MCP bearer files must be distinct")
+        if not isinstance(self.ranking_refresh_mode, str) or self.ranking_refresh_mode not in {"full", "broad_cpu", "sparse_cpu"}:
+            raise ValueError("ranking_refresh_mode must be full, broad_cpu, or sparse_cpu")
+        if self.ranking_refresh_mode == "broad_cpu" and self.shortlist_policy != "broad":
+            raise ValueError("broad_cpu ranking requires shortlist_policy broad")
+        if self.ranking_refresh_mode == "sparse_cpu" and self.shortlist_policy not in {"broad", "selective", "compare"}:
+            raise ValueError("sparse_cpu ranking requires shortlist_policy broad, selective, or compare")
         if not isinstance(self.remote_mail_temporal_enabled, bool):
             raise ValueError("remote_mail_temporal_enabled must be a boolean")
         if type(self.outlook_poll_interval_minutes) is not int or not 1 <= self.outlook_poll_interval_minutes <= 1440:
@@ -583,6 +620,8 @@ class RuntimeConfigV1:
         )
         result.pop("portable_encryption_key_file", None)
         result.pop("mail_inference_profile", None)
+        result.pop("interaction_token_file", None)
+        result["telegram_interactions_configured"] = self.interaction_token_file is not None
         for name, value in tuple(result.items()):
             if isinstance(value, Path):
                 result[name] = str(value)
@@ -630,6 +669,8 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
         "mcp_token_file",
         "mail_classifier_config",
         "mail_inference_config",
+        "briefing_inference_config",
+        "interaction_token_file",
         "inference_config",
         "portable_encryption_key_file",
         "autofill_profile",
@@ -656,6 +697,8 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
                     "board_registry_path",
                     "mail_classifier_config",
                     "mail_inference_config",
+                    "briefing_inference_config",
+                    "interaction_token_file",
                     "inference_config",
                     "portable_encryption_key_file",
                     "autofill_profile",
@@ -754,7 +797,7 @@ def _configured_remote_mail_profile(config: RuntimeConfigV1, environment: Mappin
 
 
 def _build_outlook_handlers(
-    config: RuntimeConfigV1, environment: Mapping[str, str]
+    config: RuntimeConfigV1, environment: Mapping[str, str], *, now_provider=None
 ) -> Mapping[str, Callable[[Mapping[str, Any], TaskContext], Mapping[str, Any]]]:
     if not has_outlook_config(environment):
         return {}
@@ -806,6 +849,9 @@ def _build_outlook_handlers(
         service = JobSearchLedger(config.application_db)
         state = SQLiteOutlookState(config.application_db)
         outlook = GraphOutlookClient(session)
+        service.lifecycle.calendar = outlook
+        from .chief_runtime import configure_services, CareerWorker, AgendaCalendarWorker, ReplyContextWorker
+        configure_services(service, config, outlook=outlook, now_provider=now_provider)
         try:
             (
                 classifier,
@@ -842,6 +888,8 @@ def _build_outlook_handlers(
                 received_since=start,
                 recruiting_only=config.mail_recruiting_only,
             )
+            from .lifecycle.runtime import MailReplayTaskHandler
+            replay_handler = MailReplayTaskHandler(coordinator, service.lifecycle, account_id=account_id)
             mail_handler: Callable[
                 [Mapping[str, Any], TaskContext], Mapping[str, Any]
             ] = OutlookMailTaskHandler(
@@ -861,8 +909,20 @@ def _build_outlook_handlers(
                     safe_classifier_error,
                 )
             mail_handler = _unavailable_outlook_handler(safe_classifier_error)
+            replay_handler = mail_handler
+        from .lifecycle.calendar_worker import InterviewCalendarTaskHandler
+        from .activation import mail_start
         return {
+            "outlook.mail.replay": replay_handler,
+            "outlook.calendar.sync": AgendaCalendarWorker(
+                InterviewCalendarTaskHandler(service.lifecycle, outlook, account_id=account_id, activation_start=(lambda: mail_start(config.application_db, account_id)) if config.outlook_new_messages_only else None),
+                service.career_actions, now_provider or (lambda: datetime.now(timezone.utc)),
+            ),
             "outlook.mail.sync": mail_handler,
+            "career.mail.reconcile": CareerWorker(service.career_actions, "reconcile_mail"),
+            "career.reply.context": ReplyContextWorker(service.career_actions),
+            "career.actions.execute": CareerWorker(service.career_actions, "run_tick"),
+            "career.calendar.sync": CareerWorker(service.career_actions, "reconcile_commitments"),
             "outlook.actions.execute": ApprovedActionTaskHandler(
                 service,
                 ActionExecutor(
@@ -882,8 +942,14 @@ def _build_outlook_handlers(
             state.set_health(f"outlook:{account_id}:{folder_ref}", "failed", safe)
         unavailable = _unavailable_outlook_handler(safe)
         return {
+            "outlook.mail.replay": unavailable,
+            "outlook.calendar.sync": unavailable,
             "outlook.mail.sync": unavailable,
             "outlook.actions.execute": unavailable,
+            "career.mail.reconcile": unavailable,
+            "career.reply.context": unavailable,
+            "career.actions.execute": unavailable,
+            "career.calendar.sync": unavailable,
         }
 
 
@@ -906,7 +972,7 @@ def build_local_reminder_handler(
         else notification_target
     )
     policy = NotificationPolicy(
-        policy_id=default_policy.policy_id,
+        policy_id="chief-of-staff-v1",
         enabled_topics=(default_policy.enabled_topics if target else frozenset()),
         max_attempts=default_policy.max_attempts,
     )
@@ -959,6 +1025,7 @@ def build_runtime(
         preference_db=config.preference_db,
         proxy_db=config.proxy_db,
         policy_refresh=config.shortlist_policy in {"selective", "broad", "compare"},
+        ranking_refresh_mode=config.ranking_refresh_mode,
         environment_provider=environment_provider,
         runner=command_runner,
         salary_status_provider=salary_status_provider,
@@ -996,13 +1063,16 @@ def build_runtime(
         reminder_handler = build_local_reminder_handler(
             config, notification_target=target, now_provider=clock
         )
+        from .lifecycle.runtime import LifecycleReminderTick
+        reminder_handler = LifecycleReminderTick(reminder_handler, reminder_handler.service.lifecycle,
+            now=clock, policy=reminder_handler.publisher.policy)
         handlers.update(
             {
                 "system.worker_tick": reminder_handler,
                 "outlook.reminders.publish": reminder_handler,
             }
         )
-        handlers.update(_build_outlook_handlers(config, environment))
+        handlers.update(_build_outlook_handlers(config, environment, now_provider=clock))
     gateway = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )
@@ -1021,16 +1091,33 @@ def build_runtime(
     from .service import JobSearchLedger
 
     ledger = JobSearchLedger(config.application_db)
+    from .chief_runtime import configure_services, build_generation_provider, AttentionTick
+    generation_provider = None
+    generation_error = ""
+    if lane == "model":
+        try:
+            generation_provider = build_generation_provider(config)
+        except Exception as exc:
+            generation_error = _safe_error(exc)
+    configure_services(ledger, config, generation_provider=generation_provider, now_provider=clock)
     default_policy = NotificationPolicy()
     policy = NotificationPolicy(
-        policy_id=default_policy.policy_id,
+        policy_id="chief-of-staff-v1",
         enabled_topics=default_policy.enabled_topics if target else frozenset(),
         max_attempts=default_policy.max_attempts,
     )
     publisher = DurableNotificationPublisher(ledger, policy, now=clock)
     if lane == "core":
+        from .interactions.notifications import InteractionNotificationSender
+        transport = (RemoteHermesSendClient(config.hermes_notification_socket, target=target)
+                     if config.hermes_notification_socket is not None
+                     else HermesSendClient(executable=config.hermes_executable, target=target)) if target else None
+        notification_sender = (InteractionNotificationSender(ledger, transport, now_provider=clock)
+                               if transport and ledger.interactions.identity else transport)
+
         handlers.update(
             {
+                "attention.tick": AttentionTick(ledger, config),
                 NOTIFICATION_TASK: ShortlistNotificationEvaluator(
                     gateway,
                     ledger,
@@ -1045,17 +1132,7 @@ def build_runtime(
                 "notification.deliver": (
                     NotificationOutboxHandler(
                         ledger,
-                        (
-                            RemoteHermesSendClient(
-                                config.hermes_notification_socket,
-                                target=target,
-                            )
-                            if config.hermes_notification_socket is not None
-                            else HermesSendClient(
-                                executable=config.hermes_executable,
-                                target=target,
-                            )
-                        ),
+                        notification_sender,
                         now=clock,
                     ).handle_task
                     if target
@@ -1069,6 +1146,29 @@ def build_runtime(
                 ),
             }
         )
+    if lane == "model":
+        def compose_briefing(payload, context):
+            if generation_provider is None:
+                return {"composed": False, "reason": generation_error or "briefing model is not configured"}
+            if not context.heartbeat():
+                raise RuntimeError("briefing worker lease was lost")
+            return ledger.attention.generate_briefing(str(payload["briefing_id"]))
+
+        def prepare_reply(payload, context):
+            if generation_provider is None:
+                return {"prepared": False, "reason": generation_error or "briefing model is not configured"}
+            from .contracts import MutationContext
+            if not context.heartbeat():
+                raise RuntimeError("reply preparation worker lease was lost")
+            result = ledger.career_actions.prepare_reply(
+                str(payload["application_id"]), str(payload["evidence_id"]),
+                MutationContext("reply-prepare:" + context.work_id, "system", "career_reply"),
+            )
+            if payload.get('briefing_id'):
+                ledger.attention.record_ready_reply(str(payload['briefing_id']), result,
+                    application_id=str(payload['application_id']), evidence_id=str(payload['evidence_id']))
+            return result
+        handlers.update({"briefing.compose": compose_briefing, "career.reply.prepare": prepare_reply})
     if lane == "model" and config.resume_lab_db is not None:
         from .resume_lab.gateway import (
             RESUME_OPTIMIZE_TASK,

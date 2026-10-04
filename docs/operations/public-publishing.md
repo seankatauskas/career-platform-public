@@ -25,6 +25,11 @@ also require explicit review. Keep real runtime data outside Git. The scanner is
 an additional check, not proof that arbitrary new content is safe to disclose;
 review screenshots, fixtures, documentation and newly tracked files before merging.
 
+The review skill, its interface reference, and the Codex review container's Dockerfile
+and ignore file are explicitly allowed in `scripts/prepare-public-showcase.py`.
+Additional skill or container paths still require review before adding them to the
+export allowlist.
+
 ## Credentials and boundaries
 
 `PUBLIC_MIRROR_SSH_KEY` is an Actions secret in the **private** repository. Its public

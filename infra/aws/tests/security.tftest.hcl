@@ -14,6 +14,23 @@ variables {
 run "single_host_security" {
   command = plan
   assert {
+    condition = alltrue([for name in ["interaction-token", "briefing-inference.json", "briefing-api-key"] :
+      aws_secretsmanager_secret.runtime[name].name == "${var.name}/${name}" &&
+      aws_secretsmanager_secret.runtime[name].recovery_window_in_days == 30
+    ])
+    error_message = "Chief-of-staff credentials and the dedicated model profile need persistent Terraform-managed secret containers."
+  }
+  assert {
+    condition = alltrue([for name in ["config.json", "portable-master-key", "mcp-token", "inference.json", "runpod-api-key", "resume-model.json", "hermes.env", "hermes.yaml", "tailscale-auth-key"] :
+      contains(keys(aws_secretsmanager_secret.runtime), name)
+    ])
+    error_message = "Adding chief-of-staff secrets must preserve the existing runtime secret inventory."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.cost_monitor) == 0
+    error_message = "Billing access and paid collection must remain opt-in."
+  }
+  assert {
     condition     = aws_instance.host.instance_type == "t3.large" && aws_instance.host.root_block_device[0].encrypted && aws_instance.host.root_block_device[0].volume_size == 30
     error_message = "Use the small encrypted single-host baseline."
   }
@@ -56,6 +73,19 @@ run "single_host_security" {
   assert {
     condition     = jsondecode(aws_ssm_document.deploy.content).parameters.ReleaseId.interpolationType == "ENV_VAR" && jsondecode(aws_ssm_document.deploy.content).parameters.ManifestSha256.allowedPattern == "^[a-f0-9]{64}$"
     error_message = "Deployment parameters must be validated and passed without shell interpolation."
+  }
+}
+
+run "read_only_cost_monitor" {
+  command = plan
+  variables {
+    cost_monitor_enabled = true
+  }
+  assert {
+    condition = jsondecode(aws_iam_role_policy.cost_monitor[0].policy).Statement == [{
+      Effect = "Allow", Action = ["ce:GetCostAndUsage"], Resource = "*"
+    }]
+    error_message = "The cost monitor must only read cost/usage, with no billing writes or new credentials."
   }
 }
 

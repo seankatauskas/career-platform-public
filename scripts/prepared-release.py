@@ -37,6 +37,8 @@ def verify(raw: bytes, release_id: str, sha256: str) -> dict:
     for field in ("app_image", "hermes_image", "hermes_base_image"):
         if not IMAGE.fullmatch(str(manifest.get(field, ""))):
             raise ValueError("release images must be pinned by digest")
+    if "reviewer_image" in manifest and (not IMAGE.fullmatch(str(manifest["reviewer_image"])) or manifest["reviewer_image"].split("@", 1)[0] != manifest["app_image"].split("@", 1)[0]):
+        raise ValueError("reviewer image must use the pinned application repository")
     if not re.fullmatch(r"[a-f0-9]{64}", str(manifest.get("bundle_sha256", ""))):
         raise ValueError("release bundle checksum is missing")
     policy = validate_policy(manifest.get("release_policy"))
@@ -46,6 +48,7 @@ def verify(raw: bytes, release_id: str, sha256: str) -> dict:
     return {
         "release_id": release_id, "manifest_sha256": sha256,
         "source_sha": manifest["source_sha"], "status": "prepared",
+        **({"reviewer_image": manifest["reviewer_image"]} if "reviewer_image" in manifest else {}),
         "expected_predecessor": policy["predecessor"],
         "next_action": "Run Deploy prepared AWS release when ready for the brief maintenance pause.",
     }

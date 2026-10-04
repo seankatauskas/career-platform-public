@@ -18,6 +18,8 @@ class BootstrapTests(unittest.TestCase):
             "cw_version": "1.300072.0b1766", "cw_sha256": "a" * 64,
             "operations_json": '{"version":1}', "cw_json": '{}',
             "installer": (ROOT / "deploy/aws/install-release").read_text(),
+            "cost_service": (ROOT / "deploy/aws/job-search-costs.service").read_text(),
+            "cost_timer": (ROOT / "deploy/aws/job-search-costs.timer").read_text(),
         }
         # Protect Terraform's escaped shell interpolation, then resolve variables.
         text = text.replace("$${", "__SHELL_BRACE__")
@@ -42,6 +44,30 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn('cmp -n "$bytes" "$device" /dev/zero', text)
         self.assertIn('"$(cat "$marker")" = "$expected"', text)
         self.assertNotIn("mkfs.ext4 -F", text)
+
+    def test_cost_monitor_uses_verified_release_and_shared_packaged_units(self):
+        text = self.render()
+        service = (ROOT / "deploy/aws/job-search-costs.service").read_text()
+        timer = (ROOT / "deploy/aws/job-search-costs.timer").read_text()
+        self.assertIn(service, text)
+        self.assertIn(timer, text)
+        self.assertIn("WorkingDirectory=/opt/job-search/current", service)
+        self.assertIn("--config /etc/job-search/operations.json", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn("Environment=AWS_MAX_ATTEMPTS=1", service)
+        self.assertNotIn("api-key", service)
+        self.assertIn("job-search-costs.timer", text)
+        drill = (ROOT / "infra/aws/recovery-drill/main.tf").read_text()
+        self.assertIn("disable --now job-search-status.timer job-search-backup.timer job-search-costs.timer", drill)
+
+    def test_native_aws_cli_is_pinned_and_preserves_cost_service_sandbox(self):
+        text = self.render()
+        self.assertIn("awscli-exe-linux-x86_64-2.35.21.zip", text)
+        self.assertIn("1fe665267a6149dfb8551cec52b419fa6e82533fab6dd7678939209246e792ee", text)
+        self.assertLess(text.index("sha256sum -c -"), text.index('"$aws_cli_stage/aws/install"'))
+        self.assertNotIn("snap install aws-cli", text)
+        self.assertIn("ProtectHome=true", (ROOT / "deploy/aws/job-search-costs.service").read_text())
 
     def test_release_workflow_aws_calls_are_allowed_by_deploy_role(self):
         workflow = "\n".join((ROOT / ".github/workflows" / name).read_text()

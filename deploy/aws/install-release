@@ -58,6 +58,9 @@ def validate_manifest(manifest, rid):
     for name in ('app_image', 'hermes_image', 'hermes_base_image'):
         if not IMAGE.fullmatch(str(manifest.get(name, ''))):
             raise RuntimeError('release images must be pinned by digest')
+    if 'reviewer_image' in manifest and (not IMAGE.fullmatch(str(manifest['reviewer_image'])) or
+            manifest['reviewer_image'].split('@', 1)[0] != manifest['app_image'].split('@', 1)[0]):
+        raise RuntimeError('reviewer image must use the pinned application repository')
     for name in ('app_image', 'hermes_image'):
         registry = manifest[name].split('/')[0]
         if not re.fullmatch(r'\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com', registry):

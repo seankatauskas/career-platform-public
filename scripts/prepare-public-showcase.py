@@ -14,6 +14,13 @@ spec = importlib.util.spec_from_file_location('private_guard', ROOT / 'scripts/c
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 ROOT_NAMES = {'LICENSE', 'Dockerfile', 'Dockerfile.hermes', 'Dockerfile.runpod-embedding', '.dockerignore', '.gitignore', 'job_search/collection/boards.seed.json', 'tests/browser/test_console_browser.mjs', 'tests/browser/test_ops_browser.mjs', 'tests/fixtures/resume_lab_v3.sql', 'launchd/com.local.job-search-worker.plist.template', 'scripts/acceptance-tex-files.tsv', 'tests/fixtures/mail/malicious_messages.fixture'}
+# Reviewed source additions; new skills and container files still require review.
+ROOT_NAMES.update({
+    'Dockerfile.codex-review',
+    'Dockerfile.codex-review.dockerignore',
+    'skills/career-job-review/SKILL.md',
+    'skills/career-job-review/references/interface.md',
+})
 TREES = {'tests', 'examples', 'requirements', 'job_search', 'extension', 'scripts', 'deploy', 'infra', 'docs', 'openwiki', '.github'}
 SOURCE_SUFFIXES = {'.py', '.js', '.mjs', '.json', '.md', '.txt', '.css', '.html', '.tex', '.tf', '.tftpl', '.hcl', '.sh', '.yaml', '.yml', '.service', '.timer', '.example', '.png', '.mp4'}
 BANNED_SUFFIXES = {'.db', '.sqlite', '.sqlite3', '.pem', '.key', '.token', '.p12', '.pt', '.safetensors', '.csv'}

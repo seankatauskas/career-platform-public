@@ -71,7 +71,10 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def _mcp_tools(adapter: HermesAdapter) -> Sequence[Mapping[str, Any]]:
-    read_only = {
+    from .job_reviews.tools import READ_TOOLS
+    from .lifecycle.tools import READ_TOOLS as LIFECYCLE_READ_TOOLS
+    from .interactions.tools import READ_TOOLS as CHIEF_READ_TOOLS
+    read_only = READ_TOOLS | LIFECYCLE_READ_TOOLS | CHIEF_READ_TOOLS | {
         "search_jobs",
         "list_resume_standards",
         "compare_resumes_for_job",

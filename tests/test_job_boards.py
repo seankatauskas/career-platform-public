@@ -14,6 +14,8 @@ import re
 import sqlite3
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
+import urllib.error
 
 from job_search.collection.boards import (
     FIELDS,
@@ -31,6 +33,97 @@ from job_search.collection.boards import (
 )
 
 BASE = {f: "" for f in FIELDS}
+
+
+def test_commoncrawl_only_accepts_verified_end_of_pages():
+    from job_search.collection import boards as jb
+    for page, code, payload, expected in [
+        (1, 400, {"message": "Page 1 invalid: First Page is 0, Last Page is 0"}, True),
+        (2, 400, {"error": "Page 2 invalid: First Page is 0, Last Page is 1"}, True),
+        (0, 400, {"message": "Page 0 invalid: First Page is 0, Last Page is -1"}, False),
+        (1, 400, {"message": "invalid query"}, False),
+        (2, 400, {"message": "Page 2 invalid: First Page is 0, Last Page is 0"}, False),
+        (1, 403, {"message": "Page 1 invalid: First Page is 0, Last Page is 0"}, False),
+        (1, 400, [], False),
+    ]:
+        error = urllib.error.HTTPError("https://example.test", code, "error", {}, io.BytesIO(json.dumps(payload).encode()))
+        assert jb._commoncrawl_page_finished(error, page) is expected
+
+
+def test_fetch_retains_bounded_client_error_evidence():
+    from job_search.collection import boards as jb
+    with patch.object(jb, "_single_request", return_value=(400, {}, b"x" * 10000)) as request:
+        try:
+            jb.fetch("https://example.test", retries=6)
+            raise AssertionError("400 accepted")
+        except urllib.error.HTTPError as exc:
+            assert len(exc.read()) == 4096
+        assert request.call_count == 1
+
+
+def test_commoncrawl_bounded_gzip_error_and_malformed_error_are_not_confused():
+    import gzip
+    from job_search.collection import boards as jb
+    for body, expected in [(b'{"message":"Page 1 invalid: First Page is 0, Last Page is 0"}', True),
+                           (b"x" * 100000, False), (b'{"broken', False)]:
+        error = urllib.error.HTTPError("https://example.test", 400, "error",
+                                      {"content-encoding": "gzip"}, io.BytesIO(gzip.compress(body)))
+        assert jb._commoncrawl_page_finished(error, 1) is expected
+
+
+def test_commoncrawl_keeps_successful_page_on_terminal_400():
+    from job_search.collection import boards as jb
+    terminal = urllib.error.HTTPError("https://example.test", 400, "error", {}, io.BytesIO(
+        b'{"message":"Page 1 invalid: First Page is 0, Last Page is 0"}'))
+    responses = [b'[{"id":"fixture","cdx-api":"https://example.test"}]',
+                 b'{"url":"https://jobs.lever.co/acme/role"}\n', terminal]
+    with patch.object(jb, "fetch", side_effect=responses) as fetch, patch.object(jb.time, "sleep"), contextlib.redirect_stderr(io.StringIO()):
+        assert jb.candidates_from_commoncrawl(["jobs.lever.co"]) == {"acme": "acme"}
+    assert fetch.call_count == 3
+
+
+def test_archive_json_retries_malformed_pages_without_partial_results():
+    from job_search.collection import boards as jb
+    with patch.object(jb, "fetch", side_effect=[b'{"url":"bad"}\n{', b'{"url":"good"}\n']), patch.object(jb.time, "sleep") as sleep:
+        assert jb._archive_json("https://example.test", json_lines=True) == [{"url": "good"}]
+        sleep.assert_called_once_with(1)
+    with patch.object(jb, "fetch", return_value=b'{"broken') as fetch, patch.object(jb.time, "sleep"):
+        try:
+            jb._archive_json("https://example.test")
+            raise AssertionError("malformed response accepted")
+        except json.JSONDecodeError:
+            pass
+        assert fetch.call_count == 3
+
+
+def test_partial_discovery_preserves_known_boards_and_continues_other_platforms():
+    from job_search.collection import boards as jb
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cache, seed, db = root / "cache.json", root / "seed.json", root / "jobs.db"
+        seed.write_text(json.dumps({"greenhouse": ["known"]}))
+        platforms = ["ashby", "greenhouse", "lever"]
+        calls = []
+        def discover(ats, concurrency, recent_days=None, observations=None):
+            calls.append(ats)
+            assert concurrency == 8
+            if ats == "greenhouse":
+                raise urllib.error.URLError("archive unavailable")
+            observations.append({"ats": ats, "slug": "new-" + ats, "sources": ["wayback"],
+                                 "outcome": "active", "http_status": 200, "error": ""})
+            return ["new-" + ats]
+        with patch.object(jb, "BOARDS_CACHE", cache), patch.object(jb, "BOARDS_SEED", seed), contextlib.redirect_stderr(io.StringIO()):
+            jb.run_recorded_discovery(db, "import", platforms, False, False, 8)
+            with patch.object(jb, "discover_boards", side_effect=discover):
+                try:
+                    jb.run_recorded_discovery(db, "recent", platforms, False, True, 8)
+                    raise AssertionError("partial discovery reported success")
+                except jb.DiscoveryFailed as exc:
+                    assert "greenhouse" in str(exc)
+        assert calls == platforms
+        assert json.loads(cache.read_text()) == {"ashby": ["new-ashby"], "greenhouse": ["known"], "lever": ["new-lever"]}
+        with sqlite3.connect(db) as con:
+            assert con.execute("SELECT status FROM discovery_runs ORDER BY id DESC LIMIT 1").fetchone()[0] == "failed"
 
 
 def _with_fetch(payload, fn):

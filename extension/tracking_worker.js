@@ -72,6 +72,7 @@ async function trackingPage(message, sender) {
   if (message.type === 'trackingAttempt') {
     if (!page.attempt_id || Date.now()-(page.last_attempt || 0)>1500) {
       page.attempt_id = crypto.randomUUID(); page.last_attempt = Date.now(); page.success = false;
+      delete page.submission_request_id;
     }
     // Persist answers before starting any network work. Submission itself remains
     // entirely owned by the employer's page and is never delayed or prevented.
@@ -110,6 +111,28 @@ function serializeTracking(work) {
   return result;
 }
 async function trackingPopup(message) {
+  if (['trackingConnect','trackingDisconnect'].includes(message.type)) {
+    const all=await chrome.storage.local.get(null);
+    if(message.type==='trackingConnect' && message.restore_connection===true) {
+      const connection=all.browser_connection;
+      if(!connection || dashboardBase(message.dashboard_base)!==connection.base)
+        throw new Error('Restore access to the existing dashboard; do not replace the connection while answers are pending.');
+      if(!await chrome.permissions.contains({origins:[permissionOrigin(connection.base)]}))
+        throw new Error('Dashboard site access has not been restored.');
+      await chrome.storage.local.set({dashboard_base:connection.base,tracking_retry_at:0,tracking_answers_retry_at:0});
+      flushTracking().catch(()=>{});
+      return {ok:true,connected:true};
+    }
+    const pending=Object.keys(all).filter(k=>k.startsWith('tracking-event-') || k.startsWith('tracking-draft-') ||
+      (k.startsWith('tracking-answer-') && !k.startsWith('tracking-answer-result-')));
+    if(pending.length && !(message.type==='trackingDisconnect' && message.discard_pending===true)) {
+      const error='Application data is saved in this browser and may be waiting to sync. Disconnecting will permanently delete local drafts and unsynced answers. Keep the browser connected to let submissions sync.';
+      if(message.type==='trackingDisconnect') return {ok:false,discard_required:true,error};
+      throw new Error(error);
+    }
+    if(message.type==='trackingConnect' && all.browser_connection)
+      throw new Error('This browser is already paired. Restore dashboard site access in Chrome if needed; disconnect before replacing its connection.');
+  }
   if (message.type === 'trackingConnect') {
     const base = dashboardBase(message.dashboard_base);
     const result = await post(base, '/api/v1/extension/enroll', {pairing_code:message.pairing_code});
@@ -159,6 +182,8 @@ async function trackingPopup(message) {
     try { result = await trackingPost('status', {attempt_id:page.attempt_id}); } catch (_) {}
   }
   return {ok:true, connected, supported:!!page, job:page?.job, result, error:all.tracking_error,
+    dashboard_base:all.browser_connection?.base,
+    needs_permission:connected && !await chrome.permissions.contains({origins:[permissionOrigin(all.browser_connection.base)]}),
     answer_status:page && all[`tracking-answer-result-${page.attempt_id}`], answer_error:all.tracking_answers_capture_error || all.tracking_answers_error,
     answers_queued:Object.keys(all).filter(k=>k.startsWith('tracking-answer-') && !k.startsWith('tracking-answer-result-')).length,
     queued:Object.keys(all).filter(k=>k.startsWith('tracking-event-')).length};
@@ -187,8 +212,32 @@ async function networkObservation(details, phase) {
   if (details.tabId < 0 || !await trackingConnection()) return;
   const key = trackKey(details.tabId,details.frameId);
   const page = (await chrome.storage.local.get(key))[key];
-  if (!page?.attempt_id || Date.now()-page.last_attempt > 120000 || page.success || !JobTracking.submissionRequest(details,page.job)) return;
+  if (!page || !JobTracking.submissionRequest(details,page.job)) return;
   if (details.documentId && page.document_id && details.documentId!==page.document_id) return;
+  // Some ATS buttons have nonstandard/localized labels. A positively identified
+  // submission POST is still an attempt, never proof of employer acceptance.
+  if(phase==='request_sent' && (!page.attempt_id || page.success || Date.now()-page.last_attempt>120000 ||
+      (page.submission_request_id && page.submission_request_id!==details.requestId))) {
+    if(!JobTracking.submissionRequest(details,page.job,true)) return;
+    page.attempt_id=crypto.randomUUID(); page.last_attempt=Date.now(); page.success=false;
+    const target=page.document_id ? {documentId:page.document_id} : {frameId:page.frame_id};
+    let capture=null;
+    try { capture=await chrome.tabs.sendMessage(details.tabId,{type:'trackingCapture'},target); } catch(_) {}
+    if(capture && !JobTracking.sameJob(page.job,JobTracking.identify(capture.page_url))) return;
+    try {
+      // Navigation can remove the form before this request arrives. Retain the
+      // encrypted earlier-step draft and disclose that final-page coverage is unknown.
+      await queueAnswers(page,capture?.snapshot || {version:1,fields:[],omitted_fields:1,truncated_values:0},new Date().toISOString());
+    } catch(_) {
+      await chrome.storage.local.set({tracking_answers_capture_error:'Could not save application answers in this browser. Check browser storage and try again.'});
+    }
+    await trackingQueue(page,'attempted',{signal:'application_request'});
+  }
+  if (!page.attempt_id || Date.now()-page.last_attempt>120000) return;
+  if(phase==='request_sent') {
+    page.submission_request_id=details.requestId;
+    await chrome.storage.local.set({[key]:page});
+  } else if(page.submission_request_id && page.submission_request_id!==details.requestId) return;
   const signal = phase==='failed' ? 'network_error' : 'application_request';
   await trackingQueue(page,phase,{signal,request_status:String(details.statusCode||'')});
   flushTracking().catch(()=>{});
@@ -200,5 +249,7 @@ chrome.tabs.onRemoved.addListener(tabId=>{ (async()=>{
   const all=await chrome.storage.local.get(null); await chrome.storage.local.remove(Object.keys(all).filter(k=>k.startsWith(`tracking-page-${tabId}-`)));
 })().catch(()=>{}); });
 chrome.permissions.onRemoved.addListener(()=>{ (async()=>{
-  const c=await trackingConnection(); if(c && !await chrome.permissions.contains({origins:[permissionOrigin(c.base)]})) await trackingPopup({type:'trackingDisconnect'});
+  const c=await trackingConnection();
+  if(c && !await chrome.permissions.contains({origins:[permissionOrigin(c.base)]}))
+    await chrome.storage.local.set({tracking_error:'Dashboard site access was removed. Click Restore dashboard access to sync. Your local application data has been retained.'});
 })().catch(()=>{}); });

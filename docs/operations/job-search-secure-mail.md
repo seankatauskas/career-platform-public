@@ -37,6 +37,26 @@ coordinator to archive recruiting and non-recruiting messages while preserving t
 review contract. Eligible PDF, DOCX, and ICS attachment text is encrypted for both;
 only recruiting content is sent to temporal extraction.
 
+## Mail evidence failures and retry
+
+Mail proposals must cite the exact retained subject or body text and its character
+offsets. The remote adapter resolves a unique verbatim quote locally instead of
+trusting model character counts. If a model changes only whitespace (for example,
+turning HTML paragraph breaks into spaces), the adapter can resolve a unique match
+and restore the original source slice and offsets. It does not repair changed words,
+case, punctuation, or ambiguous matches. Framing labels and quotes spanning the
+subject/body boundary still fail proposal validation.
+
+Trusted ATS receipt rules recognize both “thank you for applying” and “thanks for
+applying,” subject to the existing sender authentication, application identity, and
+recent-submission checks. Other messages continue through model classification.
+
+After installing a fix, use **Retry processing** on an existing failed Review item.
+The next mailbox sync reprocesses it through the corrected adapter. Deploying code
+does not automatically reset failed rows. A repeated failure remains visible and
+does not change application status; inspect its technical details before retrying
+again. Raw model responses and email bodies are not added to failure logs.
+
 ## Attachments
 
 Only non-inline Microsoft Graph `fileAttachment` objects are considered. PDF, DOCX,

@@ -185,7 +185,7 @@ def readiness_report(
                     item.update(status="paused", enabled=False,
                                 reason_code="explicitly_paused", next_action="review_activation")
             worker_cap = next(item for item in capabilities if item["id"] == "automation")
-            if switches and not any(switches.values()) and not worker_cap["last_attempt_at"]:
+            if automation_enabled and set(GROUPS) <= switches.keys() and not any(switches.values()) and not worker_cap["last_attempt_at"]:
                 worker_cap.update(status="configured_unverified", reason_code="worker_not_started",
                                   next_action="start_local_services")
             for connector in con.execute("SELECT * FROM connector_health"):

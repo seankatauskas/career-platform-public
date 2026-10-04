@@ -322,7 +322,7 @@ def seed_workspace(config, now, rows, ledger, gateway, controller, archive, grap
         ApplicationEventType.RECRUITER_CONTACT, accepted=True, hours=.4)
     interview = message("portfolio-interview", "Let's find a time to talk", "Hi Sean,\n\nWe would like to schedule a conversation about the Platform Engineer role. Would Wednesday at 2:00 PM Central work for a 30-minute call?\n\nMorgan", 0,
         ApplicationEventType.INTERVIEW_REQUESTED, quote="We would like to schedule a conversation", hours=.25)
-    uncertain = message("portfolio-uncertain", "Next steps with the engineering team", "Hi Sean,\n\nWe enjoyed reviewing your application and would like to schedule a conversation with the engineering team. Can you share your availability this week?\n\nTaylor", None,
+    uncertain = message("portfolio-uncertain", "Next steps with the engineering team", "Hi Sean,\n\nI coordinate recruiting for Cedar Health and Morrowfield. We enjoyed reviewing your application and would like to schedule a conversation with the engineering team. Can you share your availability this week?\n\nTaylor", None,
         ApplicationEventType.INTERVIEW_REQUESTED, candidates=[applications["2"], applications["3"]], confidence=.62, quote="would like to schedule a conversation", hours=.8)
     deadline = message("portfolio-assessment", "A short technical exercise · Harbor Systems", "Hi Sean,\n\nPlease submit the technical exercise by Friday at 5:00 PM Central. We expect it to take about one hour.\n\nThe Harbor Systems team", 1,
         ApplicationEventType.ASSESSMENT_REQUESTED, accepted=True, quote="Please submit the technical exercise", hours=5)

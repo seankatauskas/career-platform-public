@@ -59,6 +59,18 @@ DEFAULT_SCHEDULES: tuple[DefaultSchedule, ...] = (
         outlook_task=True,
     ),
     DefaultSchedule(
+        "outlook.replay.five_minute",
+        "outlook.mail.replay",
+        {"kind": "interval", "minutes": 5, "max_attempts": 5, "priority": 30},
+        outlook_task=True,
+    ),
+    DefaultSchedule(
+        "outlook.calendar.five_minute",
+        "outlook.calendar.sync",
+        {"kind": "interval", "minutes": 5, "max_attempts": 5, "priority": 75},
+        outlook_task=True,
+    ),
+    DefaultSchedule(
         "outlook.actions.five_minute",
         "outlook.actions.execute",
         {"kind": "interval", "minutes": 5, "max_attempts": 5, "priority": 90},
@@ -69,6 +81,25 @@ DEFAULT_SCHEDULES: tuple[DefaultSchedule, ...] = (
         "notification.deliver",
         {"kind": "interval", "minutes": 5, "max_attempts": 5, "priority": 70},
         notification_task=True,
+    ),
+    DefaultSchedule(
+        "attention.five_minute", "attention.tick",
+        {"kind": "interval", "minutes": 5, "max_attempts": 3, "priority": 74},
+    ),
+    DefaultSchedule(
+        "career.mail.five_minute", "career.mail.reconcile",
+        {"kind": "interval", "minutes": 5, "max_attempts": 3, "priority": 78},
+        outlook_task=True,
+    ),
+    DefaultSchedule(
+        "career.actions.five_minute", "career.actions.execute",
+        {"kind": "interval", "minutes": 5, "max_attempts": 1, "priority": 91},
+        outlook_task=True,
+    ),
+    DefaultSchedule(
+        "career.calendar.five_minute", "career.calendar.sync",
+        {"kind": "interval", "minutes": 5, "max_attempts": 3, "priority": 76},
+        outlook_task=True,
     ),
     DefaultSchedule(
         "notification.reminders.five_minute",

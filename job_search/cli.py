@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-notification-socket", type=Path)
     parser.add_argument("--log-dir", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
+    from .job_reviews.runner import add_arguments as review_runner_arguments
+    review_runner_arguments(commands.add_parser('review-runner', help='operate isolated Codex review sessions'))
+    from .job_reviews.service import FIELDS
+    review = commands.add_parser("review", help="operate an agent review through the private dashboard")
+    review.add_argument("action", choices=tuple(FIELDS))
+    review.add_argument("--dashboard-url", default=os.environ.get("CAREER_DASHBOARD_URL", ""))
+    review.add_argument("--input", default="-", help="JSON argument file or stdin; credentials are never included")
     shortlist = commands.add_parser("shortlist", help="publish caller-selected jobs through the local agent API")
     shortlist.add_argument("action", choices=("publish",))
     shortlist.add_argument("--input", default="-", help="JSON file or - for stdin")
@@ -113,8 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument(
         "--enable-holds",
         action="store_true",
-        help="also request Calendars.ReadWrite for private tentative holds",
+        help="also request Calendars.ReadWrite for personal calendar appointments and holds",
     )
+    auth.add_argument("--enable-send", "--send", action="store_true", help="request Mail.Send for explicitly approved recruiter replies")
     auth.add_argument(
         "--device-code",
         action="store_true",
@@ -140,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp-token-init",
         help="create the owner-only bearer token used by the loopback Hermes MCP server",
     )
+    commands.add_parser("interaction-token-init", help="create the separate owner-only Telegram interaction bearer")
     commands.add_parser(
         "encryption-key-init",
         help="create the owner-only master key used by portable encrypted state",
@@ -349,6 +358,33 @@ from job_search.dependency_health import dependency_health as _dependency_health
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == 'review-runner':
+        from .job_reviews.runner import command as review_runner_command
+        try:
+            result = review_runner_command(args)
+            _json(result)
+            return 2 if result.get('status') in ('failed', 'incomplete', 'needs_review', 'interrupted') else 0
+        except (OSError, ContractError) as exc:
+            raise SystemExit(str(exc)) from None
+    if args.command == "review":
+        from .job_reviews.client import ReviewClient
+        try:
+            if args.input == '-':
+                raw = sys.stdin.buffer.read(65537)
+            else:
+                with Path(args.input).open('rb') as stream:
+                    raw = stream.read(65537)
+            if len(raw) > 65536:
+                raise ContractError('review request exceeds 64 KiB')
+            origin = args.dashboard_url
+            if not origin and args.config:
+                origin = load_runtime_config(args.config, required=True).dashboard_https_origin
+            if not origin:
+                raise ContractError('provide --dashboard-url or CAREER_DASHBOARD_URL')
+            _json(ReviewClient(origin).call(args.action, json.loads(raw or b'{}')))
+        except (ValueError, OSError, ContractError) as exc:
+            raise SystemExit(str(exc)) from None
+        return 0
     if args.command == "setup" and args.action == "initialize":
         from .setup import initialize, DEFAULT_STATE
         state = args.state_root or DEFAULT_STATE
@@ -424,7 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "outlook-auth":
-        from job_search.outlook.auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES
+        from job_search.outlook.auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, SEND_SCOPES
 
         provider = _outlook_provider(args, config)
         grants = [("read", BASE_SCOPES)]
@@ -432,6 +468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             grants.append(("drafts", DRAFT_SCOPES))
         if args.enable_holds:
             grants.append(("holds", HOLD_SCOPES))
+        if args.enable_send:
+            grants.append(("send", SEND_SCOPES))
         for _name, scopes in grants:
             if args.device_code:
                 provider.get_token(
@@ -473,16 +511,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         _json(result)
         return 0 if not result.get("applied") or result.get("ok", True) else 2
-    if args.command == "mcp-token-init":
+    if args.command in {"mcp-token-init", "interaction-token-init"}:
         from job_search.system import initialize_mcp_token
-
+        target = config.mcp_token_file if args.command == "mcp-token-init" else config.interaction_token_file
+        if target is None:
+            raise SystemExit("configure interaction_token_file and Telegram owner identity first")
         try:
-            path = initialize_mcp_token(config.mcp_token_file)
+            path = initialize_mcp_token(target)
         except FileExistsError as exc:
             raise SystemExit(
-                f"MCP token file already exists; refusing to overwrite: {config.mcp_token_file}"
+                f"Bearer token file already exists; refusing to overwrite: {target}"
             ) from exc
-        _json({"created": True, "mcp_token_file": str(path)})
+        field = "mcp_token_file" if args.command == "mcp-token-init" else "interaction_token_file"
+        _json({"created": True, field: str(path)})
         return 0
     if args.command == "encryption-key-init":
         if config.portable_encryption_key_file is None:

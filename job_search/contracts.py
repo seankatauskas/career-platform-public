@@ -164,6 +164,8 @@ class JobSnapshot:
             raise ContractError("title must not be empty")
         if not self.employer.strip():
             raise ContractError("employer must not be empty")
+        if self.ats == "external" and not self.job_url:
+            return  # Reviewed external roles may have no known posting URL.
         if not self.job_url.startswith(("https://", "http://")):
             raise ContractError("job_url must be an HTTP(S) URL")
 

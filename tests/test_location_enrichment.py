@@ -3,7 +3,9 @@
 import sqlite3
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+from job_search.collection import locations
 from job_search.collection.locations import backfill, compatibility_score, normalize_location
 
 
@@ -72,6 +74,40 @@ def test_backfill_is_idempotent_and_preserves_raw_jobs() -> None:
             assert con.execute(
                 "SELECT COUNT(*) FROM job_location_enrichment"
             ).fetchone()[0] == 2
+
+
+def test_unchanged_backfill_skips_normalization_but_invalidates_each_input() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "jobs.db"
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE jobs (ats TEXT,id TEXT,location TEXT,isRemote TEXT,workplaceType TEXT,PRIMARY KEY(ats,id))")
+            con.executemany("INSERT INTO jobs VALUES (?,?,?,?,?)", [
+                ("ashby", "1", "Chicago, IL", "0", "onsite"),
+                ("lever", "2", "Remote", "1", "remote"),
+                ("lever", "3", "", "", ""),
+            ])
+        initial = backfill(db)
+        with sqlite3.connect(db) as con:
+            before = con.execute("SELECT * FROM job_location_enrichment ORDER BY ats,job_id").fetchall()
+            targets = con.execute("SELECT * FROM job_location_targets ORDER BY ats,job_id,ordinal").fetchall()
+        with patch.object(locations, "normalize_location", side_effect=AssertionError("unchanged input normalized")):
+            repeat = backfill(db)
+            limited = backfill(db, limit=1)
+        assert repeat == {**initial, "changed": 0}
+        assert limited["processed"] == 1 and limited["changed"] == 0
+        with sqlite3.connect(db) as con:
+            assert con.execute("SELECT * FROM job_location_enrichment ORDER BY ats,job_id").fetchall() == before
+            assert con.execute("SELECT * FROM job_location_targets ORDER BY ats,job_id,ordinal").fetchall() == targets
+        for column, value in (("location", "Toronto, Canada"), ("isRemote", "1"), ("workplaceType", "hybrid")):
+            with sqlite3.connect(db) as con:
+                con.execute(f"UPDATE jobs SET {column}=? WHERE ats='ashby' AND id='1'", (value,))
+            with patch.object(locations, "normalize_location", wraps=normalize_location) as normalize:
+                assert backfill(db)["changed"] == 1
+                assert normalize.call_count == 1
+        with patch.object(locations, "NORMALIZER_VERSION", "location-fixture-v2"):
+            with patch.object(locations, "normalize_location", wraps=normalize_location) as normalize:
+                assert backfill(db)["changed"] == 3
+                assert normalize.call_count == 3
 
 
 def main() -> None:

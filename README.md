@@ -14,7 +14,7 @@ It uses the working dashboard, ledger, workers, and MCP server with sample recor
 
 ## Discovery, tracking, and follow-up
 
-**Shortlist.** Model picks use personal ranking policies over postings collected from Ashby, Greenhouse, and Lever. Codex picks preserve lists selected by a calling agent, including its ordering and explanations. Saved-list history, posting dates, and a shared description preview make it possible to inspect roles without creating application records.
+**Shortlist.** Model picks use personal ranking policies over postings collected from Ashby, Greenhouse, and Lever. Codex picks preserve lists selected by a calling agent, including its ordering and explanations. Saved-list history, posting dates, and a shared description preview make it possible to inspect roles without creating application records. Numerical ranking scores appear only under Shortlist → Model picks; job previews, Codex picks, and application records keep the focus on posting facts and review evidence.
 
 <img src="docs/images/shortlist.png" width="800" alt="Saved daily shortlist with selection explanations and posting freshness." />
 
@@ -50,7 +50,7 @@ The fixtures demonstrate application behavior, not trained-model quality or a li
 
 | Area | Implementation and reason |
 | --- | --- |
-| Personal ranking | Two search policies trained from 2,000 LLM-labeled roles. Semantic features with logistic regression support selective search; word and character TF–IDF features support broad search. Grouped evaluation separates related postings. |
+| Personal ranking | Two search policies trained from 2,000 LLM-labeled roles. Each has a word and character TF–IDF scorer; explicit sparse CPU mode can refresh both without embeddings. Semantic scorers remain available. Grouped evaluation separates related postings. |
 | Shared application history | An append-only SQLite ledger records transitions. Dashboard, extension, CLI, and MCP use common service boundaries and idempotent commands. |
 | Agent context | Hermes accesses bounded tools for application history, submitted resumes, and sanitized archived mail. Proposed actions require separate approval. |
 | Career information and documents | A structured career profile and saved resumes live in Settings. Application records resolve the document recorded at submission. LaTeX generation remains available through the underlying resume tools; the portfolio demo uses sample PDFs. |
