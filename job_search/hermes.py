@@ -611,7 +611,9 @@ TOOL_DEFINITIONS: Tuple[Mapping[str, Any], ...] = REVIEW_DEFINITIONS + LIFECYCLE
     ),
     _definition(
         "list_attention_items",
-        "List items needing user review.",
+        "List items needing user review. Grouped mail_analysis findings with pending or held "
+        "status are proposals, not confirmed events or obligations. Review those findings "
+        "in the dashboard at #review/mail_analysis/{id}.",
         {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
     ),
     _definition(

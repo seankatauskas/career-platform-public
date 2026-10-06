@@ -52,6 +52,8 @@ class ReviewTests(unittest.TestCase):
     def command(self, action, **args):
         from job_search.job_reviews.service import WRITES
         self.sequence += 1
+        if action == 'start':
+            args.setdefault('rubric_version', 'job-review-v1')
         if action in WRITES:
             args.setdefault('idempotency_key', f'cmd-{self.sequence}')
         return self.service.call(action, args)
@@ -262,7 +264,10 @@ class ReviewTests(unittest.TestCase):
         content = copy.deepcopy(profile['draft']['content'])
         content['experience'][0]['bullets'][0]['text'] = 'Unapproved imaginary technology'
         gateway.save_career_profile(content, expected_revision_id=profile['draft_revision_id'], idempotency_key='draft-edit')
-        self.assertEqual(before, profile_context(gateway))
+        after = profile_context(gateway)
+        for key in ('facts', 'fingerprint', 'profile_revision'):
+            self.assertEqual(after[key], before[key])
+        self.assertTrue(after['source_inventory']['pending_career_draft'])
         saved = self.command('feedback', note='Prefer backend roles', idempotency_key='user-note')
         self.assertEqual(saved, self.command('feedback', note='Prefer backend roles', idempotency_key='user-note'))
         with self.assertRaisesRegex(ContractError, 'reused'):

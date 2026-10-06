@@ -147,6 +147,93 @@ async function loadSavedShortlists(older = false) {
   } catch (error) { if (epoch === shortlistLoadEpoch) { const feedback = $("#shortlist-feedback"); feedback.textContent = `Could not load this shortlist. Your previous results are unchanged. ${error.message}`; feedback.hidden = false; } }
 }
 
+const reviewFitLabels = {
+  close: "Close technical fit", slight_stretch: "Slight stretch", bigger_stretch: "Bigger stretch",
+  broad_only: "Broad consideration", needs_info: "More information needed", exclude: "Not recommended",
+};
+
+function appendReviewSummary(content, job) {
+  const summary = job.review_summary;
+  if (!summary) {
+    if (job.explanation) content.append(node("p", "curated-explanation", job.explanation));
+    return;
+  }
+  const labels = node("p", "review-fit-labels");
+  const fit = reviewFitLabels[summary.decision];
+  if (fit) labels.append(node("strong", "review-fit", fit));
+  if (summary.eligibility === "unresolved") labels.append(node("span", "review-condition", "Eligibility needs clarification"));
+  if (summary.eligibility === "ineligible") labels.append(node("span", "review-condition", "Eligibility requirement unmet"));
+  if (summary.category === "alternative") labels.append(node("span", "review-alternative", "Career alternative"));
+  if (labels.childElementCount) content.append(labels);
+  if (job.explanation) content.append(node("p", "curated-explanation", job.explanation));
+  // New publications contain the complete, reviewed narrative. Older records keep
+  // their original explanation and reveal recorded caveats without rewriting it.
+  if (!summary.narrative_complete) {
+    const existing = (job.explanation || "").toLocaleLowerCase();
+    const seen = new Set();
+    for (const [label, entries] of [
+      ["Eligibility", [summary.eligibility_condition]],
+      ["Gap", summary.gaps || []], ["Unconfirmed", summary.unknowns || []],
+    ]) {
+      for (const entry of entries) {
+        if (!entry || seen.has(entry) || existing.includes(entry.toLocaleLowerCase())) continue;
+        seen.add(entry);
+        const caveat = node("p", "review-caveat");
+        caveat.append(node("strong", "", `${label}: `), document.createTextNode(entry));
+        content.append(caveat);
+      }
+    }
+  }
+  const nextSteps = {apply: "Apply", clarify: "Clarify eligibility before applying", explore: "Explore this career direction"};
+  if (!summary.narrative_complete && nextSteps[summary.next_step]) content.append(node("p", "meta review-next-step", `Next step: ${nextSteps[summary.next_step]}.`));
+  const availability = summary.availability;
+  if (availability) {
+    const status = {open: "Open on the employer board", absent: "Not found on the employer board", unknown: "Employer availability unconfirmed"}[availability.status];
+    if (status) content.append(node("p", "meta review-availability", `${status}${availability.checked_at ? ` · Checked ${displayDate(availability.checked_at)}` : ""}`));
+  }
+  if (summary.related_group) content.append(node("p", "meta review-related-marker", `Related postings: ${summary.related_group.label}`));
+}
+
+function shortlistCardContainers(list, recommendations, curated) {
+  const containers = new Map();
+  // Date sorts remain global posting sorts. Grouping must not pull siblings away
+  // from their dates or modify persisted recommendation order.
+  if (!curated || shortlistSort !== "original") return containers;
+  let category = null, categoryRoot = list;
+  for (let index = 0; index < recommendations.length;) {
+    const job = recommendations[index];
+    const currentCategory = job.review_summary?.category === "alternative" ? "alternative" : "core";
+    if (currentCategory !== category) {
+      category = currentCategory;
+      categoryRoot = list;
+      if (category === "alternative") {
+        categoryRoot = node("section", "shortlist-alternatives");
+        categoryRoot.append(node("h3", "", "Career alternatives"), node("p", "help", "Related technical work with a different career direction. These roles are included for exploration."));
+        list.append(categoryRoot);
+      }
+    }
+    const group = job.review_summary?.related_group;
+    let end = index + 1;
+    if (group?.id) {
+      while (end < recommendations.length && recommendations[end].review_summary?.related_group?.id === group.id
+        && (recommendations[end].review_summary?.category === "alternative" ? "alternative" : "core") === category) end++;
+    }
+    let root = categoryRoot;
+    if (end - index > 1) {
+      root = node("section", "shortlist-related-group");
+      root.append(node("h3", "", group.label), node("p", "help", `${end - index} related postings. Each has its own requisition and application.`));
+      categoryRoot.append(root);
+    }
+    for (; index < end; index++) {
+      // Placeholders retain order when a later section is inserted before cards
+      // are rendered into their assigned containers.
+      const slot = node("div", "shortlist-card-slot");
+      root.append(slot); containers.set(recommendations[index], slot);
+    }
+  }
+  return containers;
+}
+
 function renderShortlist(result, preserveFilters = false) {
   if (state.shortlist?.review?.review_id !== result.review?.review_id) $("#agent-review-details").open = false;
   state.shortlist = result;
@@ -205,8 +292,11 @@ function renderShortlist(result, preserveFilters = false) {
     return;
   }
   list.classList.remove("empty");
+  const cardContainers = shortlistCardContainers(list, recommendations, curated);
   recommendations.forEach((job) => {
     const card = node("article", curated ? "card curated-card" : "card");
+    card.dataset.ats = job.ats || "";
+    card.dataset.jobId = job.id || "";
     const rank = node("span", "rank", String(job.rank || "–").padStart(2, "0"));
     rank.title = curated ? "Original Codex rank" : "Original relevance rank";
     card.append(rank);
@@ -223,7 +313,7 @@ function renderShortlist(result, preserveFilters = false) {
       badge.setAttribute("aria-label", `Applied recently. ${detail}`);
       companyLine.append(company, badge);
     }
-    if (curated && job.explanation) content.append(node("p", "curated-explanation", job.explanation));
+    if (curated) appendReviewSummary(content, job);
     if (curated && result.review && job.review_ordinal) {
       const details = node("details", "ranking-details");
       details.append(node("summary", "", "Assessment evidence"));
@@ -277,7 +367,8 @@ function renderShortlist(result, preserveFilters = false) {
       actions.append(existing);
     }
     card.append(actions);
-    list.append(card);
+    const slot = cardContainers.get(job);
+    if (slot) slot.replaceWith(card); else list.append(card);
   });
 }
 
@@ -346,6 +437,19 @@ function renderAgentReviewSummary(review, root) {
   panel.append(node('h3', '', review.status === 'published' ? 'Reviewed by agents' : 'Review in progress'));
   panel.append(node('p', 'help', `${displayDate(review.window_start)} to ${displayDate(review.window_end)} · Strict posting window`));
   panel.append(node('p', 'meta', `${review.total - pending} of ${review.total} postings assessed · ${review.audit_remaining_count} independent checks remaining · ${review.disagreement_count} disagreements`));
+  const inventory = review.metadata?.source_inventory;
+  if (inventory) {
+    panel.append(node('p', 'help', `Career context: ${inventory.career_fact_count} approved career facts and ${inventory.resume_fact_count} resume excerpts.`));
+    if (inventory.pending_career_draft) panel.append(node('p', 'help', 'Unapproved profile edits were excluded from this review.'));
+  }
+  const savedBrief = review.metadata?.search_brief;
+  if (savedBrief?.revision && savedBrief.brief) {
+    const places = {us: 'United States', worldwide: 'Worldwide'};
+    const brief = savedBrief.brief;
+    panel.append(node('p', 'help', `Review scope · Broad: ${places[brief.broad_geography]} · Targeted: ${places[brief.targeted_geography]}.`));
+    panel.append(node('p', 'help', brief.conditional_order === 'technical_fit'
+      ? 'Conditional roles keep their technical fit order.' : 'Actionable applications precede roles with eligibility questions.'));
+  }
   const details = node('details', 'ranking-details');
   details.append(node('summary', '', 'Coverage and collection freshness'));
   const counts = review.counts || {};

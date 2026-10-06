@@ -23,6 +23,7 @@ class AuthorityTests(unittest.TestCase):
         self.runtime_sequence = 0
 
     def start(self, **kwargs):
+        kwargs.setdefault('rubric_version', 'job-review-v1')
         return self.authority.start(dict(mode='custom', window_start='2026-10-01T00:00:00Z',
                                          idempotency_key='managed-start', **kwargs))['review_id']
 

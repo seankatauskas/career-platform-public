@@ -35,3 +35,7 @@ output "notification_topic_arn" {
 output "ami_id" {
   value = aws_instance.host.ami
 }
+
+output "release_status_document_name" {
+  value = aws_ssm_document.release_status.name
+}

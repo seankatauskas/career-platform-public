@@ -1,5 +1,17 @@
 # TODO
 
+## Shared email understanding
+
+Accepted design: [one model analysis for events, actions, and temporal facts](mail-understanding-design.md).
+
+- [x] Define the replacement for receipt-template bypasses and independent reply detection.
+- [x] Implement the versioned analysis contract, source references, and persistence.
+- [x] Add shadow analysis, grouped finding review, and idempotent projections.
+- [ ] Evaluate event and action accuracy separately on a locked reviewed set.
+- [x] Add coordinated shared-mode ingestion, task creation, and temporal extraction; suppress duplicate interpretation.
+- [x] Provide resumable, review-only reanalysis of all linked history.
+- [ ] Run the production history audit and release through the existing deployment workflow.
+
 ## Complete Lever description coverage
 
 The description migration is incomplete for Lever. At the time this was measured,

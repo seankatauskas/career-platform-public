@@ -239,7 +239,9 @@ class LedgerStore:
                 encoded_payload,
             ),
         )
-        if event_type in APPLICATION_NOTIFICATION_EVENTS:
+        from .mail.understanding_store import available
+        replay = available(con) and con.execute("SELECT 1 FROM mail_understanding_projections p JOIN mail_understanding_findings f USING(finding_id) JOIN mail_understanding_analyses a USING(analysis_id) WHERE p.target_id=? AND a.mode='replay' LIMIT 1",(context.source_ref,)).fetchone()
+        if event_type in APPLICATION_NOTIFICATION_EVENTS and not replay:
             LedgerStore._insert_application_notification_outbox(
                 con, application_id, event_type, event_id, recorded_at
             )
@@ -841,117 +843,121 @@ class LedgerStore:
         }
 
         def operation(con: sqlite3.Connection, stamp: str) -> Mapping[str, Any]:
-            proposal = con.execute(
-                "SELECT * FROM temporal_proposals WHERE temporal_proposal_id=?",
-                (temporal_proposal_id,),
-            ).fetchone()
-            if not proposal:
-                raise ContractError("temporal proposal was not found")
-            if proposal["status"] != "pending":
-                raise ConflictError("temporal proposal has already been decided")
-            if decision == "accepted" and self._application(con, proposal["application_id"])["current_phase"] == "terminal":
-                raise ConflictError("terminal applications cannot accept new schedules or deadlines")
-            schedule = None
-            reminders = []
-            status = decision
-            if decision == "accepted" and proposal["kind"] == "interview":
-                overlap = con.execute(
-                    "SELECT 1 FROM accepted_interview_schedules WHERE status='active' "
-                    "AND starts_at<? AND ends_at>? LIMIT 1",
-                    (proposal["ends_at"], proposal["starts_at"]),
-                ).fetchone()
-                if overlap:
-                    status = "conflict"
-                else:
-                    schedule_id = _new_id()
-                    payload = {
-                        "interview_schedule_id": schedule_id,
-                        "starts_at": proposal["starts_at"],
-                        "ends_at": proposal["ends_at"],
-                        "time_zone": proposal["time_zone"],
-                        "temporal_proposal_id": temporal_proposal_id,
-                    }
-                    event_context = MutationContext(
-                        context.idempotency_key,
-                        context.actor_kind,
-                        context.source_kind,
-                        temporal_proposal_id,
-                    )
-                    event, created = self._append_event(
-                        con,
-                        str(proposal["application_id"]),
-                        ApplicationEventType.INTERVIEW_SCHEDULED,
-                        stamp,
-                        payload,
-                        "temporal-schedule:" + temporal_proposal_id,
-                        event_context,
-                        stamp,
-                    )
-                    if created:
-                        self._project(con, str(proposal["application_id"]))
-                    con.execute(
-                        "INSERT INTO accepted_interview_schedules "
-                        "(interview_schedule_id,temporal_proposal_id,application_id,"
-                        "starts_at,ends_at,time_zone,application_event_id,status,created_at) "
-                        "VALUES (?,?,?,?,?,?,?,'active',?)",
-                        (
-                            schedule_id, temporal_proposal_id, proposal["application_id"],
-                            proposal["starts_at"], proposal["ends_at"],
-                            proposal["time_zone"], event["event_id"], stamp,
-                        ),
-                    )
-                    schedule = _row(con.execute(
-                        "SELECT * FROM accepted_interview_schedules "
-                        "WHERE interview_schedule_id=?", (schedule_id,)
-                    ).fetchone())
-                    start_time = parse_utc(str(proposal["starts_at"]))
-                    current = parse_utc(stamp)
-                    for kind, delta in (
-                        ("interview_24h", timedelta(hours=24)),
-                        ("interview_1h", timedelta(hours=1)),
-                    ):
-                        due = max(current, start_time - delta).isoformat(
-                            timespec="seconds"
-                        ).replace("+00:00", "Z")
-                        reminders.append(self._insert_local_reminder(
-                            con, proposal, kind, due, stamp, schedule_id
-                        ))
-            elif decision == "accepted":
-                from .lifecycle.core import ensure_deadline_task
-                ensure_deadline_task(con, self, proposal, context, stamp)
-                reminders.append(self._insert_local_reminder(
-                    con,
-                    proposal,
-                    "deadline",
-                    str(proposal["due_at"]),
-                    stamp,
-                    None,
-                ))
-            con.execute(
-                "UPDATE temporal_proposals SET status=?,decided_at=? "
-                "WHERE temporal_proposal_id=?",
-                (status, stamp, temporal_proposal_id),
-            )
-            con.execute(
-                "INSERT INTO temporal_proposal_decisions "
-                "(decision_id,temporal_proposal_id,decision,actor_kind,reason,decided_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (
-                    _new_id(), temporal_proposal_id, decision, context.actor_kind,
-                    str(reason).strip()[:1000], stamp,
-                ),
-            )
-            return {
-                "temporal_proposal_id": temporal_proposal_id,
-                "decision": decision,
-                "status": status,
-                "schedule": schedule,
-                "reminders": reminders,
-            }
+            return self._decide_temporal_proposal(con, stamp, temporal_proposal_id, decision, reason, context)
 
         return self._idempotent(
             "decide_temporal_proposal", context, request, operation
         )
+
+    def _decide_temporal_proposal(self, con, stamp, temporal_proposal_id, decision, reason, context):
+        proposal = con.execute(
+            "SELECT * FROM temporal_proposals WHERE temporal_proposal_id=?",
+            (temporal_proposal_id,),
+        ).fetchone()
+        if not proposal:
+            raise ContractError("temporal proposal was not found")
+        if proposal["status"] != "pending":
+            raise ConflictError("temporal proposal has already been decided")
+        if decision == "accepted" and self._application(con, proposal["application_id"])["current_phase"] == "terminal":
+            raise ConflictError("terminal applications cannot accept new schedules or deadlines")
+        schedule = None
+        reminders = []
+        from .mail.understanding_store import available
+        understanding = con.execute('SELECT a.mode FROM mail_understanding_projections p JOIN mail_understanding_findings f USING(finding_id) JOIN mail_understanding_analyses a USING(analysis_id) WHERE p.kind=\'temporal_proposal\' AND p.target_id=?',(temporal_proposal_id,)).fetchone() if available(con) else None
+        status = decision
+        if decision == "accepted" and proposal["kind"] == "interview":
+            overlap = con.execute(
+                "SELECT 1 FROM accepted_interview_schedules WHERE status='active' "
+                "AND starts_at<? AND ends_at>? LIMIT 1",
+                (proposal["ends_at"], proposal["starts_at"]),
+            ).fetchone()
+            if overlap:
+                status = "conflict"
+            else:
+                schedule_id = _new_id()
+                payload = {
+                    "interview_schedule_id": schedule_id,
+                    "starts_at": proposal["starts_at"],
+                    "ends_at": proposal["ends_at"],
+                    "time_zone": proposal["time_zone"],
+                    "temporal_proposal_id": temporal_proposal_id,
+                }
+                event_context = MutationContext(
+                    context.idempotency_key,
+                    context.actor_kind,
+                    context.source_kind,
+                    temporal_proposal_id,
+                )
+                event, created = self._append_event(
+                    con,
+                    str(proposal["application_id"]),
+                    ApplicationEventType.INTERVIEW_SCHEDULED,
+                    stamp,
+                    payload,
+                    "temporal-schedule:" + temporal_proposal_id,
+                    event_context,
+                    stamp,
+                )
+                if created:
+                    self._project(con, str(proposal["application_id"]))
+                con.execute(
+                    "INSERT INTO accepted_interview_schedules "
+                    "(interview_schedule_id,temporal_proposal_id,application_id,"
+                    "starts_at,ends_at,time_zone,application_event_id,status,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,'active',?)",
+                    (
+                        schedule_id, temporal_proposal_id, proposal["application_id"],
+                        proposal["starts_at"], proposal["ends_at"],
+                        proposal["time_zone"], event["event_id"], stamp,
+                    ),
+                )
+                schedule = _row(con.execute(
+                    "SELECT * FROM accepted_interview_schedules "
+                    "WHERE interview_schedule_id=?", (schedule_id,)
+                ).fetchone())
+                start_time = parse_utc(str(proposal["starts_at"]))
+                current = parse_utc(stamp)
+                for kind, delta in (
+                    ("interview_24h", timedelta(hours=24)),
+                    ("interview_1h", timedelta(hours=1)),
+                ):
+                    if understanding and understanding['mode']=='replay':
+                        continue
+                    due = max(current, start_time - delta).isoformat(
+                        timespec="seconds"
+                    ).replace("+00:00", "Z")
+                    reminders.append(self._insert_local_reminder(
+                        con, proposal, kind, due, stamp, schedule_id
+                    ))
+        elif decision == "accepted":
+            from .lifecycle.core import ensure_deadline_task
+            ensure_deadline_task(con, self, proposal, context, stamp)
+            if not understanding:
+                reminders.append(self._insert_local_reminder(
+                    con, proposal, "deadline", str(proposal["due_at"]), stamp, None,
+                ))
+        con.execute(
+            "UPDATE temporal_proposals SET status=?,decided_at=? "
+            "WHERE temporal_proposal_id=?",
+            (status, stamp, temporal_proposal_id),
+        )
+        con.execute(
+            "INSERT INTO temporal_proposal_decisions "
+            "(decision_id,temporal_proposal_id,decision,actor_kind,reason,decided_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                _new_id(), temporal_proposal_id, decision, context.actor_kind,
+                str(reason).strip()[:1000], stamp,
+            ),
+        )
+        return {
+            "temporal_proposal_id": temporal_proposal_id,
+            "decision": decision,
+            "status": status,
+            "schedule": schedule,
+            "reminders": reminders,
+        }
+
 
     @staticmethod
     def _insert_local_reminder(
@@ -1399,109 +1405,113 @@ class LedgerStore:
         }
 
         def operation(con: sqlite3.Connection, stamp: str) -> Mapping[str, Any]:
-            proposal = con.execute(
-                "SELECT * FROM event_proposals WHERE proposal_id=?", (proposal_id,)
-            ).fetchone()
-            if not proposal:
-                raise ContractError("event proposal not found")
-            if proposal["status"] != "pending":
-                raise ConflictError("event proposal has already been decided")
-            application_id = selected_application_id or proposal["proposed_application_id"]
-            event_result = None
-            if decision == "accepted":
-                if not application_id:
-                    raise ContractError("acceptance requires an application selection")
-                candidates = json.loads(proposal["candidate_application_ids_json"])
-                if not proposal["proposed_application_id"]:
-                    # The browser may have delivered the application after this
-                    # email was processed. Resolve review choices from current
-                    # local evidence, without another provider call or auto-link.
-                    candidates = self._unassigned_mail_candidates(proposal["evidence_id"])
-                if candidates and application_id not in candidates:
-                    raise ContractError("selected application is not a proposal candidate")
-                if not proposal["proposed_application_id"] and application_id not in candidates:
-                    raise ContractError("selected application has no supporting mail identity")
-                application = self._application(con, application_id)
-                event_type = ApplicationEventType(proposal["event_type"])
-                incoming_outcome = self._terminal_outcome(event_type)
-                if (
-                    application["current_phase"] == ApplicationPhase.TERMINAL.value
-                    and incoming_outcome
-                    and application["terminal_outcome"] != incoming_outcome
-                ):
-                    con.execute(
-                        "UPDATE event_proposals SET status='conflict',decided_at=? "
-                        "WHERE proposal_id=?",
-                        (stamp, proposal_id),
-                    )
-                    return {"decision": "conflict", "proposal_id": proposal_id}
-                event_context = MutationContext(
-                    idempotency_key=context.idempotency_key,
-                    actor_kind=context.actor_kind,
-                    source_kind=context.source_kind,
-                    source_ref=proposal_id,
-                )
-                payload = json.loads(proposal["payload_json"])
-                evidence = con.execute(
-                    "SELECT received_at FROM mail_evidence WHERE evidence_id=?",
-                    (proposal["evidence_id"],),
-                ).fetchone()
-                occurred_at = payload.get("occurred_at") or (evidence["received_at"] if evidence else stamp)
-                parse_utc(occurred_at)
-                saved_event, created = self._append_event(
-                    con,
-                    application_id,
-                    event_type,
-                    occurred_at,
-                    payload,
-                    "event-proposal:" + proposal_id,
-                    event_context,
-                    stamp,
-                )
-                if created:
-                    self._project(con, application_id)
-                    if event_type is ApplicationEventType.SUBMISSION_OBSERVED:
-                        self._insert_feedback_outbox(
-                            con, self._application(con, application_id), saved_event, stamp
-                        )
-                event_result = saved_event
+            return self._decide_event_proposal(con, stamp, proposal_id, decision, selected_application_id, reason, context)
+
+        return self._idempotent("decide_event_proposal", context, request, operation)
+
+    def _decide_event_proposal(self, con, stamp, proposal_id, decision, selected_application_id, reason, context):
+        proposal = con.execute(
+            "SELECT * FROM event_proposals WHERE proposal_id=?", (proposal_id,)
+        ).fetchone()
+        if not proposal:
+            raise ContractError("event proposal not found")
+        if proposal["status"] != "pending":
+            raise ConflictError("event proposal has already been decided")
+        application_id = selected_application_id or proposal["proposed_application_id"]
+        event_result = None
+        if decision == "accepted":
+            if not application_id:
+                raise ContractError("acceptance requires an application selection")
+            candidates = json.loads(proposal["candidate_application_ids_json"])
+            if not proposal["proposed_application_id"] and not ('understanding_finding_id' in proposal.keys() and proposal['understanding_finding_id']):
+                # The browser may have delivered the application after this
+                # email was processed. Resolve review choices from current
+                # local evidence, without another provider call or auto-link.
+                candidates = self._unassigned_mail_candidates(proposal["evidence_id"])
+            if candidates and application_id not in candidates:
+                raise ContractError("selected application is not a proposal candidate")
+            if not proposal["proposed_application_id"] and application_id not in candidates:
+                raise ContractError("selected application has no supporting mail identity")
+            application = self._application(con, application_id)
+            event_type = ApplicationEventType(proposal["event_type"])
+            incoming_outcome = self._terminal_outcome(event_type)
+            if (
+                application["current_phase"] == ApplicationPhase.TERMINAL.value
+                and incoming_outcome
+                and application["terminal_outcome"] != incoming_outcome
+            ):
                 con.execute(
-                    "UPDATE event_proposals SET status='accepted',applied_event_id=?,"
-                    "decided_at=? WHERE proposal_id=?",
-                    (saved_event["event_id"], stamp, proposal_id),
-                )
-                if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
-                    from .lifecycle.mail import link_accepted_evidence
-                    link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
-                from .lifecycle.core import ensure_event_task
-                ensure_event_task(con, self, saved_event, proposal["evidence_id"], stamp)
-            else:
-                con.execute(
-                    "UPDATE event_proposals SET status='rejected',decided_at=? "
+                    "UPDATE event_proposals SET status='conflict',decided_at=? "
                     "WHERE proposal_id=?",
                     (stamp, proposal_id),
                 )
-            con.execute(
-                "INSERT INTO event_proposal_decisions "
-                "(decision_id,proposal_id,decision,selected_application_id,actor_kind,"
-                "reason,decided_at) VALUES (?,?,?,?,?,?,?)",
-                (
-                    _new_id(),
-                    proposal_id,
-                    decision,
-                    application_id,
-                    context.actor_kind,
-                    reason.strip()[:1000],
-                    stamp,
-                ),
+                return {"decision": "conflict", "proposal_id": proposal_id}
+            event_context = MutationContext(
+                idempotency_key=context.idempotency_key,
+                actor_kind=context.actor_kind,
+                source_kind=context.source_kind,
+                source_ref=proposal_id,
             )
-            return {
-                "decision": decision,
-                "proposal_id": proposal_id,
-                "event": event_result,
-            }
+            payload = json.loads(proposal["payload_json"])
+            evidence = con.execute(
+                "SELECT received_at FROM mail_evidence WHERE evidence_id=?",
+                (proposal["evidence_id"],),
+            ).fetchone()
+            occurred_at = payload.get("occurred_at") or (evidence["received_at"] if evidence else stamp)
+            parse_utc(occurred_at)
+            saved_event, created = self._append_event(
+                con,
+                application_id,
+                event_type,
+                occurred_at,
+                payload,
+                "event-proposal:" + proposal_id,
+                event_context,
+                stamp,
+            )
+            if created:
+                self._project(con, application_id)
+                if event_type is ApplicationEventType.SUBMISSION_OBSERVED:
+                    self._insert_feedback_outbox(
+                        con, self._application(con, application_id), saved_event, stamp
+                    )
+            event_result = saved_event
+            con.execute(
+                "UPDATE event_proposals SET status='accepted',applied_event_id=?,"
+                "decided_at=? WHERE proposal_id=?",
+                (saved_event["event_id"], stamp, proposal_id),
+            )
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
+                from .lifecycle.mail import link_accepted_evidence
+                link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
+            from .lifecycle.core import ensure_event_task
+            ensure_event_task(con, self, saved_event, proposal["evidence_id"], stamp)
+        else:
+            con.execute(
+                "UPDATE event_proposals SET status='rejected',decided_at=? "
+                "WHERE proposal_id=?",
+                (stamp, proposal_id),
+            )
+        con.execute(
+            "INSERT INTO event_proposal_decisions "
+            "(decision_id,proposal_id,decision,selected_application_id,actor_kind,"
+            "reason,decided_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                _new_id(),
+                proposal_id,
+                decision,
+                application_id,
+                context.actor_kind,
+                reason.strip()[:1000],
+                stamp,
+            ),
+        )
+        return {
+            "decision": decision,
+            "proposal_id": proposal_id,
+            "event": event_result,
+        }
 
-        return self._idempotent("decide_event_proposal", context, request, operation)
 
     def auto_apply_event_proposal(
         self,
@@ -1518,95 +1528,99 @@ class LedgerStore:
         }
 
         def operation(con: sqlite3.Connection, stamp: str) -> Mapping[str, Any]:
-            proposal = con.execute(
-                "SELECT p.*,e.received_at FROM event_proposals p "
-                "LEFT JOIN mail_evidence e ON e.evidence_id=p.evidence_id "
-                "WHERE p.proposal_id=?",
-                (proposal_id,),
-            ).fetchone()
-            if not proposal:
-                raise ContractError("event proposal not found")
-            if proposal["status"] == "auto_applied":
-                return {
-                    "proposal_id": proposal_id,
-                    "event": self._event(con, str(proposal["applied_event_id"])),
-                    "application": self._application(
-                        con, str(proposal["proposed_application_id"])
-                    ),
-                    "created": False,
-                }
-            if proposal["status"] != "pending":
-                raise ConflictError("event proposal is not pending")
-            application_id = proposal["proposed_application_id"]
-            if not application_id:
-                raise ContractError("ambiguous proposals cannot be auto-applied")
-            event_type = ApplicationEventType(str(proposal["event_type"]))
-            if event_type not in MODEL_AUTO_APPLY_EVENT_TYPES:
-                raise ContractError("event type is not eligible for automatic application")
-            producer_kind = str(proposal["producer_kind"])
-            if producer_kind == "rule":
-                if float(proposal["confidence"]) != 1.0:
-                    raise ContractError("deterministic rule confidence must be exact")
-            elif producer_kind == "model":
-                if not automation_policy_id:
-                    raise ContractError("model proposal requires an automation policy")
-                policy = con.execute(
-                    "SELECT * FROM classifier_automation_policies WHERE policy_id=?",
-                    (automation_policy_id,),
-                ).fetchone()
-                if not policy or not int(policy["enabled"]):
-                    raise ContractError("model automation policy is not enabled")
-                if (
-                    str(policy["event_type"]) != event_type.value
-                    or str(policy["producer_version"]) != str(proposal["producer_version"])
-                    or int(policy["example_count"]) < 50
-                    or float(policy["observed_precision"]) < 0.99
-                    or int(policy["wrong_application_matches"]) != 0
-                    or float(proposal["confidence"]) < float(policy["threshold"])
-                ):
-                    raise ContractError("model proposal does not satisfy its safety gate")
-            else:
-                raise ContractError("unknown proposal producer")
-            event, created = self._append_event(
-                con,
-                str(application_id),
-                event_type,
-                str(proposal["received_at"] or stamp),
-                json.loads(str(proposal["payload_json"])),
-                "proposal:" + proposal_id,
-                context,
-                stamp,
-            )
-            if created:
-                self._project(con, str(application_id))
-            con.execute(
-                "UPDATE event_proposals SET status='auto_applied',applied_event_id=?,"
-                "automation_policy_id=?,decided_at=? WHERE proposal_id=?",
-                (event["event_id"], automation_policy_id, stamp, proposal_id),
-            )
-            if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
-                from .lifecycle.mail import link_accepted_evidence
-                link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
-            from .lifecycle.core import ensure_event_task
-            ensure_event_task(con, self, event, proposal["evidence_id"], stamp)
-            # A newer rule can resolve an older pending match for the same evidence.
-            # Keep the old proposal as audit history without leaving duplicate review work.
-            con.execute(
-                "UPDATE event_proposals SET status='superseded',decided_at=? "
-                "WHERE evidence_id=? AND proposed_application_id=? AND event_type=? "
-                "AND status='pending' AND proposal_id<>?",
-                (stamp, proposal["evidence_id"], application_id, event_type.value, proposal_id),
-            )
-            return {
-                "proposal_id": proposal_id,
-                "event": event,
-                "application": self._application(con, str(application_id)),
-                "created": created,
-            }
+            return self._auto_apply_event_proposal(con, stamp, proposal_id, context, automation_policy_id)
 
         return self._idempotent(
             "auto_apply_event_proposal", context, request, operation
         )
+
+    def _auto_apply_event_proposal(self, con, stamp, proposal_id, context, automation_policy_id):
+        proposal = con.execute(
+            "SELECT p.*,e.received_at FROM event_proposals p "
+            "LEFT JOIN mail_evidence e ON e.evidence_id=p.evidence_id "
+            "WHERE p.proposal_id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not proposal:
+            raise ContractError("event proposal not found")
+        if proposal["status"] == "auto_applied":
+            return {
+                "proposal_id": proposal_id,
+                "event": self._event(con, str(proposal["applied_event_id"])),
+                "application": self._application(
+                    con, str(proposal["proposed_application_id"])
+                ),
+                "created": False,
+            }
+        if proposal["status"] != "pending":
+            raise ConflictError("event proposal is not pending")
+        application_id = proposal["proposed_application_id"]
+        if not application_id:
+            raise ContractError("ambiguous proposals cannot be auto-applied")
+        event_type = ApplicationEventType(str(proposal["event_type"]))
+        if event_type not in MODEL_AUTO_APPLY_EVENT_TYPES:
+            raise ContractError("event type is not eligible for automatic application")
+        producer_kind = str(proposal["producer_kind"])
+        if producer_kind == "rule":
+            if float(proposal["confidence"]) != 1.0:
+                raise ContractError("deterministic rule confidence must be exact")
+        elif producer_kind == "model":
+            if not automation_policy_id:
+                raise ContractError("model proposal requires an automation policy")
+            policy = con.execute(
+                "SELECT * FROM classifier_automation_policies WHERE policy_id=?",
+                (automation_policy_id,),
+            ).fetchone()
+            if not policy or not int(policy["enabled"]):
+                raise ContractError("model automation policy is not enabled")
+            if (
+                str(policy["event_type"]) != event_type.value
+                or str(policy["producer_version"]) != str(proposal["producer_version"])
+                or int(policy["example_count"]) < 50
+                or float(policy["observed_precision"]) < 0.99
+                or int(policy["wrong_application_matches"]) != 0
+                or float(proposal["confidence"]) < float(policy["threshold"])
+            ):
+                raise ContractError("model proposal does not satisfy its safety gate")
+        else:
+            raise ContractError("unknown proposal producer")
+        event, created = self._append_event(
+            con,
+            str(application_id),
+            event_type,
+            str(proposal["received_at"] or stamp),
+            json.loads(str(proposal["payload_json"])),
+            "proposal:" + proposal_id,
+            context,
+            stamp,
+        )
+        if created:
+            self._project(con, str(application_id))
+        con.execute(
+            "UPDATE event_proposals SET status='auto_applied',applied_event_id=?,"
+            "automation_policy_id=?,decided_at=? WHERE proposal_id=?",
+            (event["event_id"], automation_policy_id, stamp, proposal_id),
+        )
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='lifecycle_mail_links'").fetchone():
+            from .lifecycle.mail import link_accepted_evidence
+            link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
+        from .lifecycle.core import ensure_event_task
+        ensure_event_task(con, self, event, proposal["evidence_id"], stamp)
+        # A newer rule can resolve an older pending match for the same evidence.
+        # Keep the old proposal as audit history without leaving duplicate review work.
+        con.execute(
+            "UPDATE event_proposals SET status='superseded',decided_at=? "
+            "WHERE evidence_id=? AND proposed_application_id=? AND event_type=? "
+            "AND status='pending' AND proposal_id<>?",
+            (stamp, proposal["evidence_id"], application_id, event_type.value, proposal_id),
+        )
+        return {
+            "proposal_id": proposal_id,
+            "event": event,
+            "application": self._application(con, str(application_id)),
+            "created": created,
+        }
+
 
     def create_action_proposal(
         self, proposal: ActionProposalInput, context: MutationContext
@@ -2944,6 +2958,12 @@ class LedgerStore:
     def list_attention_items(self) -> Sequence[Mapping[str, Any]]:
         with connect(self.db_path) as con:
             rows: List[Mapping[str, Any]] = []
+            from .mail.understanding_store import available, briefing_analyses
+            understood = available(con)
+            projected = {(r['kind'],r['target_id']) for r in con.execute('SELECT kind,target_id FROM mail_understanding_projections')} if understood else set()
+            for analysis in briefing_analyses(con):
+                if analysis['mode']=='shared' and analysis['current'] and any(f['status'] in ('pending','held') for f in analysis['findings']):
+                    rows.append({'kind':'mail_analysis','id':analysis['analysis_id'],'application_id':analysis['application_id'],'status':'review','detail':'Email understanding','created_at':analysis['created_at'],'candidate_application_ids':analysis['candidate_application_ids'],'analysis':analysis})
             for attempt in con.execute("SELECT b.*,a.title_snapshot,a.employer_snapshot FROM browser_attempts b JOIN applications a USING(application_id) WHERE a.submitted_at IS NULL AND a.current_phase='preparing' AND b.status IN ('attempted','request_sent','failed') AND datetime(b.updated_at)<datetime('now','-10 minutes') AND b.attempt_id=(SELECT x.attempt_id FROM browser_attempts x WHERE x.application_id=b.application_id ORDER BY x.created_at DESC LIMIT 1)"):
                 rows.append({"kind": "browser_submission", "id": attempt["attempt_id"], "application_id": attempt["application_id"],
                     "status": "review", "detail": "Submission has not been confirmed. Check the employer page or wait for a confirmation email.",
@@ -2954,6 +2974,8 @@ class LedgerStore:
                 "FROM event_proposals WHERE status IN ('pending','conflict') "
                 "ORDER BY created_at,proposal_id"
             ):
+                if ('event_proposal',proposal['proposal_id']) in projected:
+                    continue
                 rows.append(
                     {
                         "kind": "event_proposal",
@@ -2978,6 +3000,8 @@ class LedgerStore:
                 "ON a.application_id=t.application_id WHERE t.status='pending' "
                 "ORDER BY t.created_at,t.temporal_proposal_id"
             ):
+                if ('temporal_proposal',proposal['temporal_proposal_id']) in projected:
+                    continue
                 rows.append(
                     {
                         "kind": "temporal_proposal",

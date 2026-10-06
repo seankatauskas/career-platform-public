@@ -5,8 +5,8 @@ ID = {'type':'string','minLength':1,'maxLength':256}
 PAGE = {'limit':{'type':'integer','minimum':1,'maximum':10},'offset':{'type':'integer','minimum':0,'maximum':100000}}
 SPECS = {
  'get_notification_preferences':('Read current briefing and attention preferences.',{},()),
- 'get_briefing':('Read an existing grounded career briefing and coverage.',{'briefing_id':ID},('briefing_id',)),
- 'preview_briefing':('Preview a briefing without sending notifications.',{'slot':{'type':'string','enum':['morning','evening','week_ahead','week_recap']}},()),
+ 'get_briefing':('Read an existing grounded career briefing and coverage. Preserve grouped email review links; pending or held findings need dashboard review and are not confirmed events or obligations.',{'briefing_id':ID},('briefing_id',)),
+ 'preview_briefing':('Preview a briefing without sending notifications. Routine confirmations are aggregated; grouped email findings awaiting review must remain labeled as reviews.',{'slot':{'type':'string','enum':['morning','evening','week_ahead','week_recap']}},()),
  'list_briefings':('Read recent briefing history.',PAGE,()),
  'list_attention':('Read current attention items. Delivery and acknowledgment do not complete obligations.',PAGE,()),
  'get_career_reply':('Read the exact immutable proposed email.',{'proposal_id':ID},('proposal_id',)),

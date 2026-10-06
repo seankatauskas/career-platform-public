@@ -21,6 +21,27 @@ as listed in `docs/commands.md`; do not add root Python scripts.
 Generated OpenWiki pages can contain historical paths;
 use `tests/README.md` for current verification commands.
 
+## Coordinating releases across sessions
+
+Use a separate branch/worktree for each feature. Feature sessions implement,
+test, and hand off reviewable PRs; they do not dispatch AWS preparation,
+installation, or Terraform workflows unless the user explicitly assigns release
+or infrastructure work to that session. Finishing or merging a feature does not
+implicitly authorize a production deployment.
+
+The release owner batches completed, merged changes. Inspect shared status with
+`python -m job_search.release_coordinator status` (or **Inspect AWS release
+status** in Actions). The release owner alone proposes the predecessor update,
+reviews/commits it through the normal PR process, and runs **Prepare AWS release**
+on `main`. Preparation freezes the dispatch commit and reuses a matching verified
+candidate; changes merged later belong to a later batch. Installation remains a
+separate explicit **Deploy prepared AWS release** request using the exact receipt.
+
+Never bypass an active host lock, stale predecessor rejection, or unknown SSM
+outcome. Do not cancel an installation to make room for another. These instructions
+coordinate sessions; the workflows and host enforce serialization and transition
+checks. See `docs/operations/coordinated-releases.md` for setup and commands.
+
 ## Running the tests
 
 The suite is offline, needs no network and no dependencies, and finishes in about a

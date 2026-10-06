@@ -5,8 +5,11 @@ repository. `seankatauskas/career-platform-public` is an independent snapshot
 repository with its own history: one initial commit, then at most one update per
 Chicago calendar date when exported files change. Do not develop directly in it.
 
-`public-snapshot.yml` runs at `0 22 * * *` with `timezone: America/Chicago` and also
-supports manual dispatch. GitHub may delay scheduled runs. The publisher uses the
+`public-snapshot.yml` schedules publication at 10 PM (`0 22 * * *`) and a retry at
+11:17 PM (`17 23 * * *`), both with `timezone: America/Chicago`, and also supports
+manual dispatch. The retry avoids the start-of-hour scheduling peak and provides
+another attempt after a failed or missed run. GitHub may delay or drop scheduled
+runs, so neither trigger guarantees an exact publication time. The publisher uses the
 Chicago date when publication runs, honors daylight saving time, serializes runs,
 and treats repeated runs on the same date as no-ops. Changes after that day's
 publication wait until the next date. Unchanged snapshots produce no empty commits.
@@ -17,6 +20,11 @@ the publication key. The export preserves executable modes, documentation, demo
 media, infrastructure source, and license attribution. Public CI remains active;
 AWS and publishing workflows become inactive examples. Active private workflows
 take precedence over older files with matching names in the examples directory.
+Private pull-request and main-branch CI also exports the pinned source and runs
+the full offline/browser suites on that export, catching publishing incompatibilities
+before the scheduled run. Workflow contract tests read active deployment workflows
+in the private checkout and their inactive examples in the public export; both
+layouts retain the same assertions.
 
 The private-file guard checks committed bytes, including uncommitted replacements
 that might otherwise conceal a secret. Personal resumes, databases, credentials,

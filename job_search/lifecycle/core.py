@@ -528,6 +528,9 @@ class CoreMixin:
             published = 0
             for row in tasks:
                 task = dict(row)
+                from ..mail.understanding_store import available
+                if available(con) and con.execute("SELECT 1 FROM mail_understanding_projections p JOIN mail_understanding_findings f USING(finding_id) JOIN mail_understanding_analyses a USING(analysis_id) WHERE p.kind='task' AND p.target_id=? AND a.mode='replay' LIMIT 1",(task['task_id'],)).fetchone():
+                    continue
                 # Old discoveries remain visible, but never flood notification delivery.
                 if task['due_at'] < task['created_at'] and task['revision_no'] == 1:
                     continue
@@ -623,6 +626,10 @@ class CoreMixin:
 
 def ensure_event_task(con, store, event, evidence_id, stamp):
     """Create one conservative obligation per applied lifecycle fact under its lock."""
+    from ..mail.understanding_store import owns_evidence, available
+    projected = available(con) and con.execute("SELECT 1 FROM event_proposals p JOIN mail_understanding_projections m ON m.target_id=p.proposal_id AND m.kind='event_proposal' WHERE p.applied_event_id=?",(event['event_id'],)).fetchone()
+    if owns_evidence(con, evidence_id) or projected:
+        return
     mapping = {'assessment_requested':('complete_assessment','applicant'),
                'interview_requested':('send_availability','applicant'),
                'offer_received':('offer_decision','applicant')}
@@ -650,6 +657,9 @@ def ensure_deadline_task(con, store, proposal, context, stamp):
     application_id = proposal['application_id']
     evidence = con.execute('SELECT e.evidence_id,e.received_at FROM mail_evidence e JOIN mail_archive a ON a.account_id=e.account_id AND a.immutable_message_id=e.immutable_message_id WHERE a.archive_id=?',(proposal['archive_id'],)).fetchone()
     evidence_id = evidence['evidence_id'] if evidence else None
+    from ..mail.understanding_store import owns_evidence
+    if owns_evidence(con, evidence_id) or ('understanding_finding_id' in proposal.keys() and proposal['understanding_finding_id']):
+        return  # Accepted action findings own explicit temporal-to-task assignments.
     source_time = evidence['received_at'] if evidence else stamp
     if evidence_id:
         from .mail import link_accepted_evidence

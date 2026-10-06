@@ -36,11 +36,30 @@ existing connection. Do not put the origin, personal profile, job exports, or se
 credentials into Git. Normal reviews use Tailscale; AWS administration access is not
 required. Session credentials are handled internally by the client.
 
-Check existing active reviews before starting. Resume the appropriate review instead
-of silently abandoning work. Load every page of frozen context (`facts`, `preferences`,
-and `feedback`). A new review uses the current approved facts and active resume.
-Use only preferences established by the user; ask about a material unknown instead
-of inventing a salary floor, location exclusion, or work-authorization status.
+Check existing active reviews before starting and resume the appropriate review.
+Check the connected service's context/rubric before using v2 operations. A server
+still reporting `job-review-v1` may not expose `brief` or calibration tools. On that
+server, use its original assessment contract and explicit start preferences, preserve
+fit labels and caveats in the explanation, and disclose that v2 calibration and
+availability gates require the application upgrade. Do not send unsupported v2
+fields or claim those gates ran. The installed skill alone does not upgrade the server.
+Inspect live context's `source_inventory`: distinguish approved career-bank facts
+from resume lines, and disclose a pending career draft. A resume-only payload is not
+the full career bank. Use the existing career-profile approval flow when fuller facts
+are needed; never treat a draft or past agent conversation as approved evidence.
+
+Read the saved search brief with `brief`. Its separate broad/targeted geography,
+career directions, acceptable alternatives, stretch policy, and eligibility facts
+govern this review. Revision zero contains editable suggestions, not user preferences.
+Use `save-brief` for preferences explicitly established by the user; keep material
+unknowns unknown instead of inventing a salary floor, relocation willingness, or
+authorization. Broad and targeted scopes need not be identical. Do not copy settings
+from the production ranking models.
+
+Start freezes the approved bank, active resumes, search brief, and feedback. Load every
+page of frozen `facts`, `preferences`, and `feedback`; reading the resume alone misses
+bank evidence. A later brief or profile update applies to a new review. Existing v1
+reviews retain their original contract; new reviews use v2.
 
 Recurring windows begin at the previous completed cutoff and end at request time.
 Explicit date requests use custom mode. Windows are strict: `start < posted_at <= end`.
@@ -57,20 +76,24 @@ review does not run collection or ranking.
    work, including applied AI and FDE. Evaluate actual responsibilities, required vs
    preferred qualifications, and seniority in context. Projects show skill evidence;
    they do not add professional employment tenure.
-3. Save an assessment using exact source quotes and the frozen profile fact IDs.
-   Separate qualification fit from career alignment. Distinguish a missing skill from
-   experience absent from the resume but confirmed in the career bank. Never invent
-   evidence or estimate interview odds from the fit label.
+3. Save an assessment using exact source quotes and frozen profile fact IDs. Separate
+   technical fit, career alignment, eligibility, and the recommended next step. A
+   capability absent from the resume may be supported by an approved bank fact.
+   Citizenship does not establish an active clearance; distinguish export-control,
+   clearance, graduate-cohort, and other material requirements. Never invent evidence
+   or estimate interview odds from a fit label.
 4. Assign `close`, `slight_stretch`, `bigger_stretch`, `broad_only`, `needs_info`, or
    `exclude`. Use a lower positive `priority` for stronger recommendations; this is
-   ordering, not a probability. Explain the main match and the main gap concisely.
-   There is no selection quota.
+   ordering, not a probability. Explain the strongest match, material gaps, eligibility
+   conditions, and any career-direction difference in the visible explanation.
+   Keep supporting evidence expandable, without hiding the reason to hesitate there.
+   There is no selection quota; retain justified bigger stretches under the brief.
 
 Apply the same fit rubric across batches:
 
 | Decision | Meaning |
 |---|---|
-| `close` | Core duties and important requirements have direct evidence; no known major eligibility or experience gap. |
+| `close` | Core technical duties and important experience requirements have direct evidence; assess eligibility separately in v2. |
 | `slight_stretch` | Core duties fit, with a modest tenure gap or a learnable adjacent technology gap; name that gap. |
 | `bigger_stretch` | Relevant foundation, but a substantial seniority, scale, or specialization gap; explain why applying is still plausible. |
 | `broad_only` | Relevant software/adjacent domain, but not a supported personal recommendation. |
@@ -81,6 +104,14 @@ Required and preferred qualifications carry different weight. A year count alone
 not a universal cutoff; compare actual ownership and responsibilities with the user's
 professional evidence. Do not treat unconfirmed authorization, relocation, or salary
 as a fact. Broad inclusion must not be described as confirmed personal eligibility.
+
+For v2, record `eligibility`, `eligibility_condition`, `next_step`, and `category`
+using the [interface reference](references/interface.md). An unresolved condition may
+coexist with a close technical fit. Under `conditional_order: technical_fit`, keep
+conditional recommendations mixed by technical fit with their caveats visible; do
+not automatically demote them. Use actionability ordering only when the saved brief
+requests it. Customer success, content evaluation, management, and other alternatives
+require a career-direction assessment even when some technical skills match.
 
 Use consistent families: `frontend`, `backend`, `full_stack`, `mobile`, `platform`,
 `applied_ai`, `fde`, `data`, `security`, `quality`, `other_technical`, and
@@ -111,10 +142,32 @@ reference a retained recommendation in the same review.
 
 Resolve disagreements by returning to the evidence. Revising a primary assessment
 invalidates its prior check, and changed source text requires `refresh-job` followed by
-reassessment. Compare priority across batches before finalizing. Inspect assessment
-history when a prior conclusion is unclear.
+reassessment. Inspect assessment history when a prior conclusion is unclear.
+
+## Calibrate the complete list
+
+For v2, read every `calibration` page after coverage and checks are complete. Compare
+all selected recommendations together against the same frozen brief and evidence.
+Assign one complete global order with `calibrate`, then seal it with `finalize`.
+Group related postings for browsing while preserving every requisition, location,
+eligibility difference, and application link. Similar descriptions alone never
+justify duplicate exclusion. Explain material sibling differences on each card.
+
+Calibration changes ordering and grouping only. If the comparison reveals a wrong
+fit, eligibility judgment, caveat, or inclusion, correct the primary assessment and
+repeat its independent check before recalibrating. Evidence changes invalidate the
+prior calibration. Isolated finalizers report such concerns to the coordinator;
+they cannot rewrite primary/check judgments.
 
 ## Publish and hand off
+
+For v2, call `verify-availability` after finalization. Trusted application code checks
+the official boards for selected targeted roles in bounded requests and records dated
+`open`, `absent`, or `unknown` observations. It does not rerun collection. Unknown
+includes a failed or skipped check, never confirmed closure. Missing configured
+scraper contact stays unknown; do not invent an address. Confirmed absence is omitted;
+unknown stays visible with a caveat. Broad-only roles retain catalog status unless
+separately checked. Availability does not establish fit or eligibility.
 
 Call preview and present the total-to-domain-to-selected breakdown, broad/targeted
 counts, fit tiers, meaningful gaps, collection freshness, and unresolved uncertainties.
@@ -125,8 +178,8 @@ the newer profile used.
 If the user's request authorizes publication, publish using the exact preview fingerprint
 and a stable idempotency key. The service saves broad and targeted lists atomically,
 with dated titles and numbered parts beyond 500 roles. Return their dashboard links.
-Never claim completion while assessments or checks remain. Catalog status is not a live
-employer-site check; distinguish those sources if you perform additional verification.
+Never claim completion while required assessments, checks, calibration, or verification
+remain. Distinguish the dated official-board observation from current catalog status.
 
 Record feedback only when explicitly supplied by the user. Do not interpret an employer
 rejection, a submitted application, or an agent disagreement as a new user preference.

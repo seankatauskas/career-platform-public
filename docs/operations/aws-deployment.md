@@ -353,19 +353,21 @@ variables:
 | `AWS_WORKFLOW_REF` | Explicit allowed branch, e.g. `refs/heads/main` after merge |
 | `AWS_APP_REPOSITORY`, `AWS_HERMES_REPOSITORY` | ECR repository URLs |
 | `AWS_INSTANCE_ID`, `AWS_DEPLOY_DOCUMENT` | Host and constrained SSM document |
+| `AWS_RELEASE_STATUS_DOCUMENT` | Terraform `release_status_document_name` output; required before preparing or installing |
 | `AWS_RELEASE_BUCKET`, `AWS_DEPLOY_ROLE_ARN` | Release storage and OIDC deploy role |
 | `HERMES_BASE_IMAGE` | Reviewed upstream image pinned to a SHA-256 digest |
 | `TECTONIC_VERSION` | Exact installed Linux executable version |
 | `AWS_STATE_BUCKET`, `AWS_INFRASTRUCTURE_ROLE_ARN` | Terraform backend and separate infrastructure role |
 | `AWS_TERRAFORM_VARS_JSON` | Reviewed nonsecret main-module input object |
 
-Push the reviewed commit to the approved repository/branch when authorized. Run
+Push the reviewed batch to `main` when authorized. Run
 **Prepare AWS release** (`aws-release.yml`). This publishes an update without
 installing it or interrupting the live application. The committed
 `deploy/release-policy.json` identifies the compatibility contract, full test-baseline
 commit, and exact predecessor release/source. The first installation uses a null
-predecessor. Before a later release, update that policy from the last successful
-production receipt in the same reviewed change. An unexpected installed predecessor
+predecessor. Before a later batch, the release owner proposes that policy from live host
+status and reviews/merges the update before preparation. See
+[coordinated releases](coordinated-releases.md) for setup and duplicate handling. An unexpected installed predecessor
 is rejected before production is stopped. The workflow tests the predecessor and
 candidate images against fictional persisted data, builds once, and publishes
 immutable image digests and a checksummed release. The workflow summary and
@@ -400,8 +402,9 @@ volume lock. Avoid ad-hoc Compose writes while an operation is running.
 
 Keep development data separate from production. Use the
 [local development preview](../development.md) while using AWS for real applications.
-After a reviewed feature is merged, use **Prepare AWS release**, then choose when
-to run **Deploy prepared AWS release**. Infrastructure changes still use the separate
+Feature sessions hand off reviewed changes without deploying independently.
+The release owner batches merged changes through **Prepare AWS release**, then
+chooses when to run **Deploy prepared AWS release**. Infrastructure changes still use the separate
 Terraform workflow. The installation summary reports the release, SSM command, backup and phase
 timestamps; an unknown SSM result must be inspected before another deployment.
 A repeat request for an already installed healthy release does not reinstall it.

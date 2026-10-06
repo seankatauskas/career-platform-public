@@ -2,6 +2,12 @@
 from .service import FIELDS, WRITES
 
 DESCRIPTIONS = {
+    'brief': 'Read the saved user-confirmed search scope and its revision.',
+    'save-brief': 'Save explicit user search preferences with revision protection.',
+    'calibration': 'Read all selected assessments for final cross-batch ordering, in bounded pages.',
+    'calibrate': 'Stage final position and an optional related-posting group without changing judgments.',
+    'finalize': 'Seal a complete revision-bound final order after independent checks.',
+    'verify-availability': 'Check only targeted official boards with a bounded trusted fetch; failures remain unknown.',
     'context': 'Read paginated approved profile facts and frozen review criteria.',
     'assessment': 'Read a losslessly paginated JSON assessment or its revision history.',
     'start': 'Start a strict posting-window review; does not evaluate jobs or invoke models.',
@@ -22,8 +28,10 @@ DESCRIPTIONS = {
 def property_schema(field):
     if field == 'blind':
         return {'type': 'boolean'}
-    if field in ('offset', 'after', 'ordinal', 'expected_revision', 'before', 'limit'):
+    if field in ('offset', 'after', 'ordinal', 'expected_revision', 'before', 'limit', 'position'):
         return {'type': 'integer', 'minimum': 0}
+    if field in ('brief', 'related_group'):
+        return {'type': 'object'}
     if field == 'assessment':
         return {'type': 'object', 'description': 'stage, decision, family, alignment, reason_code, explanation, evidence [{field,quote,fact_id?}], strengths, gaps, unknowns, borderline; selected roles need priority (ordinal preference, lower first).'}
     if field == 'preferences':
@@ -32,6 +40,11 @@ def property_schema(field):
 
 
 REQUIRED = {
+    'brief': (), 'save-brief': ('brief', 'expected_revision'),
+    'calibration': ('review_id',),
+    'calibrate': ('review_id', 'ordinal', 'basis_sha256', 'position'),
+    'finalize': ('review_id', 'basis_sha256'),
+    'verify-availability': ('review_id',),
     'context': (), 'list': (), 'start': (), 'batch': ('review_id',),
     'claim': ('review_id', 'actor'), 'job': ('review_id', 'ordinal', 'actor'),
     'assessment': ('review_id', 'ordinal'),
@@ -50,4 +63,4 @@ TOOL_DEFINITIONS = tuple({
                      'required': list(REQUIRED[action]) + (['idempotency_key'] if action in WRITES else [])},
 } for action, description in DESCRIPTIONS.items())
 TOOL_NAMES = tuple(t['name'] for t in TOOL_DEFINITIONS)
-READ_TOOLS = {'review_' + a.replace('-', '_') for a in ('context', 'assessment', 'list', 'batch', 'status', 'preview')}
+READ_TOOLS = {'review_' + a.replace('-', '_') for a in ('brief', 'calibration', 'context', 'assessment', 'list', 'batch', 'status', 'preview')}

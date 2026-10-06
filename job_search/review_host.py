@@ -129,6 +129,13 @@ def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system
               'codex_executable': str(binary), 'model': 'gpt-6-astra', 'reasoning_effort': 'high',
               'codex_version': '0.160.0', 'worker_uid': 10001, 'worker_gid': 10001,
               'schedule_enabled': False, 'schedule_calendar': None}
+    from .job_reviews.runner_config import RunnerConfig
+    # Versioned release defaults, rather than edits to generated live settings.
+    for name in ('batch_size', 'concurrency', 'assignment_timeout_seconds',
+                 'invocation_timeout_seconds', 'transient_retries', 'preload_enabled',
+                 'screening_enabled', 'screening_model', 'screening_reasoning_effort', 'screening_batch_size',
+                 'benchmark_check_all'):
+        runner[name] = getattr(RunnerConfig, name)
     write_json(configs / 'runner.json', runner)
     unit = release / 'deploy/aws' / UNIT
     if unit.is_symlink() or not unit.is_file():

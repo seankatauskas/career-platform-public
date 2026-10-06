@@ -97,6 +97,14 @@ job_search/mail/*
 !job_search/mail/sanitizer.py
 !job_search/mail/secure_ingest.py
 !job_search/mail/temporal.py
+!job_search/mail/understanding_contracts.py
+!job_search/mail/understanding_schema.py
+!job_search/mail/understanding_store.py
+!job_search/mail/understanding_sources.py
+!job_search/mail/understanding_adapters.py
+!job_search/mail/understanding_runtime.py
+!job_search/mail/understanding_evaluation.py
+!job_search/mail/understanding_replay.py
 !job_search/outlook/
 job_search/outlook/*
 !job_search/outlook/__init__.py
@@ -115,6 +123,7 @@ job_search/resume_lab/*
 !job_search/resume_lab/artifacts.py
 !job_search/resume_lab/career_ops.py
 !job_search/resume_lab/contracts.py
+!job_search/resume_lab/evidence.py
 !job_search/resume_lab/fidelity.py
 !job_search/resume_lab/gateway.py
 !job_search/resume_lab/grounding.py
@@ -249,6 +258,12 @@ requirements/*
 !job_search/job_reviews/__init__.py
 !job_search/job_reviews/client.py
 !job_search/job_reviews/context.py
+!job_search/job_reviews/brief.py
+!job_search/job_reviews/availability.py
+!job_search/job_reviews/calibration.py
+!job_search/job_reviews/finalizer.py
+!job_search/job_reviews/verification.py
+!job_search/job_reviews/quality_schema.py
 !job_search/job_reviews/contracts.py
 !job_search/job_reviews/schema.py
 !job_search/job_reviews/service.py
@@ -302,6 +317,7 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/career_actions/preparation.py
 !job_search/career_actions/schema.py
 !job_search/career_actions/service.py
+!job_search/career_actions/reply_requests.py
 !job_search/career_actions/slots.py
 !job_search/interactions/__init__.py
 !job_search/interactions/bootstrap.py
@@ -327,5 +343,13 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/job_reviews/model_gateway.py
 !job_search/job_reviews/auth_owner.py
 !job_search/job_reviews/runner.py
+!job_search/job_reviews/benchmark.py
 !job_search/job_reviews/runner_config.py
+!job_search/job_reviews/packing.py
+!job_search/job_reviews/ordering.py
+!job_search/job_reviews/routing.py
+!job_search/job_reviews/routing_schema.py
 !job_search/job_reviews/reviewer_rubric.md
+
+!job_search/job_reviews/adjudication.py
+!job_search/job_reviews/adjudication_schema.py

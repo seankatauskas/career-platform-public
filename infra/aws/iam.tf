@@ -118,7 +118,11 @@ resource "aws_iam_role_policy" "deploy" {
         Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject"], Resource = "${aws_s3_bucket.releases.arn}/releases/*"
       },
       {
-        Effect = "Allow", Action = ["ssm:SendCommand"], Resource = aws_ssm_document.deploy.arn
+        Effect    = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.releases.arn,
+        Condition = { StringLike = { "s3:prefix" = "releases/coordination/*" } }
+      },
+      {
+        Effect = "Allow", Action = ["ssm:SendCommand"], Resource = [aws_ssm_document.deploy.arn, aws_ssm_document.release_status.arn]
       },
       {
         Effect = "Allow", Action = ["ssm:SendCommand"], Resource = "${local.prefix}:ec2:${var.region}:${local.account}:instance/*", Condition = {
@@ -235,4 +239,22 @@ resource "aws_ssm_document" "deploy" {
     }]
   })
 
+}
+
+# A fixed read-only inspection command, available before the first application
+# release. Callers cannot supply shell, paths, or parameters.
+resource "aws_ssm_document" "release_status" {
+  name            = "${var.name}-release-status"
+  document_type   = "Command"
+  document_format = "JSON"
+  content = jsonencode({
+    schemaVersion = "2.2", description = "Read release identity and maintenance state without changing application state.",
+    mainSteps = [{
+      action = "aws:runShellScript", name = "releaseStatus",
+      inputs = {
+        timeoutSeconds = "30",
+        runCommand     = ["python3 - <<'CAREER_RELEASE_STATUS'\n${file("${path.module}/../../deploy/aws/release-status.py")}\nCAREER_RELEASE_STATUS"]
+      }
+    }]
+  })
 }

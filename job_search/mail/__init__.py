@@ -29,7 +29,6 @@ from .attachments import (
 )
 from .secure_ingest import SecureMailIngestor
 from .runtime import build_secure_mail_ingestor
-from .remote import RemoteMailClassifier, RemoteTemporalExtractor
 from .temporal import (
     LocalTemporalExtractor,
     TemporalExtractionError,
@@ -80,3 +79,11 @@ __all__ = [
     "validate_model_output",
     "validate_temporal_output",
 ]
+
+
+def __getattr__(name):
+    # Schema imports must not initialize provider usage (which depends on db).
+    if name in {"RemoteMailClassifier", "RemoteTemporalExtractor"}:
+        from . import remote
+        return getattr(remote, name)
+    raise AttributeError(name)

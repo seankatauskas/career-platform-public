@@ -22,6 +22,7 @@ node tests/browser/test_console_browser.mjs
 node tests/browser/test_ops_browser.mjs
 node tests/browser/test_review_queue.mjs
 node tests/browser/test_settings_views.mjs
+node tests/browser/test_review_quality.mjs
 ```
 
 `test_*.py` files are executable Python modules, discovered automatically by `scripts/check-system.py`. Add a new suite here and give it a `__main__` entry point that exits nonzero on failure. Import shared fixtures as `from tests.test_… import …`; use the repository root for source assets and `tests/fixtures/` for checked-in test data.
@@ -34,6 +35,7 @@ The runner writes a JSON receipt to `.cache/system-checks.json` by default. Scre
 
 ```bash
 python3 -m tests.test_job_search_aws_ops
+python3 -m tests.test_release_coordinator
 python3 scripts/check-system.py --match release
 uv run --with cryptography --with pypdf python scripts/release-transition-acceptance.py --local
 ```
@@ -46,3 +48,11 @@ See [production acceptance](../docs/compose-acceptance.md) and
 [deployment/recovery](../docs/operations/aws-deployment.md) for the Docker and live gates.
 
 Browser demo fixtures use `requirements/demo.txt`. The system runner passes its Python interpreter to the demo and fixture commands; standalone browser runs use `uv` to provision the demo dependencies.
+
+For a loopback preview of the complete v2 review flow, run
+`python3 -m tests.fixtures.review_quality_demo` and open the printed URL plus a
+printed list's `dashboard_path`. It uses fictional facts and postings, simulated
+availability, and a temporary database. It exercises saved preferences, independent
+assessment slots, calibration, publication, grouped cards, and visible conditions.
+The corresponding browser check saves desktop/mobile screenshots under
+`.cache/review-quality/` and performs no external requests.

@@ -32,6 +32,7 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
       RELEASE_BUCKET: ${{ vars.AWS_RELEASE_BUCKET }}
       INSTANCE_ID: ${{ vars.AWS_INSTANCE_ID }}
+      AWS_RELEASE_STATUS_DOCUMENT: ${{ vars.AWS_RELEASE_STATUS_DOCUMENT }}
       DEPLOY_DOCUMENT: ${{ vars.AWS_DEPLOY_DOCUMENT }}
       RELEASE_ID: ${{ inputs.release_id }}
       MANIFEST_SHA: ${{ inputs.manifest_sha256 }}
@@ -56,6 +57,8 @@ jobs:
           aws s3api get-object --bucket "$RELEASE_BUCKET" --key "releases/$RELEASE_ID/manifest.json" "$RUNNER_TEMP/manifest.json" > /dev/null
           python3 scripts/prepared-release.py verify --release-id "$RELEASE_ID" --sha256 "$MANIFEST_SHA" \
             --manifest "$RUNNER_TEMP/manifest.json" --output .cache/prepared-release.json
+      - name: Reject a stale candidate before starting installation
+        run: python3 -m job_search.release_coordinator check-deploy
       - name: Refresh deployment credentials
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:

@@ -74,6 +74,15 @@ run "single_host_security" {
     condition     = jsondecode(aws_ssm_document.deploy.content).parameters.ReleaseId.interpolationType == "ENV_VAR" && jsondecode(aws_ssm_document.deploy.content).parameters.ManifestSha256.allowedPattern == "^[a-f0-9]{64}$"
     error_message = "Deployment parameters must be validated and passed without shell interpolation."
   }
+  assert {
+    condition = (
+      !contains(keys(jsondecode(aws_ssm_document.release_status.content)), "parameters") &&
+      jsondecode(aws_ssm_document.release_status.content).mainSteps[0].inputs.timeoutSeconds == "30" &&
+      strcontains(jsondecode(aws_ssm_document.release_status.content).mainSteps[0].inputs.runCommand[0], file("${path.module}/../../deploy/aws/release-status.py"))
+    )
+    error_message = "Release status must run only the fixed, bounded, parameterless read-only inspector."
+  }
+
 }
 
 run "read_only_cost_monitor" {
@@ -113,5 +122,46 @@ run "legacy_github_subject" {
   assert {
     condition     = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:seankatauskas/career-platform:environment:production"
     error_message = "Existing repositories retain their exact legacy subject when immutable IDs are not configured."
+  }
+}
+
+run "coordinated_release_permissions" {
+  command = plan
+  override_resource {
+    target          = aws_s3_bucket.releases
+    override_during = plan
+    values          = { arn = "arn:aws:s3:::test-releases" }
+  }
+  override_resource {
+    target          = aws_ecr_repository.images["app"]
+    override_during = plan
+    values          = { arn = "arn:aws:ecr:us-east-2:123456789012:repository/app" }
+  }
+  override_resource {
+    target          = aws_ecr_repository.images["hermes"]
+    override_during = plan
+    values          = { arn = "arn:aws:ecr:us-east-2:123456789012:repository/hermes" }
+  }
+  override_resource {
+    target          = aws_ssm_document.deploy
+    override_during = plan
+    values          = { arn = "arn:aws:ssm:us-east-2:123456789012:document/deploy" }
+  }
+  override_resource {
+    target          = aws_ssm_document.release_status
+    override_during = plan
+    values          = { arn = "arn:aws:ssm:us-east-2:123456789012:document/release-status" }
+  }
+  assert {
+    condition = anytrue([for statement in jsondecode(aws_iam_role_policy.deploy.policy).Statement :
+      try(statement.Action == ["s3:ListBucket"] && statement.Resource == aws_s3_bucket.releases.arn && statement.Condition.StringLike["s3:prefix"] == "releases/coordination/*", false)
+    ])
+    error_message = "Candidate discovery must be limited to the coordination prefix."
+  }
+  assert {
+    condition = anytrue([for statement in jsondecode(aws_iam_role_policy.deploy.policy).Statement :
+      try(statement.Action == ["ssm:SendCommand"] && toset(statement.Resource) == toset([aws_ssm_document.deploy.arn, aws_ssm_document.release_status.arn]), false)
+    ])
+    error_message = "Release automation may invoke only the installer and fixed status documents."
   }
 }

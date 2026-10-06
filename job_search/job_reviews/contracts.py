@@ -6,7 +6,10 @@ from typing import Mapping
 
 from ..contracts import ContractError, canonical_json, payload_sha256, validate_identifier
 
-RUBRIC_VERSION = 'job-review-v1'
+LEGACY_RUBRIC_VERSION = 'job-review-v1'
+RUBRIC_VERSION = 'job-review-v2'
+RUBRIC_VERSIONS = (LEGACY_RUBRIC_VERSION, RUBRIC_VERSION)
+V2_FIELDS = ('eligibility', 'eligibility_condition', 'next_step', 'category')
 SELECTED = {'close', 'slight_stretch', 'bigger_stretch', 'broad_only'}
 TARGETED = SELECTED - {'broad_only'}
 DECISIONS = SELECTED | {'exclude', 'needs_info'}
@@ -74,9 +77,13 @@ def bounded(value):
     return value
 
 
-def validate_assessment(value, job, facts):
+def validate_assessment(value, job, facts, rubric_version=LEGACY_RUBRIC_VERSION):
     required = ('stage', 'decision', 'family', 'alignment', 'reason_code', 'explanation',
                 'evidence', 'strengths', 'gaps', 'unknowns', 'borderline')
+    if rubric_version not in RUBRIC_VERSIONS:
+        raise ContractError('unsupported review rubric version')
+    if rubric_version == RUBRIC_VERSION:
+        required += V2_FIELDS
     exact(value, (*required, 'priority', 'duplicate_of', 'model'), required)
     out = dict(value)
     for field in ('decision', 'stage', 'alignment'):
@@ -128,4 +135,22 @@ def validate_assessment(value, job, facts):
         raise ContractError('duplicate exclusions require the retained posting ordinal')
     if 'model' in out:
         out['model'] = text(out['model'], 'model', 100)
+    if rubric_version == RUBRIC_VERSION:
+        if out['eligibility'] not in ('no_known_barrier', 'unresolved', 'ineligible'):
+            raise ContractError('invalid eligibility status')
+        if not isinstance(out['eligibility_condition'], str):
+            raise ContractError('eligibility_condition must be text')
+        if out['eligibility_condition'] or out['eligibility'] != 'no_known_barrier':
+            out['eligibility_condition'] = text(out['eligibility_condition'], 'eligibility_condition', 500)
+        if out['next_step'] not in ('apply', 'clarify', 'explore'):
+            raise ContractError('invalid recommendation next step')
+        if out['category'] not in ('core', 'alternative'):
+            raise ContractError('invalid recommendation category')
+        if out['decision'] in TARGETED:
+            if out['eligibility'] == 'ineligible':
+                raise ContractError('targeted recommendations cannot have confirmed ineligibility')
+        if out['eligibility'] == 'unresolved' and out['next_step'] == 'apply':
+            raise ContractError('unresolved eligibility requires clarify or explore as the next step')
+        if out['eligibility'] == 'ineligible' and out['next_step'] != 'explore':
+            raise ContractError('confirmed ineligibility cannot suggest applying or clarification')
     return out

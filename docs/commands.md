@@ -23,6 +23,8 @@ Run commands from the repository root. Python imports and background workers use
 | Salary bounds model and review | `python -m job_search.salary.v3 --help`, `python -m job_search.salary.v3_review --help` |
 | Inspect stored Greenhouse pay data | `python scripts/analyze_greenhouse_pay_sample.py --help` |
 | Isolated demo | `uv run scripts/offline_system_demo.py --interactive --state-dir .cache/demo --port 8770` |
+| Shared AWS release status | `python -m job_search.release_coordinator status` ([setup](operations/coordinated-releases.md)) |
+| Propose the next reviewed release predecessor | `python -m job_search.release_coordinator propose-policy --output .cache/release-policy.proposed.json` |
 | Offline verification | See [tests](../tests/README.md) |
 
 ## Updating older commands

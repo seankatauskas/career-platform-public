@@ -1083,6 +1083,9 @@ from .lifecycle.schema import SCHEMA as MIGRATION_015
 from .attention.schema import SCHEMA as MIGRATION_017
 from .career_actions.schema import SCHEMA as MIGRATION_018
 from .interactions.schema import SCHEMA as MIGRATION_019
+from .mail.understanding_schema import SCHEMA as _UNDERSTANDING_SCHEMA
+from .mail.understanding_replay import SCHEMA as _UNDERSTANDING_REPLAY_SCHEMA
+MIGRATION_020 = _UNDERSTANDING_SCHEMA + _UNDERSTANDING_REPLAY_SCHEMA
 
 MIGRATION_016 = r"""
 CREATE TABLE job_review_grants (
@@ -1111,6 +1114,11 @@ PRAGMA user_version = 16;
 """
 
 
+from .job_reviews.quality_schema import SCHEMA as MIGRATION_021
+from .job_reviews.routing_schema import SCHEMA as MIGRATION_022
+from .job_reviews.adjudication_schema import SCHEMA as MIGRATION_023
+
+
 MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (1, "initial_job_search_ledger", MIGRATION_001),
     (2, "outlook_sync_state", MIGRATION_002),
@@ -1131,6 +1139,10 @@ MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (17, "chief_of_staff_attention", MIGRATION_017),
     (18, "career_actions_agenda", MIGRATION_018),
     (19, "trusted_career_interactions", MIGRATION_019),
+    (20, "shared_mail_understanding", MIGRATION_020),
+    (21, "review_quality_and_context", MIGRATION_021),
+    (22, "conservative_review_routing", MIGRATION_022),
+    (23, "basis_bound_review_adjudication", MIGRATION_023),
 )
 
 

@@ -76,6 +76,44 @@ class CuratedTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 con.execute("UPDATE curated_shortlists SET title='Changed'")
 
+    def test_review_cards_use_batched_summaries_and_keep_legacy_explanations(self):
+        receipt = self.saved.publish(self.payload)
+        legacy = self.controller.curated_list(receipt['list_id'])
+        self.assertTrue(all('review_summary' not in job for job in legacy['recommendations']))
+        summaries = {('ashby', '2'): {'decision': 'close', 'alignment': 'core',
+                                    'gaps': ['Production scale'], 'unknowns': ['Eligibility unknown']}}
+        reviews = Mock()
+        reviews.publication_ordinals.return_value = {('ashby', '2'): 7}
+        reviews.publication_summaries.return_value = summaries
+        reviews.publication_summary.return_value = {'review_id': 'review-1', 'status': 'published'}
+        self.controller.job_reviews = reviews
+        result = self.controller.curated_list(receipt['list_id'])
+        reviews.publication_summaries.assert_called_once_with(receipt['list_id'])
+        reviews.publication_ordinals.assert_called_once_with(receipt['list_id'])
+        first, second = result['recommendations']
+        self.assertEqual(first['review_summary'], summaries[('ashby', '2')])
+        self.assertNotIn('eligibility', first['review_summary'])
+        self.assertEqual(first['explanation'], '<script>untrusted text</script>')
+        self.assertEqual(first['review_ordinal'], 7)
+        self.assertEqual([job['rank'] for job in result['recommendations']], [1, 2])
+        self.assertNotIn('review_summary', second)
+
+    def test_review_brief_routes_share_existing_session_protection(self):
+        self.controller.job_reviews = Mock()
+        self.controller.job_reviews.call.return_value = {'revision': 0, 'brief': {}, 'saved_at': None}
+        with running(make_server(self.controller, port=0)) as server:
+            status, _, body = request(server, 'GET', '/api/v1/job-reviews/brief')
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)['revision'], 0)
+            self.controller.job_reviews.call.assert_called_once_with('brief')
+            path = '/api/v1/job-reviews/save-brief'
+            self.assertEqual(request(server, 'POST', path, {'brief': {}})[0], 403)
+            cookie, csrf = session(server)
+            supplied = {'brief': {}, 'expected_revision': 0, 'idempotency_key': 'save-brief-1'}
+            status, _, _ = post(server, path, supplied, cookie, csrf)
+            self.assertEqual(status, 200)
+            self.controller.job_reviews.call.assert_called_with('save-brief', supplied)
+
     def test_upgrade_preserves_existing_lists_and_constraints(self):
         from job_search import db
         path = self.root / 'old-ledger.db'

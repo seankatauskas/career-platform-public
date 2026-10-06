@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from job_search.contracts import MutationContext, payload_sha256
 
@@ -18,6 +18,7 @@ class SecureIngestResult:
     archive_id: str
     attachments_archived: int
     temporal_proposals: int
+    coverage: tuple[Mapping[str, str], ...] = ()
 
 
 class SecureMailIngestor:
@@ -34,6 +35,10 @@ class SecureMailIngestor:
         self._attachments = attachments
         self._temporal = temporal
 
+    @property
+    def archive(self) -> EncryptedMailArchive:
+        return self._archive
+
     def ingest(
         self,
         *,
@@ -47,6 +52,7 @@ class SecureMailIngestor:
         has_attachments: bool,
         analyze_temporal: bool,
         default_time_zone: str = "America/Chicago",
+        report_coverage: bool = False,
     ) -> SecureIngestResult:
         sanitized = sanitize_mail(
             subject, body, body_kind=body_kind, max_chars=MAX_ARCHIVE_CHARS
@@ -78,8 +84,17 @@ class SecureMailIngestor:
                 default_time_zone=default_time_zone,
             ))
         archived_attachments = 0
+        coverage = []
+        if sanitized.truncated:
+            coverage.append({"source_id": archive_id, "reason": "archive_truncated"})
         if has_attachments and self._attachments is not None:
-            for extracted in self._attachments.acquire(immutable_message_id):
+            if report_coverage and callable(getattr(self._attachments, "acquire_report", None)):
+                report = self._attachments.acquire_report(immutable_message_id)
+                extracted_sources = report.extracted
+                coverage.extend(report.coverage)
+            else:
+                extracted_sources = self._attachments.acquire(immutable_message_id)
+            for extracted in extracted_sources:
                 attachment_result = self._archive.archive_attachment_text(
                     archive_id=archive_id,
                     immutable_attachment_id=extracted.attachment_id,
@@ -113,4 +128,6 @@ class SecureMailIngestor:
                         candidates,
                         default_time_zone=default_time_zone,
                     ))
-        return SecureIngestResult(archive_id, archived_attachments, proposals)
+        elif has_attachments:
+            coverage.append({"source_id": archive_id, "reason": "attachment_acquisition_unavailable"})
+        return SecureIngestResult(archive_id, archived_attachments, proposals, tuple(coverage))

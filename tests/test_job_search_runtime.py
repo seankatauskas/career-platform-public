@@ -271,7 +271,10 @@ def test_environment_notification_target_uses_configured_hermes_executable() -> 
 
 
 def test_core_and_model_lanes_execute_the_critical_dag_with_stable_watermarks() -> None:
-    with tempfile.TemporaryDirectory() as directory:
+    # This lineage fixture advances every tick at NOW. Freeze elapsed time too:
+    # on a slow runner the worker otherwise schedules children after NOW, while
+    # the next fixture tick resets its clock. Duration catch-up has its own suite.
+    with tempfile.TemporaryDirectory() as directory, patch("job_search.worker.time.monotonic", return_value=0):
         root = Path(directory)
         config = load_runtime_config(write_config(root), required=True)
         commands = []
@@ -559,7 +562,9 @@ def test_reserved_migration_restores_the_highest_applied_user_version() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "job-search.db"
         original = database.MIGRATIONS
-        database.MIGRATIONS = tuple(item for item in original if item[0] != 4)
+        # The reserved gap existed before schema20, which depends on temporal tables.
+        # Fill that historical gap before applying the dependent shared-mail upgrade.
+        database.MIGRATIONS = tuple(item for item in original if item[0] != 4 and item[0] < 20)
         try:
             database.prepare_database(path, "2026-09-02T12:00:00Z")
         finally:

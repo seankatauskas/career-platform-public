@@ -354,17 +354,25 @@ class CareerActionService(AgendaMixin, CommitmentMixin):
         return results
 
     def record_reply_obligations(self, context, *, limit=100):
-        from .slots import authored_text
+        from .reply_requests import REPLY_POLICY_VERSION, reply_request_evidence
+        from ..mail.understanding_store import owns_evidence
+        context.validate()
         if context.actor_kind!='system':raise ContractError('mail obligations require trusted runtime')
+        if type(limit) is not int or not 1<=limit<=500:raise ContractError('invalid limit')
         with connect(self.store.db_path) as con:
             rows=[dict(r) for r in con.execute("SELECT m.*,l.application_id,e.excerpt FROM lifecycle_mail_observations m JOIN lifecycle_mail_links l USING(observation_id) JOIN mail_evidence e USING(evidence_id) JOIN applications a ON a.application_id=l.application_id WHERE m.direction='inbound' AND a.current_phase<>'terminal' AND NOT EXISTS (SELECT 1 FROM lifecycle_tasks t WHERE t.application_id=l.application_id AND t.evidence_id=m.evidence_id AND t.kind IN ('reply','send_availability')) AND NOT EXISTS (SELECT 1 FROM lifecycle_mail_observations newer WHERE newer.account_id=m.account_id AND newer.conversation_ref=m.conversation_ref AND newer.direction IN ('inbound','outbound') AND newer.source_at>m.source_at) ORDER BY m.source_at DESC LIMIT ?",(limit,))]
         results=[]
         for item in rows:
-            body=authored_text(item['excerpt'])
-            if '?' not in body and not re.search(r'(?i)\b(please (reply|respond)|let me know|could you|can you)\b',body):continue
+            with connect(self.store.db_path) as con:
+                if owns_evidence(con,item['evidence_id']):
+                    continue
+            request=reply_request_evidence(item['excerpt'])
+            if request is None:continue
             ctx=MutationContext('career-question-'+item['observation_id']+'-'+item['application_id'],'system','outlook_mail',item['observation_id'])
-            values={'kind':'reply','owner':'applicant','note':'Recruiter reply requested; review the linked message.','evidence_id':item['evidence_id'],'source_time':item['source_at']}
+            values={'kind':'reply','owner':'applicant','note':'Reply requested: '+request,'evidence_id':item['evidence_id'],'source_time':item['source_at'],'policy_version':REPLY_POLICY_VERSION}
             def operation(con,stamp):
+                if owns_evidence(con,item['evidence_id']):
+                    return {'skipped':'shared_mail_ownership'}
                 return self.ledger.lifecycle._create_task(con,item['application_id'],values,ctx,self._now())
             results.append(self.store._idempotent('career.reply_obligation',ctx,{'application_id':item['application_id'],**values},operation))
         return results

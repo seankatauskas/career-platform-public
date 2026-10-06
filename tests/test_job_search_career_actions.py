@@ -40,17 +40,19 @@ class FakeOutlook:
         self.writes.append((a,b,tx,kw));return {'id':'event','changeKey':'version1'}
 
 
-def setup(directory):
+def setup(directory, *, body='Please reply', subject='Interview'):
     path,ledger=make_service(directory);app=start(ledger)['application']['application_id']
     from job_search.mail.sanitizer import sanitize_mail
-    clean=sanitize_mail('Interview','Please reply',max_chars=2048)
-    evidence=ledger.store.record_mail_evidence({'account_id':'account','immutable_message_id':'incoming','conversation_id':'thread','sender':'recruiter@example.com','subject':'Interview','received_at':NOW,'body_sha256':clean.content_sha256,'excerpt':clean.text},context('evidence'))['evidence']['evidence_id']
+    clean=sanitize_mail(subject,body,max_chars=2048)
+    evidence=ledger.store.record_mail_evidence({'account_id':'account','immutable_message_id':'incoming','conversation_id':'thread','sender':'recruiter@example.com','subject':subject,'received_at':NOW,'body_sha256':clean.content_sha256,'excerpt':clean.text},context('evidence'))['evidence']['evidence_id']
     observation=ledger.lifecycle.observe_mail({'account_id':'account','immutable_message_id':'incoming','conversation_id':'thread','direction':'inbound','sender':'recruiter@example.com','received_at':NOW,'evidence_id':evidence},SYSTEM)
     with connect(path) as con:
         oid=con.execute('SELECT observation_id FROM lifecycle_mail_observations').fetchone()[0]
         con.execute("INSERT INTO lifecycle_mail_links VALUES (?,?,1,'user',?)",(oid,app,NOW))
         con.execute("UPDATE automation_controls SET enabled=1 WHERE capability IN ('outlook_send','calendar_commitments')")
-    provider=FakeOutlook();service=CareerActionService(ledger,outlook=provider,account_id='account',now_provider=lambda:NOW)
+    provider=FakeOutlook()
+    provider.source.update(subject=subject,body={'contentType':'text','content':body})
+    service=CareerActionService(ledger,outlook=provider,account_id='account',now_provider=lambda:NOW)
     return path,ledger,service,provider,app,evidence
 
 
@@ -318,6 +320,107 @@ def test_ordinary_recruiter_question_creates_one_reply_obligation():
         with connect(path) as con:
             rows=con.execute("SELECT kind,evidence_id FROM lifecycle_tasks WHERE application_id=?",(app,)).fetchall()
         assert len(rows)==1 and rows[0]['kind']=='reply' and rows[0]['evidence_id']==eid
+
+
+def test_application_receipts_do_not_create_reply_tasks_or_change_phase():
+    # Fictional equivalents of rhetorical receipt text and an ATS footer URL.
+    receipts = [
+        ('Application confirmation', 'Please accept this email as confirmation of your application.\n\n'
+         'So, what happens next?!\n\nOur team will review your application and contact you if there are next steps.'),
+        ('Thanks for applying', 'Thank you for applying. We will review your application and get back to you.\n\n'
+         'Report this email<https://ats.example.com/report-abuse?organizationId=example&emailId=receipt>'),
+        ('Your application', 'Our hiring team is reviewing your profile.\n\n'
+         'If you have any questions, just let us know.'),
+    ]
+    for subject, body in receipts:
+        with TemporaryDirectory() as directory:
+            path,ledger,service,outlook,app,eid=setup(directory,subject=subject,body=body)
+            with connect(path) as con:
+                before=con.execute('SELECT current_phase FROM applications WHERE application_id=?',(app,)).fetchone()[0]
+            assert service.record_reply_obligations(SYSTEM)==[], subject
+            assert service.record_reply_obligations(SYSTEM)==[], subject
+            with connect(path) as con:
+                assert con.execute('SELECT count(*) FROM lifecycle_tasks').fetchone()[0]==0
+                assert con.execute('SELECT current_phase FROM applications WHERE application_id=?',(app,)).fetchone()[0]==before
+            assert outlook.sent==0
+
+
+def test_reply_requests_ignore_support_boilerplate_links_and_quoted_history():
+    from job_search.career_actions.reply_requests import reply_request_evidence
+    from job_search.mail.sanitizer import sanitize_mail
+    bodies = [
+        'What happens next? We will review your application.',
+        'Why join our team? Read more on our website.',
+        'Check https://example.com/faq?question=please%20reply for details.',
+        'Check www.example.com/faq?question=available for details.',
+        'If you have questions, please reply to this email.',
+        'Please reply if you have any questions.',
+        'If you need assistance,\nplease let us know.',
+        'Any questions? Please reply to this email.',
+        'Feel free to let us know if you need anything.',
+        'Please do not reply to this automated message.',
+        'No reply is required. Please confirm your details in the portal.',
+        'No need to send anything yet.',
+        'We will let you know our decision.',
+        'Thanks for the update.\n> Could you share your availability?',
+        'Thanks for the update.\nOn Tuesday recruiter wrote:\nPlease send your availability.',
+        'Forwarded message\nAre you available tomorrow?',
+    ]
+    for body in bodies:
+        clean=sanitize_mail('Could you reply? Interview availability',body,max_chars=2048)
+        assert reply_request_evidence(clean.text) is None, body
+
+
+def test_explicit_requests_preserve_evidence_without_claiming_an_interview():
+    bodies = [
+        'Please reply to confirm receipt.',
+        'Could you share your availability for a call?',
+        'Are you available for a call next week?',
+        'What is your availability?',
+        'When could you start?',
+        'Would you be interested in discussing this role?',
+        'Let us know which time works for you.',
+        'Could you please send your updated resume?',
+        'Please confirm your notice period.',
+        'Thank you for applying. Please share your availability. If you have questions, please reply.',
+        'Thanks for applying.\n\nCould you share your salary expectations?\n\nIf you need help, let us know.',
+    ]
+    for body in bodies:
+        with TemporaryDirectory() as directory:
+            path,ledger,service,outlook,app,eid=setup(directory,body=body)
+            result=service.record_reply_obligations(SYSTEM)
+            assert len(result)==1, body
+            task=result[0]
+            assert task['kind']=='reply' and task['owner']=='applicant'
+            assert task['evidence_id']==eid
+            assert task['policy_version']=='explicit-reply-request-v2'
+            quote=task['note'].removeprefix('Reply requested: ')
+            assert quote and quote in body, body
+            assert service.record_reply_obligations(SYSTEM)==[]
+            with connect(path) as con:
+                assert con.execute("SELECT count(*) FROM application_events WHERE event_type LIKE 'interview%'").fetchone()[0]==0
+            assert outlook.sent==0
+
+
+def test_reply_task_guards_preserve_direction_existing_tasks_and_corrections():
+    for direction in ('outbound','draft','unknown'):
+        with TemporaryDirectory() as directory:
+            path,ledger,service,outlook,app,eid=setup(directory)
+            with connect(path) as con:
+                con.execute('UPDATE lifecycle_mail_observations SET direction=?',(direction,))
+            assert service.record_reply_obligations(SYSTEM)==[]
+    with TemporaryDirectory() as directory:
+        path,ledger,service,outlook,app,eid=setup(directory)
+        ledger.lifecycle.create_task(app,{'kind':'send_availability','owner':'applicant','evidence_id':eid},context('interview-request'))
+        assert service.record_reply_obligations(SYSTEM)==[]
+    with TemporaryDirectory() as directory:
+        path,ledger,service,outlook,app,eid=setup(directory)
+        task=service.record_reply_obligations(SYSTEM)[0]
+        ledger.lifecycle.transition_task(task['task_id'],'cancel',{'reason':'Reviewed; no reply needed'},context('correction'))
+        assert service.record_reply_obligations(SYSTEM)==[]
+        with connect(path) as con:
+            assert con.execute('SELECT status FROM lifecycle_tasks').fetchone()[0]=='cancelled'
+            assert con.execute('SELECT count(*) FROM lifecycle_task_revisions').fetchone()[0]==2
 
 
 def main():

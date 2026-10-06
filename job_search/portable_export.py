@@ -360,9 +360,12 @@ def _rekey_database(
     attachment_rows = connection.execute(
         "SELECT * FROM mail_archive_attachments ORDER BY attachment_record_id"
     ).fetchall()
+    shared_rows = connection.execute(
+        "SELECT * FROM mail_understanding_sources ORDER BY analysis_id,source_id"
+    ).fetchall() if _schema_columns(connection, "mail_understanding_sources") else []
     if not message_rows and attachment_rows:
         raise ContractError("attachment archive exists without a mail archive")
-    if not message_rows:
+    if not message_rows and not shared_rows:
         return 0, 0
 
     if source_archive_key_provider is None:
@@ -423,6 +426,34 @@ def _rekey_database(
             (target_key_id, nonce, ciphertext, row["attachment_record_id"]),
         )
 
+    # Only the staging backup is rekeyed. Restore its append-only guard within
+    # the same transaction; the source database and plaintext hashes are untouched.
+    shared_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='mail_understanding_sources_no_update'"
+    ).fetchone() if shared_rows else None
+    if shared_rows and not shared_trigger:
+        raise ContractError("shared mail source immutability guard is missing")
+    if shared_rows:
+        connection.execute("DROP TRIGGER mail_understanding_sources_no_update")
+        try:
+            for saved_row in shared_rows:
+                row = dict(saved_row)
+                fields = dict(version=1, kind='mail_understanding_source',
+                              analysis_id=row['analysis_id'], source_id=row['source_id'])
+                text = source_archive._open(row, fields, 'plaintext_sha256')
+                if len(text) != row['plaintext_chars']:
+                    raise ContractError('shared mail source length does not match')
+                aad = canonical_json(fields).encode('utf-8')
+                nonce = _nonce(nonce_factory, seen_nonces)
+                ciphertext = target_cipher.encrypt(nonce, text.encode('utf-8'), aad)
+                if not isinstance(ciphertext, bytes) or len(ciphertext) < 16:
+                    raise ContractError('portable shared mail cipher returned invalid ciphertext')
+                connection.execute(
+                    'UPDATE mail_understanding_sources SET key_id=?,nonce=?,ciphertext=? WHERE analysis_id=? AND source_id=?',
+                    (target_key_id, nonce, ciphertext, row['analysis_id'], row['source_id']))
+        finally:
+            connection.execute(shared_trigger['sql'])
+
     _rekey_command_results(connection, target_key_id)
 
     target_archive = EncryptedMailArchive(
@@ -438,6 +469,13 @@ def _rekey_database(
         text = target_archive.read_attachment_text(str(row["attachment_record_id"]))
         if len(text) != row["extracted_chars"]:
             raise ContractError("portable attachment archive verification failed")
+    for row in shared_rows:
+        saved = connection.execute('SELECT * FROM mail_understanding_sources WHERE analysis_id=? AND source_id=?',
+                                   (row['analysis_id'], row['source_id'])).fetchone()
+        fields = dict(version=1, kind='mail_understanding_source', analysis_id=row['analysis_id'], source_id=row['source_id'])
+        text = target_archive._open(saved, fields, 'plaintext_sha256')
+        if len(text) != row['plaintext_chars']:
+            raise ContractError('portable shared mail source verification failed')
     return len(message_rows), len(attachment_rows)
 
 

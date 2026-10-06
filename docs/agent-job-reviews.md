@@ -19,11 +19,38 @@ the private dashboard origin using `CAREER_DASHBOARD_URL` or the CLI's `--dashbo
 MCP exposes the same operations to connected agents. The CLI uses the existing private
 dashboard session and CSRF protections and keeps session values only in memory.
 
+## Career context and search scope
+
+Before starting, inspect live review context's source inventory. Approved career-bank
+summary, education, employment, projects, and skills supplement every active resume;
+projects remain distinct from employment tenure. Pending drafts and retired facts are
+excluded. An active resume with no approved bank is a supported resume-only state,
+not evidence that the full bank was loaded.
+
+Fresh AWS seed import deliberately leaves career facts pending review while preserving
+registered resume standards independently. The context inventory exposes that pending
+draft. Inspect and approve intended facts through the existing Career profile flow;
+do not automatically attest imported drafts or replace the deployed database. A saved
+draft can differ from its source's previously approved revision.
+
+Settings holds a saved search brief, also available through `review brief` and
+`review save-brief`. It separates broad and targeted geography, desired career direction,
+acceptable adjacent work, stretch policy, conditional-role ordering, and explicit
+eligibility facts. Revision-zero suggestions are visibly unsaved and are not user
+preferences. Each save creates an immutable revision with optimistic concurrency.
+The brief persists independently of whether a review is custom, recurring, incomplete,
+or abandoned. Per-run `preferences` remain supported without changing saved settings.
+
+New reviews freeze that brief alongside approved facts and explicit feedback. Read all
+context pages. Later edits affect subsequent reviews, preserving historical evidence.
+Never infer citizenship, clearance, salary requirements, or career preferences from
+model settings, application outcomes, or earlier agent judgments.
+
 ## Coverage and dates
 
 Each run fixes the requested posting window, candidate descriptions, profile facts,
-preferences, and rubric revision. Selection uses only `posted_at`, with an exclusive
-start and inclusive end. Undated jobs do not acquire an invented posting date. Late
+search brief, preferences, and rubric revision. Selection uses only `posted_at`, with
+an exclusive start and inclusive end. Undated jobs do not acquire an invented posting date. Late
 discoveries are counted separately and never silently added to strict-window lists.
 The last completed scan and last catalog observation are reported separately.
 
@@ -48,11 +75,47 @@ and changed selected descriptions prevent publication. Refreshing a description 
 history and invalidates decisions that used the older version. Profile changes are
 disclosed; the original frozen profile remains the review's evidence source.
 
-Preview reconciles counts and rechecks collected posting status and application history.
-It does not contact employers. Closed, submitted, and now-out-of-window selections are
-omitted and reported. Use the preview fingerprint to publish; a changed preview requires
-inspection again. Both list kinds, their parts, and the completion receipt share one
-database transaction. Lists over 500 roles split into dated numbered parts.
+V2 separates technical fit from eligibility (`no_known_barrier`, `unresolved`,
+`ineligible`), next step (`apply`, `clarify`, `explore`), and category (`core`,
+`alternative`). The independent check must agree on these dimensions as well as the
+existing decision/alignment/duplicate fields. No known barrier does not mean confirmed
+eligibility. Citizenship alone does not prove active clearance. Technical fit can be
+close while a clearance or graduate-cohort condition requires clarification.
+
+Conditional recommendations follow the saved ordering policy. `technical_fit` keeps
+them mixed by technical fit with visible caveats; `after_actionable` asks the finalizer
+to put actionable roles first. There is no implicit eligibility demotion or selection
+quota. Career alternatives remain subject to the brief's explicit adjacent-work policy.
+
+After independent agreement, `calibration` exposes all selected recommendations across
+batches. An agent stages their complete global order and related-posting groups with
+`calibrate`, then seals the revision-bound artifact with `finalize`. Calibration cannot
+change decisions, membership, or caveats. Substantive corrections need reassessment and
+new independent checks. Any changed evidence invalidates the prior calibration.
+Related postings retain each requisition, location, eligibility difference, and
+application action; similar descriptions alone do not establish duplicates.
+
+Published v2 cards show fit labels, the strongest match, material gaps, eligibility
+conditions, career-direction caveats, and next steps directly in the explanation.
+Full source evidence remains expandable. The service rejects overlong visible
+explanations instead of truncating material caveats. Historical cards keep their
+original explanations.
+
+`verify-availability` runs after v2 finalization. Trusted application code queries
+fixed official ATS board APIs for targeted selections, once per board, with bounded
+concurrency, body sizes, and timeouts. It records dated `open`, `absent`, or `unknown`
+observations tied to the posting snapshot. A successful complete board response can
+establish absence; failures, incomplete responses, or missing configured scraper
+contact stay unknown. These checks never update collector lifecycle state or ETags.
+
+Preview itself makes no network requests. It reconciles official observations,
+collected status, and application history. Closed, officially absent, submitted, and
+now-out-of-window selections are omitted and reported. Unknown observations remain
+visible with an availability caveat; broad-only selections retain catalog status.
+V2 requires current calibration and dated targeted observations. Use the exact preview
+fingerprint to publish; changed previews require inspection again. Both list kinds,
+their parts, and the completion receipt share one database transaction. Lists over
+500 roles split into dated numbered parts.
 
 Feedback records explicit user comments only. They do not update the production model
 or convert application outcomes into preference labels. Employer text is always untrusted
@@ -75,15 +138,24 @@ conversion into a versioned dataset first.
 
 ## Storage and release
 
-Migration 14 adds private review tables in the application ledger. Existing list formats,
-IDs, and publishing calls remain compatible. Review sources and assessments are covered
-by existing private-state backups and must not be committed or used in public fixtures.
+Migration 14 introduced private review tables. Additive migration 21 stores search
+brief revisions, calibration artifacts/finalizer grants, and availability observations.
+Migration 22 adds frozen routing policies; migration 23 adds separate adjudication
+grants, read receipts and immutable resolutions without changing original judgments.
+New reviews use `job-review-v2`; existing v1 reviews retain their frozen contract and
+can finish without the new calibration/verification requirements. Historical receipt
+and context JSON are not rewritten. Direct curated-list publishing remains compatible.
+Review sources and assessments are covered by existing private-state backups and must
+not be committed or used in public fixtures.
 Use the existing prepared-release workflow and rollback snapshot procedure to deploy;
-never replace production data with a developer test database. Migration 14 changes
-the database compatibility contract: recovery to the preceding release requires its
-consistent predeployment snapshot, rather than running older code against the upgraded ledger.
+never replace production data with a developer test database. Release manifests must
+declare application schema 23 and carry matching application/reviewer images. The new
+migration changes the database compatibility contract: rollback to a preceding release
+requires its consistent predeployment snapshot, rather than running older code against
+the upgraded ledger.
 
-Run `python3 -m tests.test_agent_job_reviews` and the full system/browser suite. A private
+Run `python3 -m tests.test_review_context`, `python3 -m tests.test_agent_job_reviews`,
+the v2 workflow/availability tests, and the full system/browser suite. A private
 historical replay should explain differences against source descriptions rather than
 force agreement with an earlier agent's choices. Before routine use, validate one real
 review through the deployed dashboard, including receipt links and unchanged ranking

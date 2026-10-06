@@ -11,9 +11,11 @@ import re
 import socketserver
 import ssl
 import threading
+import time
 
 from .auth_owner import AuthenticationUnavailable, CODEX_VERSION
 from .reviewer_api import decode_json, encode_json
+from .reviewer_mcp import tools_for
 
 MODEL = 'gpt-6-astra'
 EFFORT = 'high'
@@ -21,14 +23,34 @@ UPSTREAM_HOST = 'chatgpt.com'
 UPSTREAM_PATH = '/backend-api/codex/responses'
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 16 * 1024 * 1024
-REVIEW_TOOLS = frozenset('mcp__review__review_' + name for name in ('assignment', 'context', 'job', 'assessment'))
+REVIEW_TOOLS = frozenset('mcp__review__' + tool['name'] for tool in tools_for())
 # These pinned CLI built-ins cannot expose anything outside its empty container,
 # but are removed from inference so the model receives review tools exclusively.
 OMITTED_TOOLS = frozenset(('view_image', 'get_goal', 'create_goal', 'update_goal', 'request_user_input'))
 
 
+RESPONSE_REJECTION_REASONS = frozenset((
+    'upstream_failed', 'incomplete_stream', 'framing', 'output_consistency',
+    'unsupported_tool', 'unsupported_capability', 'size', 'validation',
+))
+RESPONSE_REJECTION_COUNTERS = tuple(
+    'gateway_response_rejected_' + reason + '_count' for reason in sorted(RESPONSE_REJECTION_REASONS))
+
+
 class GatewayRejected(ValueError):
-    pass
+    def __init__(self, message, *, reason='validation'):
+        super().__init__(message)
+        self.reason = reason if type(reason) is str and reason in RESPONSE_REJECTION_REASONS else 'validation'
+
+
+def _response_rejection_metrics(error):
+    # Never classify from exception text or upstream content. Recheck the fixed
+    # enum at the telemetry boundary even if an exception attribute was changed.
+    reason = getattr(error, 'reason', None) if isinstance(error, GatewayRejected) else None
+    if type(reason) is not str or reason not in RESPONSE_REJECTION_REASONS:
+        reason = 'validation'
+    return {'gateway_response_rejected_count': 1,
+            'gateway_response_rejected_' + reason + '_count': 1}
 
 
 def _exact(value, allowed):
@@ -45,21 +67,60 @@ def _json_object(raw, maximum):
             raise ValueError()
         return decode_json(raw, maximum)
     except (ValueError, UnicodeError, RecursionError):
-        raise GatewayRejected('invalid finite JSON object') from None
+        raise GatewayRejected('invalid finite JSON object',
+            reason='size' if isinstance(raw, bytes) and len(raw) > maximum else 'validation') from None
 
 
 def _upstream_events(data):
     if not isinstance(data, bytes) or len(data) > MAX_RESPONSE:
-        raise GatewayRejected('model response exceeded its size bound')
-    for line in data.splitlines():
-        if not line.startswith(b'data:'):
+        raise GatewayRejected('model response exceeded its size bound',
+                              reason='size' if isinstance(data, bytes) else 'validation')
+    name, payload, ended = None, [], False
+    lines = data.replace(b'\r\n', b'\n').split(b'\n')
+    for line in lines[:-1] if data.endswith(b'\n') else lines:
+        if line.startswith(b':'):
             continue
-        raw = line[5:].strip()
-        if raw != b'[DONE]':
-            yield _json_object(raw, MAX_RESPONSE)
+        if not line:
+            if name is None and not payload:
+                continue
+            if ended or not payload:
+                raise GatewayRejected('invalid model event framing', reason='framing')
+            raw = b'\n'.join(payload)
+            if raw == b'[DONE]':
+                if name is not None:
+                    raise GatewayRejected('invalid model stream terminator', reason='framing')
+                ended = True
+            else:
+                event = _json_object(raw, MAX_RESPONSE)
+                if name is not None and name != str(event.get('type')).encode():
+                    raise GatewayRejected('model event name does not match its payload', reason='framing')
+                yield event
+            name, payload = None, []
+        elif line.startswith(b'event:') and name is None and not payload:
+            name = line[6:].strip()
+        elif line.startswith(b'data:'):
+            payload.append(line[5:].lstrip(b' '))
+        else:
+            raise GatewayRejected('invalid model event framing', reason='framing')
+    if name is not None or payload:
+        raise GatewayRejected('incomplete model event framing', reason='framing')
 
 
-def validate_request(value, model=MODEL, effort=EFFORT):
+def _validate_phase(item):
+    if 'phase' in item and (item.get('role') != 'assistant' or
+                            item['phase'] not in (None, 'commentary', 'final_answer')):
+        raise GatewayRejected('invalid assistant message phase')
+
+
+def _scoped_tools(kind, rubric_version, purpose):
+    if purpose not in ('detailed', 'screening') or purpose == 'screening' and kind != 'primary':
+        raise GatewayRejected('invalid review inference purpose')
+    return tools_for(kind, rubric_version, purpose)
+
+
+def validate_request(value, model=MODEL, effort=EFFORT, *, kind='primary', rubric_version='job-review-v1', purpose='detailed'):
+    schemas = _scoped_tools(kind, rubric_version, purpose)
+    allowed_tools = frozenset('mcp__review__' + tool['name'] for tool in schemas)
     try:
         encode_json(value, MAX_REQUEST)
     except ValueError:
@@ -87,14 +148,14 @@ def validate_request(value, model=MODEL, effort=EFFORT):
         kind = item.get('type', 'message')
         if kind == 'additional_tools':
             # Pinned Codex presents Code Mode and other native tools here. They
-            # never reach the model. The gateway supplies just our four schemas.
+            # never reach the model. The gateway supplies the scoped schemas.
             continue
         if kind == 'custom_tool_call':
             _exact(item, ('type', 'id', 'call_id', 'name', 'namespace', 'input', 'status'))
             if item.get('name') != 'exec' or item.get('namespace') != 'functions':
                 raise GatewayRejected('unapproved native tool continuation')
             match = re.fullmatch(r'text\(await tools\.(mcp__review__review_[a-z]+)\((.*)\)\);', item.get('input', ''), re.DOTALL)
-            if not match or match[1] not in REVIEW_TOOLS:
+            if not match or match[1] not in allowed_tools:
                 raise GatewayRejected('arbitrary code execution is prohibited')
             arguments = _json_object(match[2], MAX_REQUEST)
             item = {'type': 'function_call', 'name': match[1], 'arguments': json.dumps(arguments),
@@ -103,9 +164,13 @@ def validate_request(value, model=MODEL, effort=EFFORT):
         elif kind == 'custom_tool_call_output':
             _exact(item, ('type', 'id', 'call_id', 'output', 'status'))
             item = dict(item, type='function_call_output')
+            # Codex's local ctco_ item ID belongs to the native custom-tool type.
+            # The upstream function result is linked by call_id, not that ID.
+            item.pop('id', None)
             kind = 'function_call_output'
         if kind == 'message':
-            _exact(item, ('type', 'role', 'content', 'id', 'status'))
+            _exact(item, ('type', 'role', 'content', 'id', 'status', 'phase'))
+            _validate_phase(item)
             if item.get('role') not in ('system', 'developer', 'user', 'assistant'):
                 raise GatewayRejected('invalid message role')
             content = item.get('content')
@@ -115,14 +180,14 @@ def validate_request(value, model=MODEL, effort=EFFORT):
             if not isinstance(content, list):
                 raise GatewayRejected('inline text is required')
             for chunk in content:
-                _exact(chunk, ('type', 'text', 'annotations'))
+                _exact(chunk, ('type', 'text', 'annotations', 'logprobs'))
                 if chunk.get('type') not in ('input_text', 'output_text') or not isinstance(chunk.get('text'), str):
                     raise GatewayRejected('external or nontext input is prohibited')
-                if chunk.get('annotations') not in (None, []):
+                if chunk.get('annotations') not in (None, []) or chunk.get('logprobs') not in (None, []):
                     raise GatewayRejected('external annotations are prohibited')
         elif kind == 'function_call':
             _exact(item, ('type', 'name', 'arguments', 'call_id', 'id', 'status'))
-            if item.get('name') not in REVIEW_TOOLS:
+            if item.get('name') not in allowed_tools:
                 raise GatewayRejected('only scoped review calls are permitted')
             _json_object(item.get('arguments'), MAX_REQUEST)
         elif kind == 'function_call_output':
@@ -155,15 +220,14 @@ def validate_request(value, model=MODEL, effort=EFFORT):
             raise GatewayRejected('hosted and custom tools are prohibited')
         if tool.get('name') in OMITTED_TOOLS:
             continue
-        if tool.get('name') not in REVIEW_TOOLS:
+        if tool.get('name') not in allowed_tools:
             raise GatewayRejected('unapproved tool')
     if value.get('tool_choice', 'auto') not in ('auto', 'none'):
         raise GatewayRejected('unsupported tool choice')
     # Canonical schemas apply to both native additional_tools and flat registries.
     # Client descriptions and JSON Schema references never reach inference.
-    from .reviewer_mcp import TOOLS
     permitted = [{'type': 'function', 'name': 'mcp__review__' + t['name'],
-                  'description': t['description'], 'parameters': t['inputSchema'], 'strict': False} for t in TOOLS]
+                  'description': t['description'], 'parameters': t['inputSchema'], 'strict': False} for t in schemas]
     result = dict(value, tools=permitted, input=source_input)
     # Host/client metadata and cache keys are not needed for evidence assessment.
     result.pop('client_metadata', None)
@@ -171,15 +235,13 @@ def validate_request(value, model=MODEL, effort=EFFORT):
     return result
 
 
-def native_response(data):
+def native_response(data, *, kind='primary', rubric_version='job-review-v1', purpose='detailed'):
     """Translate only validated scoped calls into fixed native Code Mode calls.
 
     The model cannot supply JavaScript. Arguments are parsed JSON and re-encoded
-    inside one generated expression; only four fixed MCP function names exist.
+    inside one generated expression; only assignment-scoped MCP names exist.
     """
-    validate_response(data)
-    completed = next(event['response'] for event in _upstream_events(data)
-                     if event.get('type') == 'response.completed')
+    completed = _validated_completion(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
 
     def convert(item):
         if item['type'] != 'function_call':
@@ -200,14 +262,50 @@ def native_response(data):
     return ''.join('data: ' + json.dumps(event, allow_nan=False, separators=(',', ':')) + '\n\n' for event in events).encode()
 
 
-def validate_response(data):
+def validate_response(data, *, kind='primary', rubric_version='job-review-v1', purpose='detailed'):
     """Validate the complete bounded event stream before allowing CLI dispatch.
 
     Buffering prevents an early malicious tool call from executing before a later
     completion event is checked. This deliberately trades token streaming for a
     small, auditable execution boundary.
     """
-    completed = False
+    _validated_completion(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
+    return data
+
+
+def _validate_output_item(item, allowed_tools):
+    if not isinstance(item, dict):
+        raise GatewayRejected('invalid completion item')
+    kind = item.get('type')
+    if item.get('status') not in (None, 'completed'):
+        raise GatewayRejected('incomplete model output item', reason='incomplete_stream')
+    if kind == 'function_call':
+        _exact(item, ('type', 'id', 'call_id', 'name', 'arguments', 'status'))
+        if item.get('name') not in allowed_tools:
+            raise GatewayRejected('model requested an unapproved tool', reason='unsupported_tool')
+        if not isinstance(item.get('call_id'), str) or not item['call_id']:
+            raise GatewayRejected('invalid model tool call identifier', reason='output_consistency')
+        _json_object(item.get('arguments'), MAX_REQUEST)
+    elif kind == 'message':
+        _exact(item, ('type', 'id', 'role', 'status', 'content', 'phase'))
+        _validate_phase(item)
+        if item.get('role') != 'assistant' or not isinstance(item.get('content'), list):
+            raise GatewayRejected('invalid assistant message')
+        for chunk in item['content']:
+            _exact(chunk, ('type', 'text', 'annotations', 'logprobs'))
+            if chunk.get('type') != 'output_text' or not isinstance(chunk.get('text'), str):
+                raise GatewayRejected('nontext model output', reason='unsupported_capability')
+            if chunk.get('annotations') not in (None, []) or chunk.get('logprobs') not in (None, []):
+                raise GatewayRejected('unsupported output references', reason='unsupported_capability')
+    elif kind == 'reasoning':
+        _exact(item, ('type', 'id', 'summary', 'content', 'encrypted_content', 'status'))
+    else:
+        raise GatewayRejected('model requested an unsupported capability', reason='unsupported_capability')
+
+
+def _validated_completion(data, *, kind, rubric_version, purpose='detailed'):
+    allowed_tools = frozenset('mcp__review__' + tool['name'] for tool in _scoped_tools(kind, rubric_version, purpose))
+    completed, done, added = None, {}, {}
     allowed_events = {'response.created', 'response.in_progress', 'response.completed',
         'response.output_item.added', 'response.output_item.done', 'response.content_part.added',
         'response.content_part.done', 'response.output_text.delta', 'response.output_text.done',
@@ -216,50 +314,65 @@ def validate_response(data):
         'response.reasoning_summary_text.delta', 'response.reasoning_summary_text.done',
         'response.reasoning_text.delta', 'response.reasoning_text.done'}
     for event in _upstream_events(data):
+        if completed is not None:
+            raise GatewayRejected('model events followed completion', reason='output_consistency')
         if event.get('type') not in allowed_events:
-            raise GatewayRejected('model response failed')
+            reason = ('upstream_failed' if event.get('type') in ('response.failed', 'error') else
+                      'incomplete_stream' if event.get('type') == 'response.incomplete' else 'unsupported_capability')
+            raise GatewayRejected('model response failed', reason=reason)
         items = [event.get('item')]
         response = event.get('response') or {}
+        if not isinstance(response, dict) or not isinstance(response.get('output', []), list):
+            raise GatewayRejected('invalid model response object')
         items.extend(response.get('output') or [])
         for item in items:
             if not isinstance(item, dict):
                 continue
             kind = item.get('type')
             if kind == 'function_call':
-                if item.get('name') not in REVIEW_TOOLS:
-                    raise GatewayRejected('model requested an unapproved tool')
+                if item.get('name') not in allowed_tools:
+                    raise GatewayRejected('model requested an unapproved tool', reason='unsupported_tool')
             elif kind not in ('message', 'reasoning'):
-                raise GatewayRejected('model requested an unsupported capability')
+                raise GatewayRejected('model requested an unsupported capability', reason='unsupported_capability')
+        if event.get('type') == 'response.output_item.done':
+            index = event.get('output_index')
+            if type(index) is not int or index < 0 or index in done:
+                raise GatewayRejected('invalid or duplicate completed output index', reason='output_consistency')
+            _validate_output_item(event.get('item'), allowed_tools)
+            done[index] = event['item']
+        elif event.get('type') == 'response.output_item.added':
+            index = event.get('output_index')
+            if type(index) is not int or index < 0 or index in added or not isinstance(event.get('item'), dict):
+                raise GatewayRejected('invalid or duplicate added output index', reason='output_consistency')
+            added[index] = event['item']
         if event.get('type') == 'response.completed':
-            if completed or response.get('status') != 'completed' or not isinstance(response.get('output'), list):
+            if response.get('status') != 'completed' or not isinstance(response.get('output'), list):
                 raise GatewayRejected('invalid model completion')
-            # Validate complete objects before converting them to native events.
             for item in response['output']:
-                if not isinstance(item, dict):
-                    raise GatewayRejected('invalid completion item')
-                kind = item.get('type')
-                if kind == 'function_call':
-                    _exact(item, ('type', 'id', 'call_id', 'name', 'arguments', 'status'))
-                    _json_object(item.get('arguments'), MAX_REQUEST)
-                elif kind == 'message':
-                    _exact(item, ('type', 'id', 'role', 'status', 'content'))
-                    if item.get('role') != 'assistant' or not isinstance(item.get('content'), list):
-                        raise GatewayRejected('invalid assistant message')
-                    for chunk in item['content']:
-                        _exact(chunk, ('type', 'text', 'annotations', 'logprobs'))
-                        if chunk.get('type') != 'output_text' or not isinstance(chunk.get('text'), str):
-                            raise GatewayRejected('nontext model output')
-                        if chunk.get('annotations') not in (None, []) or chunk.get('logprobs') not in (None, []):
-                            raise GatewayRejected('unsupported output references')
-                elif kind == 'reasoning':
-                    _exact(item, ('type', 'id', 'summary', 'content', 'encrypted_content', 'status'))
-            completed = True
-    if not completed:
-        raise GatewayRejected('model stream did not complete')
-    return data
+                _validate_output_item(item, allowed_tools)
+            completed = response
+    if completed is None:
+        raise GatewayRejected('model stream did not complete', reason='incomplete_stream')
+    output = completed['output']
+    if output:
+        if any(index >= len(output) or output[index] != item for index, item in done.items()):
+            raise GatewayRejected('completed model outputs disagree', reason='output_consistency')
+    elif done:
+        if sorted(done) != list(range(len(done))):
+            raise GatewayRejected('completed output indexes are not contiguous', reason='output_consistency')
+        output = [done[index] for index in range(len(done))]
+    for index, item in added.items():
+        if index >= len(output) or any(item.get(key) != output[index].get(key)
+                                       for key in ('type', 'id', 'call_id', 'name')):
+            raise GatewayRejected('added model output did not complete consistently', reason='output_consistency')
+    for field in ('id', 'call_id'):
+        identifiers = [item[field] for item in output if field in item]
+        if any(not isinstance(value, str) or not value for value in identifiers) or len(set(identifiers)) != len(identifiers):
+            raise GatewayRejected('invalid or duplicate model output identifier', reason='output_consistency')
+    return dict(completed, output=output)
 
 
-def subscription_transport(body, headers, *, timeout=600):
+def subscription_transport(body, headers, *, timeout=600, kind='primary', rubric_version='job-review-v1', purpose='detailed'):
     connection = http.client.HTTPSConnection(UPSTREAM_HOST, timeout=timeout, context=ssl.create_default_context())
     try:
         connection.request('POST', UPSTREAM_PATH, body=body, headers={
@@ -270,11 +383,15 @@ def subscription_transport(body, headers, *, timeout=600):
         if response.status != 200:
             # Never forward account/error payloads or redirects to the reviewer.
             return response.status, b''
-        if response.getheader('Content-Type', '').split(';')[0] != 'text/event-stream':
-            raise GatewayRejected('upstream did not return an event stream')
+        content_type = response.getheader('Content-Type')
+        if content_type is not None and content_type.split(';')[0].strip().lower() != 'text/event-stream':
+            raise GatewayRejected('upstream did not return an event stream', reason='framing')
         data = response.read(MAX_RESPONSE + 1)
         if len(data) > MAX_RESPONSE:
-            raise GatewayRejected('model response exceeded its size bound')
+            raise GatewayRejected('model response exceeded its size bound', reason='size')
+        # The subscription endpoint can omit Content-Type. Never sniff a prefix:
+        # accept only a completely framed, validated, completed response stream.
+        validate_response(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
         return 200, data
     finally:
         connection.close()
@@ -287,12 +404,58 @@ class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 @contextmanager
 def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFFORT,
-                   uid=None, gid=None, transport=subscription_transport):
+                   uid=None, gid=None, transport=None, kind='primary', rubric_version='job-review-v1',
+                   telemetry_callback=None, purpose='detailed'):
+    _scoped_tools(kind, rubric_version, purpose)
+    if transport is None:
+        transport = lambda body, headers: subscription_transport(body, headers, kind=kind, rubric_version=rubric_version, purpose=purpose)
     path = Path(socket_path)
     if path.exists() or path.is_symlink():
         raise ValueError('gateway socket path already exists')
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     slots = threading.BoundedSemaphore(4)
+
+    def emit_telemetry(event):
+        if telemetry_callback is not None:
+            try:
+                telemetry_callback(event)
+            except Exception:
+                # Observability must never affect authorization or dispatch.
+                pass
+
+    def request_upstream(body, headers):
+        # Only explicit numeric counters cross this callback. Neither arbitrary
+        # usage metadata nor response/error text is allowed into host telemetry.
+        event = {'request_count': 1}
+        started = time.monotonic()
+        emit_telemetry({'request_started_count': 1})
+        try:
+            status, data = transport(body, headers)
+            if type(status) is int and 100 <= status <= 599:
+                event['upstream_status'] = status
+            event['upstream_duration_ms'] = round((time.monotonic() - started) * 1000, 3)
+            if status == 200:
+                completed = _validated_completion(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
+                usage = completed.get('usage')
+                if isinstance(usage, dict):
+                    counts = {key: usage.get(key) for key in ('input_tokens', 'output_tokens', 'total_tokens')}
+                    for group, field, label in (('input_tokens_details', 'cached_tokens', 'cached_input_tokens'),
+                                                ('output_tokens_details', 'reasoning_tokens', 'reasoning_tokens')):
+                        details = usage.get(group)
+                        if isinstance(details, dict):
+                            counts[label] = details.get(field)
+                    event.update({key: value for key, value in counts.items()
+                                  if type(value) is int and 0 <= value < 2**63})
+            return status, data
+        except (GatewayRejected, ValueError, TypeError, KeyError, UnicodeError) as error:
+            event.update(_response_rejection_metrics(error))
+            raise
+        except (OSError, http.client.HTTPException):
+            event['upstream_transport_failed_count'] = 1
+            raise
+        finally:
+            event.setdefault('upstream_duration_ms', round((time.monotonic() - started) * 1000, 3))
+            emit_telemetry(event)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -313,8 +476,10 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
 
         def do_POST(self):
             if not slots.acquire(blocking=False):
+                emit_telemetry({'gateway_busy_count': 1})
                 self.send_result(503, b'{"error":"review gateway busy"}')
                 return
+            phase = 'request'
             try:
                 if self.path != '/v1/responses' or self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
                     raise GatewayRejected('invalid gateway request')
@@ -326,18 +491,29 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise GatewayRejected('incomplete request')
-                value = validate_request(_json_object(body, MAX_REQUEST), model, reasoning_effort)
+                value = validate_request(_json_object(body, MAX_REQUEST), model, reasoning_effort, kind=kind, rubric_version=rubric_version, purpose=purpose)
                 body = encode_json(value, MAX_REQUEST)
-                status, data = transport(body, auth_owner._request_headers())
+                phase = 'upstream'
+                status, data = request_upstream(body, auth_owner._request_headers())
                 if status == 401:
-                    status, data = transport(body, auth_owner._request_headers(refresh=True))
+                    status, data = request_upstream(body, auth_owner._request_headers(refresh=True))
                 if status != 200:
                     self.send_result(503, b'{"error":"subscription inference unavailable"}')
                     return
-                self.send_result(200, native_response(data), 'text/event-stream')
-            except (GatewayRejected, ValueError, TypeError, KeyError, UnicodeError):
+                phase = 'response'
+                data = native_response(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
+                phase = 'delivery'
+                self.send_result(200, data, 'text/event-stream')
+            except (GatewayRejected, ValueError, TypeError, KeyError, UnicodeError) as error:
+                if phase == 'request':
+                    emit_telemetry({'gateway_request_rejected_count': 1})
+                elif phase == 'response':
+                    emit_telemetry(_response_rejection_metrics(error))
                 self.send_result(400, b'{"error":"review model request rejected"}')
-            except (AuthenticationUnavailable, OSError, http.client.HTTPException):
+            except AuthenticationUnavailable:
+                emit_telemetry({'authentication_failed_count': 1})
+                self.send_result(503, b'{"error":"subscription inference unavailable"}')
+            except (OSError, http.client.HTTPException):
                 self.send_result(503, b'{"error":"subscription inference unavailable"}')
             finally:
                 slots.release()

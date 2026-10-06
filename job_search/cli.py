@@ -53,6 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-notification-socket", type=Path)
     parser.add_argument("--log-dir", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
+    understanding = commands.add_parser("mail-understanding", help="operate shared mail evaluation and archive-only history reanalysis")
+    understanding_commands = understanding.add_subparsers(dest="understanding_command", required=True)
+    history = understanding_commands.add_parser("history", help="reanalyse all linked inbound history without notifications")
+    history.add_argument("action", choices=("preview", "start", "resume", "inspect", "cancel"))
+    history.add_argument("--account-id")
+    history.add_argument("--replay-id")
+    history.add_argument("--limit", type=int, default=50)
+    history.add_argument("--retry-failed", action="store_true")
+    history.add_argument("--idempotency-key")
+    evaluation = understanding_commands.add_parser("evaluate", help="score reviewed expected findings against recorded predictions")
+    evaluation.add_argument("--input", type=Path, required=True)
+    evaluation.add_argument("--output", type=Path, required=True)
+    evaluation.add_argument("--producer-version", required=True)
+    evaluation.add_argument("--dataset-kind", choices=("synthetic", "reviewed_private_holdout"), default="synthetic")
     from .job_reviews.runner import add_arguments as review_runner_arguments
     review_runner_arguments(commands.add_parser('review-runner', help='operate isolated Codex review sessions'))
     from .job_reviews.service import FIELDS
@@ -434,6 +448,56 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(str(exc)) from None
         return 0
     db_path = config.application_db
+    if args.command == "mail-understanding":
+        from .mail.understanding_replay import UnderstandingReplay
+        if args.understanding_command == "evaluate":
+            from .mail.understanding_evaluation import evaluate_cases
+            try:
+                if args.input.stat().st_size > 16 * 1024 * 1024:
+                    raise SystemExit("evaluation input exceeds 16 MiB")
+                cases = json.loads(args.input.read_text())
+                if not isinstance(cases, list) or len(cases) > 10000:
+                    raise SystemExit("evaluation requires an array of at most 10,000 cases")
+                result = evaluate_cases(cases, producer_version=args.producer_version, dataset_kind=args.dataset_kind)
+                descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'w') as stream:
+                    json.dump(result['report'], stream, sort_keys=True)
+            except (OSError, ValueError, ContractError) as exc:
+                raise SystemExit(str(exc)) from None
+            _json({'report_file':str(args.output),'metrics':result['metrics'],'all_classes':result['all_classes'],
+                   'automation_eligible_dataset':args.dataset_kind == 'reviewed_private_holdout'})
+            return 0
+        ledger = JobSearchLedger(db_path)
+        runtime = None
+        if args.action == 'resume':
+            from .mail.archive import EncryptedMailArchive, KeychainArchiveKeyProvider
+            from .mail.understanding_runtime import build_understanding_runtime
+            if config.portable_encryption_key_file:
+                from .secure_persistence import PortableArchiveKeyProvider
+                key_provider = PortableArchiveKeyProvider(config.portable_encryption_key_file)
+            else:
+                key_provider = KeychainArchiveKeyProvider(read_only=True)
+            runtime = build_understanding_runtime(config,ledger,EncryptedMailArchive(ledger,key_provider),config.environment(os.environ))
+        replay = UnderstandingReplay(ledger,runtime)
+        if args.action == 'preview':
+            result = replay.preview(args.account_id or config.outlook_account_id)
+        elif args.action == 'start':
+            if not args.idempotency_key:
+                raise SystemExit('history start requires --idempotency-key')
+            result = replay.start(args.account_id or config.outlook_account_id,MutationContext(args.idempotency_key,'user','cli'))
+        else:
+            if not args.replay_id:
+                raise SystemExit('history operation requires --replay-id')
+            if args.action == 'inspect':
+                result = replay.inspect(args.replay_id)
+            elif args.action == 'cancel':
+                if not args.idempotency_key:
+                    raise SystemExit('history cancel requires --idempotency-key')
+                result = replay.cancel(args.replay_id,MutationContext(args.idempotency_key,'user','cli'))
+            else:
+                result = replay.run_batch(args.replay_id,limit=args.limit,retry_failed=args.retry_failed)
+        _json(result)
+        return 0
     if args.command == "setup":
         from .setup import inspect
         _json(inspect(config)); return 0

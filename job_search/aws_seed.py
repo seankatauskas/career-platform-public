@@ -358,7 +358,15 @@ def import_seed(*, archive: Path, destination: Path, expected_sha256: str,
         # SQLite creates auxiliary files under the ambient umask. Make the entire
         # staged tree private before publication; it has never been world-readable.
         for path in temporary.rglob("*"):
-            path.chmod(0o700 if path.is_dir() else 0o600)
+            try:
+                path.chmod(0o700 if path.is_dir() else 0o600)
+            except FileNotFoundError:
+                # Closing a checkpointed SQLite connection can remove its WAL
+                # or SHM between directory enumeration and chmod. Only those
+                # ephemeral sidecars may disappear while the database remains.
+                if not (path.name.endswith((".db-wal", ".db-shm"))
+                        and path.with_name(path.name[:-4]).is_file()):
+                    raise
         # Reserve destination atomically: competing imports cannot both succeed.
         if not existing_empty:
             destination.mkdir(mode=0o700)

@@ -195,7 +195,9 @@ def test_grounded_model_rejects_invented_ref_owner_action_and_accepts_valid_summ
             assert s.complete_generation(briefing['briefing_id'],output,ctx('invalid'+str(index)))['outcome']=='invalid_fallback'
         output={'ordered_refs':[ref],'summary_statements':[{'kind':'needs_you','fact_refs':[ref]}],'suggested_next_steps':[{'action':'review','fact_ref':ref}]}
         assert s.complete_generation(briefing['briefing_id'],output)['outcome']=='accepted'
-        assert 'Your attention is needed' in s.finalize_briefing(briefing['briefing_id'])['briefing']['body']
+        body=s.finalize_briefing(briefing['briefing_id'])['briefing']['body']
+        assert 'Needs you: Acme — Platform Engineer: Review offer terms' in body
+        assert body.count('Review offer terms')==1
 
 
 def test_provider_uses_existing_interface_and_never_emits_unsupported_claims():
@@ -261,9 +263,12 @@ def test_deadline_before_next_brief_interrupts_before_two_hour_window_and_risks_
 
 
 def test_briefings_only_preserves_explicit_timed_reminders():
+    from unittest.mock import patch
     with tempfile.TemporaryDirectory() as d:
-        ledger,s,app,clock=setup(d);live(s,mode='briefings_only')
-        reminder=ledger.create_reminder(dict(application_id=app,note='Call recruiter now',due_at='2026-10-05T11:59:00Z'),ctx('reminder','user'))['reminder']
+        ledger,s,app,clock=setup(d,Clock('2026-10-05T11:58:00Z'));live(s,mode='briefings_only')
+        with patch('job_search.store.utc_now',side_effect=clock.stamp):
+            reminder=ledger.create_reminder(dict(application_id=app,note='Call recruiter now',due_at='2026-10-05T11:59:00Z'),ctx('reminder','user'))['reminder']
+        clock.advance(2)
         result=s.from_notification(NotificationIntent('reminder.due',reminder['reminder_id'],'Reminder','Call recruiter now',app,{'reminder_id':reminder['reminder_id']}))
         assert result['decision']['reason']=='explicit_reminder' and len(notifications(ledger))==1
 
@@ -394,10 +399,12 @@ def test_budget_deferral_propagates_while_fallback_finalization_remains_availabl
 
 
 def test_explicit_reminder_delivery_preserves_requested_time_during_quiet_hours():
+    from unittest.mock import patch
     with tempfile.TemporaryDirectory() as d:
         ledger,s,app,clock=setup(d,Clock('2026-10-05T07:00:00Z'))
         live(s,mode='briefings_only',quiet_hours_enabled=True)
-        reminder=ledger.create_reminder(dict(application_id=app,note='Requested overnight reminder',due_at=clock.stamp()),ctx('reminder','user'))['reminder']
+        with patch('job_search.store.utc_now',return_value='2026-10-05T06:59:00Z'):
+            reminder=ledger.create_reminder(dict(application_id=app,note='Requested overnight reminder',due_at=clock.stamp()),ctx('reminder','user'))['reminder']
         s.from_notification(NotificationIntent('reminder.due',reminder['reminder_id'],'Reminder','Requested overnight reminder',app,{'reminder_id':reminder['reminder_id']}))
         row=notifications(ledger)[0]
         with connect(ledger.store.db_path) as con:
@@ -470,7 +477,7 @@ def test_briefing_waits_for_all_top_three_reply_results_and_uses_company_names()
             assert not AttentionService.validate_delivery(con,row,clock.stamp())
 
 
-def test_body_budget_overflow_count_includes_unshown_snapshot_facts():
+def test_body_budget_keeps_unshown_details_in_dashboard_without_overflow_noise():
     from job_search.attention.portfolio import render
     with tempfile.TemporaryDirectory() as d:
         ledger,s,app,clock=setup(d)
@@ -479,7 +486,8 @@ def test_body_budget_overflow_count_includes_unshown_snapshot_facts():
         snapshot=s.preview()['snapshot'];_,body,refs=render(snapshot)
         omitted=snapshot['fact_count']-len(refs)
         assert snapshot['omitted_facts']==0 and omitted>0
-        assert str(omitted)+' additional facts are available' in body
+        assert 'additional facts' not in body
+        assert len(body)<=1950 and len(snapshot['facts'])==10
 
 
 def test_changed_pending_briefing_is_rebuilt_once_and_delivered_receipt_never_replaced():
@@ -493,7 +501,7 @@ def test_changed_pending_briefing_is_rebuilt_once_and_delivered_receipt_never_re
             assert not AttentionService.validate_delivery(con,original,clock.stamp())
         refreshed=s.get_briefing(briefing['briefing_id'])
         assert refreshed['notification_id']!=original['notification_id']
-        assert 'Next step: Acme — Platform Engineer: Now completed exercise' not in refreshed['body']
+        assert 'Needs you: Acme — Platform Engineer: Now completed exercise' not in refreshed['body']
         assert refreshed['snapshot']['counts']['applicant_tasks']==0
         with connect(ledger.store.db_path) as con:
             assert not AttentionService.validate_delivery(con,original,clock.stamp())
@@ -532,6 +540,264 @@ def test_ready_proposal_rejected_after_newer_inbound_even_with_fresh_cached_hash
         ledger.lifecycle.observe_mail(dict(account_id='account',immutable_message_id='newer',conversation_id='thread',direction='inbound',received_at='2026-10-05T11:30:00Z',modified_at='2026-10-05T11:30:00Z',sender='recruiter@example.test',subject='Updated invitation'),ctx('newer'))
         with connect(ledger.store.db_path) as con:
             assert not _ready_reply_current(con,reply,clock())
+
+
+def briefing_mail(ledger, app, key, event_type='submission_confirmed', *, accepted=True,
+                  received='2026-10-05T11:00:00Z', recorded='2026-10-05T11:00:00Z'):
+    from unittest.mock import patch
+    from job_search.contracts import ApplicationEventType, EventProposalInput, ProducerKind
+    text={'submission_confirmed':'Thank you for applying.',
+          'interview_requested':'We would like to invite you to an interview.',
+          'rejection_received':'We will not proceed with your application.'}[event_type]
+    with patch('job_search.store.utc_now',return_value=recorded):
+        eid=ledger.record_mail_evidence(dict(account_id='account',immutable_message_id=key,
+            sender='recruiter@example.test',subject=text,received_at=received,
+            body_sha256='a'*64,excerpt=text),ctx('evidence:'+key))['evidence']['evidence_id']
+        proposal=ledger.create_event_proposal(EventProposalInput(evidence_id=eid,
+            proposed_application_id=app,event_type=ApplicationEventType(event_type),
+            producer_kind=ProducerKind.MODEL,producer_version='fixture-v1',confidence=1,
+            candidate_application_ids=[app],evidence_quote=text,span_start=0,span_end=len(text),
+            payload={},dedupe_key='proposal:'+key),ctx('proposal:'+key))['proposal']
+        if accepted:
+            ledger.decide_event_proposal(proposal['proposal_id'],'accepted',app,'Reviewed fixture',ctx('accept:'+key,'user'))
+        observation=ledger.lifecycle.observe_mail(dict(account_id='account',immutable_message_id=key,
+            conversation_id=key,direction='inbound',received_at=received,modified_at=received,
+            sender='recruiter@example.test',subject=text,evidence_id=eid),ctx('observe:'+key))['observation']
+        ledger.lifecycle.link_mail(dict(observation_id=observation['observation_id'],application_id=app),ctx('link:'+key,'user'))
+    return eid
+
+
+def test_routine_activity_is_one_line_with_unique_application_counts():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d)
+        with patch('job_search.store.utc_now',return_value='2026-10-05T10:00:00Z'):
+            ledger.record_submission(app,'2026-10-05T10:00:00Z',ctx('submit','user'))
+            ledger.record_submission(app,'2026-10-05T10:00:00Z',ctx('duplicate-submit','user'))
+        briefing_mail(ledger,app,'receipt')
+        briefing_mail(ledger,app,'second-receipt')
+        preview=s.preview()
+        activity=preview['snapshot']['application_activity']
+        assert activity['submitted']==1 and activity['confirmed']==1
+        assert len(activity['source_event_ids'])==2
+        assert preview['body'].count('Application activity:')==1
+        assert '1 application submitted; 1 confirmation received.' in preview['body']
+        assert not preview['snapshot']['facts']
+        assert 'Change:' not in preview['body'] and 'Thank you for applying' not in preview['body']
+        with connect(ledger.store.db_path) as con:
+            assert con.execute('SELECT COUNT(*) FROM mail_evidence').fetchone()[0]==2
+            assert con.execute("SELECT COUNT(*) FROM application_events WHERE event_type='submission_confirmed'").fetchone()[0]==2
+
+
+def test_routine_activity_does_not_carry_forward_or_repeat_later_duplicate_receipts():
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d,Clock('2026-10-05T10:00:00Z'));live(s,ai_enabled=False)
+        briefing_mail(ledger,app,'receipt')
+        clock.advance(120)
+        first=s.finalize_briefing(s.prepare_briefing('morning')['briefing']['briefing_id'])['briefing']
+        with connect(ledger.store.db_path) as con:
+            # Older briefings may have omitted routine facts from their selected
+            # refs. Delivery of the interval still closes that routine backlog.
+            con.execute("UPDATE attention_briefings SET selected_refs_json='[]' WHERE briefing_id=?",(first['briefing_id'],))
+            con.execute("UPDATE notification_outbox SET status='delivered',delivered_at=? WHERE notification_id=?",(clock.stamp(),first['notification_id']))
+        clock.advance(120)
+        briefing_mail(ledger,app,'late-duplicate',received=clock.stamp(),recorded=clock.stamp())
+        preview=s.preview('evening')
+        assert preview['snapshot']['application_activity']['confirmed']==0
+        assert 'Application activity' not in preview['body']
+        assert not any(f['kind']=='mail' for f in preview['snapshot']['facts'])
+        other=start(ledger,'job-2','start-2')['application']['application_id']
+        briefing_mail(ledger,other,'new-receipt',received=clock.stamp(),recorded=clock.stamp())
+        assert s.preview('evening')['snapshot']['application_activity']['confirmed']==1
+
+
+def test_unclassified_or_pending_mail_is_not_silently_counted_as_confirmation():
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d)
+        briefing_mail(ledger,app,'pending',accepted=False)
+        preview=s.preview()
+        assert preview['snapshot']['application_activity']['confirmed']==0
+        assert 'Review: Acme — Platform Engineer: Application confirmation' in preview['body']
+        assert sum(f['kind']=='review' for f in preview['snapshot']['facts'])==1
+        assert not any(f['kind']=='mail' for f in preview['snapshot']['facts'])
+
+
+def test_meaningful_employer_event_replaces_its_email_subject():
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d)
+        briefing_mail(ledger,app,'interview','interview_requested')
+        preview=s.preview()
+        assert 'Employer update: Acme — Platform Engineer: Interview invitation' in preview['body']
+        assert 'We would like to invite you' not in preview['body']
+        assert not any(f['kind']=='mail' for f in preview['snapshot']['facts'])
+        assert preview['body'].index('Needs you:')<preview['body'].index('Employer update:')
+        assert preview['snapshot']['application_activity']['confirmed']==0
+
+
+def test_activity_survives_full_fact_and_message_budgets_without_displacing_actions():
+    from job_search.attention.portfolio import render
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d)
+        briefing_mail(ledger,app,'receipt')
+        for index in range(85):
+            ledger.lifecycle.create_task(app,dict(kind='reply',owner='applicant',note='Request '+str(index)+' detail '*45),ctx('task'+str(index),'user'))
+        preview=s.preview();snapshot=preview['snapshot']
+        assert snapshot['counts']['applicant_tasks']==85 and len(snapshot['facts'])==80
+        assert snapshot['application_activity']['confirmed']==1
+        _,body,refs=render(snapshot,dashboard_url='https://career.example.test/#settings/chief')
+        assert len(body)<=1950 and refs
+        assert body.index('Needs you:')<body.index('Application activity:')
+        assert '1 confirmation received.' in body and 'additional facts' not in body
+        assert body.endswith('/#settings/chief')
+
+
+def test_model_order_cannot_put_mail_before_tasks_or_repeat_summaries():
+    from job_search.attention.portfolio import render
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d)
+        task=ledger.lifecycle.create_task(app,dict(kind='reply',owner='applicant',note='Share updated resume'),ctx('reply','user'))['task']
+        briefing_mail(ledger,app,'pending',accepted=False)
+        snapshot=s.preview()['snapshot'];task_ref='task:'+task['task_id']
+        mail={'ref':'mail:fixture','kind':'mail','application_id':app,'label':'Recruiter update',
+              'source_revision':'1','priority':75,'section':'changes','at':None}
+        snapshot['facts'].append(mail)
+        generation={'summary_statements':[{'kind':'needs_you','fact_refs':[task_ref]}],
+                    'suggested_next_steps':[{'action':'review','fact_ref':task_ref}]}
+        _,body,refs=render(snapshot,ordered_refs=['mail:fixture'],generation=generation)
+        assert body.index('Needs you:')<body.index('Review:')<body.index('Employer update:')
+        assert body.count('Share updated resume')==1 and refs.count(task_ref)==1
+
+
+def test_weekly_routine_recap_and_late_ingestion_use_recorded_time():
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d,Clock('2026-10-10T00:00:00Z'))
+        briefing_mail(ledger,app,'old-receipt',received='2026-08-01T12:00:00Z',recorded='2026-10-09T23:00:00Z')
+        preview=s.preview('evening')
+        assert preview['snapshot']['variant']=='week_recap'
+        assert preview['snapshot']['application_activity']['confirmed']==1
+        assert 'Application activity this week: 0 applications submitted; 1 confirmation received.' in preview['body']
+
+
+def test_unshown_meaningful_updates_remain_eligible_after_delivery():
+    with tempfile.TemporaryDirectory() as d:
+        ledger,s,app,clock=setup(d,Clock('2026-10-05T10:00:00Z'));live(s,ai_enabled=False)
+        briefing_mail(ledger,app,'interview','interview_requested')
+        for index in range(12):
+            ledger.lifecycle.create_task(app,dict(kind='reply',owner='applicant',note='Request '+str(index)),ctx('task'+str(index),'user'))
+        clock.advance(120)
+        first=s.finalize_briefing(s.prepare_briefing('morning')['briefing']['briefing_id'])['briefing']
+        event=next(f for f in first['snapshot']['facts'] if f['kind']=='event')
+        assert event['ref'] not in first['selected_refs']
+        with connect(ledger.store.db_path) as con:
+            con.execute("UPDATE notification_outbox SET status='delivered',delivered_at=? WHERE notification_id=?",(clock.stamp(),first['notification_id']))
+        clock.advance(60)
+        evening=s.preview('evening')
+        assert event['ref'] in [f['ref'] for f in evening['snapshot']['facts']]
+        assert 'Interview invitation' in evening['body']
+
+
+def shared_briefing_analysis(ledger, app, evidence_id, *, mode='shared', pending=False, task=None):
+    with connect(ledger.store.db_path) as con:
+        proposal = dict(con.execute('SELECT * FROM event_proposals WHERE evidence_id=?', (evidence_id,)).fetchone())
+    result = {'analysis_id': 'analysis:' + evidence_id, 'account_id': 'account', 'immutable_message_id': evidence_id,
+              'evidence_id': evidence_id, 'mode': mode, 'replay_id': 'replay-one' if mode == 'replay' else None,
+              'revision': 'one', 'created_at': '2026-10-05T11:00:00Z', 'application_id': app,
+              'subject': 'Mixed employer message', 'coverage': [], 'findings': [
+                  {'finding_id': 'status:' + evidence_id, 'type': 'event', 'status': 'pending' if pending else 'accepted',
+                   'value': {'event_type': proposal['event_type']}, 'projection': {'kind': 'event_proposal', 'id': proposal['proposal_id']}}]}
+    if task:
+        result['findings'].append({'finding_id': 'action:' + evidence_id, 'type': 'action', 'status': 'accepted',
+                                   'value': {'kind': task['kind']}, 'projection': {'kind': 'task', 'id': task['task_id']}})
+    return result
+
+
+def test_shared_review_groups_findings_and_suppresses_legacy_rows_and_mail():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger, service, app, _ = setup(d)
+        eid = briefing_mail(ledger, app, 'shared-pending', accepted=False)
+        analysis = shared_briefing_analysis(ledger, app, eid, pending=True)
+        analysis['findings'].append({'finding_id': 'request', 'type': 'action', 'status': 'pending',
+                                    'value': {'kind': 'reply'}, 'projection': None})
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[analysis]):
+            preview = service.preview()
+        assert preview['snapshot']['counts']['pending_reviews'] == 1
+        assert len(preview['snapshot']['facts']) == 1
+        fact = preview['snapshot']['facts'][0]
+        assert fact['analysis_id'] == analysis['analysis_id'] and len(fact['finding_ids']) == 2
+        assert fact['review_path'].startswith('#review/mail_analysis/')
+        assert preview['body'].count('Review email:') == 1
+        assert 'Employer update:' not in preview['body'] and 'Interview request' not in preview['body']
+
+
+def test_shared_action_replaces_corresponding_event_and_mail_in_briefing():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger, service, app, _ = setup(d)
+        eid = briefing_mail(ledger, app, 'shared-invitation', 'interview_requested')
+        with connect(ledger.store.db_path) as con:
+            task = dict(con.execute('SELECT * FROM lifecycle_tasks WHERE evidence_id=?', (eid,)).fetchone())
+        analysis = shared_briefing_analysis(ledger, app, eid, task=task)
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[analysis]):
+            preview = service.preview()
+        assert preview['snapshot']['counts']['applicant_tasks'] == 1
+        assert len(preview['snapshot']['facts']) == 1
+        assert preview['snapshot']['facts'][0]['finding_id'] == 'action:' + eid
+        assert 'Needs you:' in preview['body'] and 'Employer update:' not in preview['body']
+
+
+def test_shared_mixed_receipt_counts_activity_and_keeps_concrete_task():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger, service, app, _ = setup(d)
+        eid = briefing_mail(ledger, app, 'shared-assessment')
+        task = ledger.lifecycle.create_task(app, {'kind': 'complete_assessment', 'owner': 'applicant',
+            'note': 'Complete the coding exercise', 'evidence_id': eid}, ctx('assessment', 'user'))['task']
+        analysis = shared_briefing_analysis(ledger, app, eid, task=task)
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[analysis]):
+            preview = service.preview()
+        assert preview['snapshot']['application_activity']['confirmed'] == 1
+        assert preview['body'].count('Complete the coding exercise') == 1
+        assert '1 confirmation received.' in preview['body']
+        assert not any(f['kind'] in ('event', 'mail', 'review') for f in preview['snapshot']['facts'])
+
+
+def test_replay_projections_do_not_leak_into_current_counts_or_briefings():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger, service, app, _ = setup(d)
+        eid = briefing_mail(ledger, app, 'replayed-receipt')
+        task = ledger.lifecycle.create_task(app, {'kind': 'reply', 'owner': 'applicant',
+            'note': 'Historical request', 'evidence_id': eid}, ctx('old-task', 'user'))['task']
+        replay = shared_briefing_analysis(ledger, app, eid, mode='replay', task=task)
+        pending_eid = briefing_mail(ledger, app, 'replayed-pending', accepted=False)
+        pending = shared_briefing_analysis(ledger, app, pending_eid, mode='replay', pending=True)
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[replay, pending]):
+            preview = service.preview()
+        assert preview['snapshot']['application_activity']['confirmed'] == 0
+        assert preview['snapshot']['counts']['applicant_tasks'] == 0
+        assert preview['snapshot']['counts']['pending_reviews'] == 0
+        assert preview['snapshot']['counts']['new_messages'] == 0
+        assert not preview['snapshot']['facts']
+
+
+def test_shadow_does_not_hide_legacy_review_and_decided_gaps_do_not_repeat():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        ledger, service, app, _ = setup(d)
+        eid = briefing_mail(ledger, app, 'shadow-pending', accepted=False)
+        shadow = shared_briefing_analysis(ledger, app, eid, mode='shadow', pending=True)
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[shadow]):
+            preview = service.preview()
+        assert preview['snapshot']['counts']['pending_reviews'] == 1
+        assert all('analysis_id' not in f for f in preview['snapshot']['facts'])
+        decided = {**shadow, 'mode': 'shared', 'coverage': [{'source_id': 'missing', 'reason': 'missing_attachment'}],
+                   'findings': [{**f, 'status': 'rejected'} for f in shadow['findings']]}
+        with patch('job_search.attention.portfolio._mail_analyses', return_value=[decided]):
+            preview = service.preview()
+        assert preview['snapshot']['counts']['pending_reviews'] == 0
+        assert preview['snapshot']['coverage']['mail_understanding']['incomplete_messages'] == 1
+        assert not preview['snapshot']['facts']
 
 
 def main():

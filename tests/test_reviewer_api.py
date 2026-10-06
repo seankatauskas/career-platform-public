@@ -118,6 +118,42 @@ class ReviewerAPITests(unittest.TestCase):
         self.path = self.root / 'review.sock'
         self.authority = FakeAuthority()
 
+    def test_api_telemetry_is_numeric_and_uses_fixed_operation_labels_only(self):
+        events, responses = [], []
+        with assignment_proxy(self.path, self.authority, TOKEN, telemetry_callback=events.append):
+            responses.append(http_request(self.path))
+            responses.append(http_request(self.path, 'POST', '/v1/context', {'section': 'facts'}))
+            responses.append(http_request(self.path, 'GET', '/private/' + SENTINEL,
+                                          headers=('X-Private: ' + TOKEN,)))
+            responses.append(http_request(self.path, 'PATCH', '/' + TOKEN))
+            self.authority.raise_error = ContractError
+            responses.append(http_request(self.path, 'POST', '/v1/assessment',
+                                          {'ordinal': 1, 'assessment': {'private': SENTINEL}}))
+        self.assertEqual([event['operation'] for event in events],
+                         ['assignment', 'context', 'invalid', 'invalid', 'assessment'])
+        self.assertEqual([event['status'] for event in events], [200, 200, 404, 501, 400])
+        for event, (_, body) in zip(events, responses):
+            self.assertEqual(set(event), {'operation', 'elapsed_seconds', 'status', 'response_bytes'})
+            self.assertIs(type(event['elapsed_seconds']), float)
+            self.assertGreaterEqual(event['elapsed_seconds'], 0)
+            self.assertEqual(event['response_bytes'], len(body))
+        encoded = json.dumps(events)
+        self.assertNotIn(TOKEN, encoded)
+        self.assertNotIn(SENTINEL, encoded)
+
+    def test_api_telemetry_failure_cannot_change_response_or_backend_call(self):
+        observed = []
+        def fail(event):
+            observed.append(event)
+            raise RuntimeError(TOKEN + SENTINEL)
+        with assignment_proxy(self.path, self.authority, TOKEN, telemetry_callback=fail):
+            result = ReviewerClient(self.path).call('assessment', {'ordinal': 1, 'assessment': {}})
+            assignment = ReviewerClient(self.path).call('assignment')
+        self.assertEqual(result, {'review_id': 'review-1', 'ordinal': 1, 'revision': 1})
+        self.assertEqual(assignment['grant_id'], 'grant-1')
+        self.assertEqual([event['operation'] for event in observed], ['assessment', 'assignment'])
+        self.assertEqual([call[1] for call in self.authority.calls], ['assessment', 'assignment'])
+
     def test_assignment_preserves_durable_submission_receipt_flag(self):
         with assignment_proxy(self.path, self.authority, TOKEN):
             value = ReviewerClient(self.path).call('assignment')
@@ -290,7 +326,7 @@ class ReviewerAPITests(unittest.TestCase):
                                     capture_output=True, timeout=10, check=True)
         outputs = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual([r['id'] for r in outputs], [1, 2, 3])
-        self.assertEqual(len(outputs[1]['result']['tools']), 4)
+        self.assertEqual(len(outputs[1]['result']['tools']), 5)
         self.assertNotIn(SENTINEL.encode(), result.stdout)
         self.assertNotIn(TOKEN.encode(), result.stdout)
         self.assertEqual(result.stderr, b'')

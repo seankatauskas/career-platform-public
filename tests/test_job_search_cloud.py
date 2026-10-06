@@ -293,7 +293,8 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     # images. It invokes privileged Docker/AWS operations and has no app caller.
     host_only_python = {"job_search/aws_ops.py", "job_search/operation_journal.py",
                         "job_search/release_policy.py", "job_search/cost_collector.py",
-                        "job_search/review_host.py"}
+                        "job_search/review_host.py", "job_search/prepared_release.py",
+                        "job_search/release_coordinator.py"}
     assert packaged_python == repository_python - host_only_python
     assert not (packaged_python & host_only_python)
     for excluded in (

@@ -8,9 +8,9 @@ Start with the [project README](../README.md), [demo](demo.md), and [system desi
 | Agent-selected shortlists | [Agent review workflow](agent-job-reviews.md), [isolated AWS reviewers](operations/isolated-reviews.md), [Publish Codex picks](curated-shortlists.md) |
 | Collection and ranking | [Collector guide](collector-guide.md), [model training](models/local-model-training.md), [ATS approximation](models/ats-proxy-model.md), [inference providers](models/inference-providers.md), [salary model](models/salary-v3.md) |
 | Running locally | [Application runbook](operations/job-search-runbook.md), [runtime and scheduling](operations/job-search-runtime.md), [isolated system demo](offline-system-demo.md) |
-| Deployment | [AWS](operations/aws-deployment.md), [Docker Compose](operations/cloud-deployment.md), [Compose acceptance](compose-acceptance.md), [workflow setup](workflow-setup.md) |
+| Deployment | [Coordinated releases](operations/coordinated-releases.md), [AWS](operations/aws-deployment.md), [Docker Compose](operations/cloud-deployment.md), [Compose acceptance](compose-acceptance.md), [workflow setup](workflow-setup.md) |
 | Operations | [Readiness and recovery](operations/operations-readiness.md), [runtime efficiency and affordable ranking](operations/runtime-efficiency.md), [costs and credits](operations/cost-dashboard.md), [secure mail](operations/job-search-secure-mail.md) |
-| Chief of staff | [Briefings, Telegram reply approval, and personal calendar](hermes-chief-of-staff.md) |
+| Chief of staff | [Briefings, Telegram reply approval, and personal calendar](hermes-chief-of-staff.md), [shared email-understanding design](mail-understanding-design.md) |
 | Career information and resumes | [Career database](resumes/career-resume-runbook.md), [resume lab](resumes/resume-lab-runbook.md) |
 | Configuration | [Examples](../examples/README.md), [dependency groups](../requirements/README.md) |
 

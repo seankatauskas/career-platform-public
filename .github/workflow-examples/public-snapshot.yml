@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 22 * * *'
       timezone: America/Chicago
+    # Retry off the hour; the publisher coalesces successful runs by Chicago date.
+    - cron: '17 23 * * *'
+      timezone: America/Chicago
   workflow_dispatch:
 
 permissions:

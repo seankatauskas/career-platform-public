@@ -19,7 +19,48 @@ Briefings use recorded career obligations and the primary Outlook calendar. Priv
 calendar items are generic commitments. Missing coverage stays visible. A passed
 interview time, an unsent draft, or a notification receipt does not prove completion.
 
+## Briefing contents
+
+Briefings put upcoming commitments and deadlines first, followed by **Needs you**
+tasks, **Review** decisions, and meaningful **Employer update** entries. Routine
+submissions and accepted confirmations appear in one **Application activity** line,
+counting each application's first submission and first confirmation once. Receipt
+emails are not separate updates, and a classified employer email is represented
+by its stage event rather than repeated as an email subject. Pending classifications
+remain reviews; unclassified linked mail stays visible.
+
+Routine counts cover records ingested since the last delivered briefing (or the
+last day for the first briefing), bounded by activation. Omitted routine records
+do not spill into later briefs. Friday's recap summarizes the week's activity.
+Meaningful updates that could not fit remain eligible for a later briefing. The
+dashboard retains application timelines, message evidence, and pending reviews.
+
+The model can select and order supported facts, but each fact is rendered once,
+and actions stay ahead of messages. Reply readiness is included with its task.
+The message reserves room for the activity summary, coverage note, and dashboard
+link; it does not append a technical count of “additional facts.”
+
 ## Reply review
+
+The [shared email-understanding implementation](mail-understanding-design.md)
+provides a versioned analyzer for events, actions, and temporal facts. Select it with
+`mail_understanding_mode: "shared"`; existing installations default to `legacy`.
+Shared-owned messages never run the separate receipt, reply-task, or body-temporal
+interpretation paths. Tasks and briefings consume the same validated findings.
+
+`shadow` records comparisons outside public reviews and briefings. `paused` leaves
+analysis pending. A matching private evaluation report is required for automatic
+acceptance; otherwise findings are grouped for independent dashboard decisions.
+A receipt acceptance cannot approve a reply action. The legacy conservative reply
+detector remains only for messages that have not moved to shared ownership.
+
+See [shared mail operations](operations/shared-mail-understanding.md) for source
+scope, evaluation artifacts, all-history replay and schema recovery. These source
+changes do not activate or deploy the feature by themselves.
+
+Existing false reply tasks need an explicit, audited cancellation through the
+application task service. Updating the detector does not rewrite task history or
+past briefings. Cancelled tasks are not recreated for the same message.
 
 The core worker captures verified incoming-message reply context. The model worker
 receives bounded, sanitized facts and no Outlook credentials. It can prepare a reply
@@ -114,7 +155,7 @@ Compose acceptance also starts the interactions broker and checks the dedicated
 briefing-profile mount boundary using fictional configuration. The chief runtime and domain suites use temporary databases
 and fake providers. Production activation and live Microsoft consent are separate
 from offline verification. Follow the existing AWS release and recovery runbook. This release upgrades the
-application database from deployed schema 16 to 19; returning to the previous release
+application database through schema 20; returning to a schema-19 release
 requires its pre-upgrade state backup.
 
 Broader interview preparation, search coaching, debriefs, and offer comparisons

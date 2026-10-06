@@ -36,6 +36,7 @@ from .contracts import (
     MutationContext,
     RecommendationProvenance,
     canonical_json,
+    payload_sha256,
     utc_now,
     validate_identifier,
 )
@@ -391,9 +392,14 @@ class DashboardController:
         result = self.curated.get(list_id)
         rows = self.with_recent_company_applications(self.with_posting_dates(result['recommendations']))
         ordinals = self.job_reviews.publication_ordinals(list_id)
+        summaries = (self.job_reviews.publication_summaries(list_id)
+                     if hasattr(self.job_reviews, 'publication_summaries') else {})
         for row in rows:
             row['closed_at'] = row.get('job_posting', {}).get('closed_at', row.get('closed_at'))
             row['review_ordinal'] = ordinals.get((row['ats'], row['id']))
+            summary = summaries.get((row['ats'], row['id']))
+            if summary:
+                row['review_summary'] = summary
         return {**result, 'recommendations': rows, 'review': self.job_reviews.publication_summary(list_id)}
 
     def curated_job(self, list_id: str, ats: str, job_id: str) -> Mapping[str, Any]:
@@ -943,6 +949,8 @@ SUBMISSION_PATH = re.compile(
 PROPOSAL_DECISION_PATH = re.compile(
     r"^/api/v1/proposals/([A-Za-z0-9._:-]+)/decision$"
 )
+MAIL_ANALYSIS_PATH = re.compile(r"^/api/v1/mail-analyses/([A-Za-z0-9._:-]+)$")
+MAIL_ANALYSIS_DECISIONS_PATH = re.compile(r"^/api/v1/mail-analyses/([A-Za-z0-9._:-]+)/decisions$")
 TEMPORAL_PROPOSAL_DECISION_PATH = re.compile(
     r"^/api/v1/temporal-proposals/([A-Za-z0-9._:-]+)/decision$"
 )
@@ -1299,6 +1307,9 @@ def make_handler(
                 if path == "/api/v1/job-reviews":
                     self._json(controller.job_reviews.call('list'), session=session, new_session=new_session)
                     return
+                if path == "/api/v1/job-reviews/brief":
+                    self._json(controller.job_reviews.call('brief'), session=session, new_session=new_session)
+                    return
                 if path.startswith("/api/v1/job-reviews/"):
                     rid = path[len("/api/v1/job-reviews/"):]
                     self._json(controller.job_reviews.call('status', {'review_id': rid}), session=session, new_session=new_session)
@@ -1500,6 +1511,22 @@ def make_handler(
                 if path == "/api/v1/attention":
                     self._json({"items": [*controller.ledger.list_attention_items(), *controller.ledger.lifecycle.list_lifecycle_reviews()]}, session=session, new_session=new_session)
                     return
+                if path == "/api/v1/mail-analyses":
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    if set(query) - {"history", "limit"} or any(len(v) != 1 for v in query.values()):
+                        raise ContractError("invalid mail analysis query")
+                    history = query.get("history", ["false"])[0]
+                    if history not in ("true", "false"):
+                        raise ContractError("history must be true or false")
+                    limit = controller._integer({"limit": query.get("limit", ["100"])[0]}, "limit", 100, 1, 100)
+                    self._json({"analyses": controller.ledger.mail_understanding.list_reviews(history=history == "true", limit=limit)}, session=session, new_session=new_session, exact_text=True)
+                    return
+                match = MAIL_ANALYSIS_PATH.fullmatch(path)
+                if match:
+                    if parsed_url.query:
+                        raise ContractError("mail analysis detail does not accept query parameters")
+                    self._json(controller.ledger.mail_understanding.get(match.group(1)), session=session, new_session=new_session, exact_text=True)
+                    return
                 if path == "/api/v1/interviews":
                     self._json(
                         {"applications": controller.ledger.list_applications(("interviewing", "offer"))},
@@ -1647,6 +1674,14 @@ def make_handler(
                     self._json(result, status=HTTPStatus.ACCEPTED, session=session, new_session=new_session)
                     return
                 body = self._read_json()
+                match = MAIL_ANALYSIS_DECISIONS_PATH.fullmatch(path)
+                if match:
+                    if set(body) != {"revision", "decisions"} or not isinstance(body["revision"], str) or not body["revision"] or not isinstance(body["decisions"], list):
+                        raise ContractError("mail decisions require revision and decisions")
+                    command_id = self._idempotency({}) if self.headers.get("Idempotency-Key") else "mail-review:" + payload_sha256({"analysis_id": match.group(1), **body})
+                    result = controller.ledger.mail_understanding.decide(match.group(1), body["revision"], body["decisions"], self._mutation_context(command_id, session, "dashboard_mail_review"))
+                    self._json(result, session=session, new_session=new_session, exact_text=True)
+                    return
                 if path.startswith("/api/v1/job-reviews/"):
                     action = path[len("/api/v1/job-reviews/"):]
                     self._json(controller.job_reviews.call(action, body), session=session, new_session=new_session)

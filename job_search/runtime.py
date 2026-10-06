@@ -125,6 +125,9 @@ class RuntimeConfigV1:
     inference_usage_limits: Mapping[str, Any] = field(default_factory=dict)
     remote_mail_inference_enabled: bool = False
     remote_mail_temporal_enabled: bool = True
+    mail_understanding_mode: str = "legacy"
+    mail_understanding_source_scope: Optional[str] = None
+    mail_understanding_evaluation_report: Optional[Path] = None
     portable_encryption_key_file: Optional[Path] = field(
         default=None, repr=False, compare=False
     )
@@ -360,6 +363,9 @@ class RuntimeConfigV1:
             mail_inference_profile=value.get("mail_inference_profile"),
             remote_mail_inference_enabled=remote_mail_inference,
             remote_mail_temporal_enabled=value.get("remote_mail_temporal_enabled", True),
+            mail_understanding_mode=value.get("mail_understanding_mode", "legacy"),
+            mail_understanding_source_scope=value.get("mail_understanding_source_scope"),
+            mail_understanding_evaluation_report=_path(value.get("mail_understanding_evaluation_report"), "mail_understanding_evaluation_report", root, optional=True),
             outlook_new_messages_only=value.get("outlook_new_messages_only", False),
             mail_recruiting_only=value.get("mail_recruiting_only", False),
             inference_usage_limits=value.get("inference_usage_limits", {}),
@@ -469,6 +475,12 @@ class RuntimeConfigV1:
             raise ValueError("broad_cpu ranking requires shortlist_policy broad")
         if self.ranking_refresh_mode == "sparse_cpu" and self.shortlist_policy not in {"broad", "selective", "compare"}:
             raise ValueError("sparse_cpu ranking requires shortlist_policy broad, selective, or compare")
+        if self.mail_understanding_mode not in {"legacy", "shadow", "shared", "paused"}:
+            raise ValueError("invalid mail_understanding_mode")
+        if self.mail_understanding_source_scope not in {None, "current", "thread", "thread_attachments"}:
+            raise ValueError("invalid mail_understanding_source_scope")
+        if self.mail_understanding_mode in {"shadow", "shared"} and self.mail_understanding_source_scope is None:
+            raise ValueError("shared mail requires explicit mail_understanding_source_scope")
         if not isinstance(self.remote_mail_temporal_enabled, bool):
             raise ValueError("remote_mail_temporal_enabled must be a boolean")
         if type(self.outlook_poll_interval_minutes) is not int or not 1 <= self.outlook_poll_interval_minutes <= 1440:
@@ -669,6 +681,7 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
         "mcp_token_file",
         "mail_classifier_config",
         "mail_inference_config",
+        "mail_understanding_evaluation_report",
         "briefing_inference_config",
         "interaction_token_file",
         "inference_config",
@@ -697,6 +710,7 @@ def override_runtime_config(config: RuntimeConfigV1, **values: Any) -> RuntimeCo
                     "board_registry_path",
                     "mail_classifier_config",
                     "mail_inference_config",
+        "mail_understanding_evaluation_report",
                     "briefing_inference_config",
                     "interaction_token_file",
                     "inference_config",
@@ -741,6 +755,8 @@ def _configured_mail_models(
 ) -> tuple[Any | None, Any | None, Any | None, str]:
     """Select local mail inference before considering explicitly allowed egress."""
 
+    if config.mail_understanding_mode in {"shared", "paused"}:
+        return None, None, None, "mail-understanding-v1"
     configured_classifier = str(
         config.mail_classifier_config
         or environment.get("JOB_SEARCH_MAIL_CLASSIFIER_CONFIG")
@@ -750,6 +766,10 @@ def _configured_mail_models(
         from .mail.model import load_classifier_config
 
         classifier_config = load_classifier_config(Path(configured_classifier))
+        if getattr(classifier_config, "version", 1) == 2:
+            if config.mail_understanding_mode != "shadow":
+                raise ValueError("version2 mail adapter requires shadow or shared mode")
+            return None, None, None, classifier_config.producer_version
         return (
             classifier_config.build(),
             classifier_config,
@@ -789,6 +809,8 @@ def _configured_remote_mail_profile(config: RuntimeConfigV1, environment: Mappin
             "remote mail inference requires structured_generation configuration"
         )
     required_output = TEMPORAL_MAX_OUTPUT_TOKENS if config.remote_mail_temporal_enabled else CLASSIFIER_MAX_OUTPUT_TOKENS
+    if config.mail_understanding_mode in {"shadow", "shared"}:
+        required_output = 8192
     if inference.structured_generation.default_max_output_tokens < required_output:
         raise ValueError(f"remote mail requires at least {required_output} configured output tokens")
     if inference.structured_generation.model == "numind/NuExtract3":
@@ -876,6 +898,8 @@ def _build_outlook_handlers(
                 temporal_extractor=temporal_extractor,
                 temporal_producer_version=model_version,
             )
+            from .mail.understanding_runtime import build_understanding_runtime
+            understanding = build_understanding_runtime(config, service, secure_ingestor.archive, environment) if config.mail_understanding_mode != "legacy" else None
             from .activation import mail_start
             start = mail_start(config.application_db, account_id) if config.outlook_new_messages_only else None
             coordinator = OutlookMailCoordinator(
@@ -887,6 +911,7 @@ def _build_outlook_handlers(
                 secure_ingestor=secure_ingestor,
                 received_since=start,
                 recruiting_only=config.mail_recruiting_only,
+                understanding=understanding,
             )
             from .lifecycle.runtime import MailReplayTaskHandler
             replay_handler = MailReplayTaskHandler(coordinator, service.lifecycle, account_id=account_id)
@@ -983,6 +1008,13 @@ def build_local_reminder_handler(
     )
 
 
+def _park_mail_understanding(payload, context):
+    # A CLI inference claim may be recovered after a crash. The generic worker
+    # cannot reconstruct its frozen source manifest or authorize a new request.
+    from .worker import PermanentTaskError
+    raise PermanentTaskError("shared mail requires checkpoint-aware history resume or inference reconciliation")
+
+
 def build_runtime(
     config: RuntimeConfigV1,
     *,
@@ -1073,6 +1105,7 @@ def build_runtime(
             }
         )
         handlers.update(_build_outlook_handlers(config, environment, now_provider=clock))
+        handlers["mail.understanding"] = _park_mail_understanding
     gateway = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )

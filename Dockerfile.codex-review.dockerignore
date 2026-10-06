@@ -7,5 +7,6 @@
 !job_search/job_reviews/reviewer_mcp.py
 !job_search/job_reviews/reviewer_api.py
 !job_search/job_reviews/context.py
+!job_search/job_reviews/brief.py
 !job_search/job_reviews/contracts.py
 !job_search/job_reviews/reviewer_rubric.md

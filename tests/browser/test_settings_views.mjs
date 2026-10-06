@@ -21,7 +21,11 @@ const state = { careerProfile:null, careerContent:null, careerDirty:false, caree
 const calls=[];
 const content={identity:{name:'Example Candidate',email:'candidate@example.test'},summary:'Infrastructure engineer',education:[],experience:[{company:'Example company',role:'Engineer',bullets:[{text:'Built reliable systems'}]}],projects:[],skills:[{category:'Languages',items:[{text:'Python'}]}]};
 let profile={configured:true,draft_revision_id:'revision-1',approved_revision_id:null,draft:{content}};
+let failBriefSave=false;
+let savedBrief={revision:2,brief:{broad_geography:'us',targeted_geography:'us',targeted_scope:'software_building',adjacent_roles:'broad_only',conditional_order:'technical_fit',stretch_policy:'Explain substantial experience gaps.',eligibility_facts:[],notes:['Hands-on software work']},saved_at:'2026-10-03T12:00:00Z'};
 async function api(url, options={}) { calls.push({url,options});
+ if(url==='/api/v1/job-reviews/brief')return savedBrief;
+ if(url==='/api/v1/job-reviews/save-brief'){if(failBriefSave)throw Error('Review preferences changed; reload the current revision.');savedBrief={revision:savedBrief.revision+1,brief:JSON.parse(options.body).brief,saved_at:'2026-10-04T12:00:00Z'};return savedBrief;}
  if(url==='/api/v1/settings')return {timezone:'America/Chicago',demo_mode:true};
  if(url==='/api/v1/browser/devices')return {devices:[{device_id:'browser-1',created_at:'2026-09-20T16:00:00Z'}]};
  if(url==='/api/v1/chief/preferences' && !options.method)return {revision:3,mode:'important_developments',timezone:'America/Chicago',morning_time:'07:00',evening_time:'19:00',enabled:true,overnight_enabled:true,quiet_hours_enabled:false,quiet_start:'22:00',quiet_end:'07:00',ai_enabled:true,ready_replies_enabled:true,final_nudge_enabled:true};
@@ -61,6 +65,32 @@ try {
  assert.equal(await page.locator('#settings-home .settings-group').count(),5);
  assert.equal(await page.locator('#settings-list').isVisible(),false);
  assert.equal(await page.locator('.settings-device').innerText().then(text=>text.includes('Browser connected')),true);
+ await page.evaluate(()=>loadSettingsPage('review-preferences'));
+ assert.equal(await page.getByLabel('Broad list geography').inputValue(),'us');
+ assert.equal(await page.getByLabel('Targeted list geography').inputValue(),'us');
+ assert.equal(await page.getByLabel('Adjacent career paths').inputValue(),'broad_only');
+ assert.equal(await page.getByLabel('Roles with eligibility questions').inputValue(),'technical_fit');
+ await page.getByLabel('How to consider stretches').fill('Consider senior scope when project evidence transfers.');
+ await page.getByLabel('Other preferences').fill('Build internal tools.\nPrefer product ownership.');
+ await page.getByRole('button',{name:'Save review preferences',exact:true}).click();
+ assert.match(await page.locator('#review-preferences-status').innerText(),/saved/);
+ const briefRequest=await page.evaluate(()=>JSON.parse(calls.find(c=>c.url==='/api/v1/job-reviews/save-brief').options.body));
+ assert.equal(briefRequest.expected_revision,2);
+ assert.deepEqual(briefRequest.brief.notes,['Build internal tools.','Prefer product ownership.']);
+ assert.deepEqual(briefRequest.brief.eligibility_facts,[]);
+ assert.equal(briefRequest.brief.conditional_order,'technical_fit');
+ await page.evaluate(()=>{failBriefSave=true;});
+ await page.getByLabel('Other preferences').fill('Keep these unsaved edits.');
+ await page.getByRole('button',{name:'Save review preferences',exact:true}).click();
+ assert.match(await page.locator('#review-preferences-status').innerText(),/not saved.*edits are still here/);
+ assert.equal(await page.getByLabel('Other preferences').inputValue(),'Keep these unsaved edits.');
+ await page.evaluate(async()=>{await loadSettingsPage('resumes');await loadSettingsPage('review-preferences');});
+ assert.equal(await page.getByLabel('Other preferences').inputValue(),'Keep these unsaved edits.');
+ await page.getByRole('button',{name:'Discard edits and reload',exact:true}).click();
+ await page.waitForFunction(()=>!reviewBriefDirty);
+ assert.equal(await page.getByLabel('Other preferences').inputValue(),'Build internal tools.\nPrefer product ownership.');
+ for(const width of [390,768,1280]) {await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'review preferences '+width);}
+ await page.screenshot({path:path.join(output,'review-preferences.png'),fullPage:true});
  await page.evaluate(()=>loadSettingsPage('stored-records'));
  assert.equal(await page.locator('#stored-records-list a').innerText(),'Systems Engineer');
  assert.equal(await page.locator('#stored-records-list a').getAttribute('href'),'#applications/earlier/overview');

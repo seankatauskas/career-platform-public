@@ -79,10 +79,13 @@ class BootstrapTests(unittest.TestCase):
             ("ecr", "describe-images"): "ecr:DescribeImages",
             ("s3api", "put-object"): "s3:PutObject",
             ("s3api", "get-object"): "s3:GetObject",
+            ("s3api", "list-objects-v2"): "s3:ListBucket",
             ("ssm", "send-command"): "ssm:SendCommand",
             ("ssm", "get-command-invocation"): "ssm:GetCommandInvocation",
         }
         calls = set(re.findall(r"\baws\s+(ecr|s3api|ssm)\s+([a-z-]+)", workflow))
+        coordinator = (ROOT / "job_search/release_coordinator.py").read_text()
+        calls.update(re.findall(r"self\.aws\('([^']+)', '([^']+)'", coordinator))
         self.assertTrue(calls)
         for call in calls:
             self.assertIn(call, mapping, "new AWS CLI operation needs an IAM contract")

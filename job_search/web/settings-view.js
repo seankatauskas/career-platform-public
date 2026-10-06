@@ -18,6 +18,7 @@ document.querySelector("#settings").innerHTML = `
       <section class="settings-group" aria-labelledby="saved-information-heading">
         <h3 id="saved-information-heading">Career profile and saved resumes</h3>
         <a class="settings-link-row" href="#settings/career-profile"><span><strong>Career profile</strong><span class="meta">Your saved experience, projects, skills, and contact details.</span></span><span aria-hidden="true">→</span></a>
+        <a class="settings-link-row" href="#settings/review-preferences"><span><strong>Codex review preferences</strong><span class="meta">Choose geography, career direction, and how stretches are considered.</span></span><span aria-hidden="true">→</span></a>
         <a class="settings-link-row" href="#settings/resumes"><span><strong>Saved resumes</strong><span class="meta">View and download existing resume documents.</span></span><span aria-hidden="true">→</span></a>
       </section>
       <section class="settings-group" aria-labelledby="operations-settings-heading">
@@ -37,6 +38,29 @@ document.querySelector("#settings").innerHTML = `
     <p id="saved-resumes-status" role="status"></p><div id="saved-resume-list" class="stack"></div>
   </div>
   <div id="settings-chief" hidden></div>
+  <div id="settings-review-preferences" hidden>
+    <div class="section-heading"><div><p class="kicker"><a href="#settings">← Settings</a></p><h2>Codex review preferences</h2></div><button id="reload-review-preferences" type="button" class="quiet">Reload saved preferences</button></div>
+    <p class="section-note">Your preferences guide new reviews. Reviews already in progress keep the preferences they started with.</p>
+    <p id="review-preferences-status" role="status" aria-live="polite"></p>
+    <form id="review-preferences-form" class="settings-group">
+      <fieldset id="review-preferences-fields" disabled>
+        <legend>What to consider</legend>
+        <div class="review-preference-fields">
+          <label>Broad list geography<select name="broad_geography"><option value="us">United States</option><option value="worldwide">Worldwide</option></select></label>
+          <label>Targeted list geography<select name="targeted_geography"><option value="us">United States</option><option value="worldwide">Worldwide</option></select></label>
+          <label>Targeted career direction<select name="targeted_scope"><option value="software_building">Building software</option><option value="all_technical">All technical work</option></select></label>
+          <label>Adjacent career paths<select name="adjacent_roles"><option value="broad_only">Explore in the broad list</option><option value="targeted">Consider for targeted recommendations</option><option value="exclude">Leave out of both lists</option></select></label>
+          <label>Roles with eligibility questions<select name="conditional_order"><option value="technical_fit">Keep ordered by technical fit</option><option value="after_actionable">Place after actionable applications</option></select></label>
+        </div>
+        <label>How to consider stretches<textarea name="stretch_policy" rows="3" maxlength="1000" required></textarea></label>
+        <label>Confirmed eligibility facts<textarea name="eligibility_facts" rows="3" aria-describedby="review-eligibility-help"></textarea></label>
+        <p class="help" id="review-eligibility-help">Optional. One fact per line, such as confirmed work authorization. Leave uncertain information out.</p>
+        <label>Other preferences<textarea name="notes" rows="3" aria-describedby="review-notes-help"></textarea></label>
+        <p class="help" id="review-notes-help">Optional. One preference per line. These notes stay with your private career information.</p>
+        <div class="actions"><button id="save-review-preferences" type="submit">Save review preferences</button></div>
+      </fieldset>
+    </form>
+  </div>
   <div id="settings-stored-records" hidden>
     <div class="section-heading"><div><p class="kicker"><a href="#settings">← Settings</a></p><h2>Earlier application drafts</h2></div></div>
     <p class="section-note">These saved records are kept for reference. Opening one does not start or submit an application.</p>
@@ -1001,8 +1025,8 @@ async function loadSettings() {
 
 function renderSettingsSubview(subpage = "") {
   subpage = subpage.split('?')[0];
-  const view = ["resumes", "stored-records", "chief"].includes(subpage) ? subpage : "home";
-  ["home", "resumes", "stored-records", "chief"].forEach((name) => { $(`#settings-${name}`).hidden = name !== view; });
+  const view = ["resumes", "stored-records", "chief", "review-preferences"].includes(subpage) ? subpage : "home";
+  ["home", "resumes", "stored-records", "chief", "review-preferences"].forEach((name) => { $(`#settings-${name}`).hidden = name !== view; });
   if (view === "stored-records") renderStoredRecords();
 }
 
@@ -1064,18 +1088,81 @@ async function loadSavedResumes() {
   } catch (error) { if (epoch === savedResumesEpoch) status.textContent = `Could not load saved resumes. ${error.message}`; }
 }
 async function loadResumeStandards() { return loadSavedResumes(); }
+let reviewBrief = null;
+let reviewBriefDirty = false;
+let reviewBriefEpoch = 0;
+const reviewBriefSelects = ["broad_geography", "targeted_geography", "targeted_scope", "adjacent_roles", "conditional_order"];
+
+function renderReviewBrief(result) {
+  reviewBrief = result;
+  const form = $("#review-preferences-form");
+  for (const name of [...reviewBriefSelects, "stretch_policy"]) form.elements.namedItem(name).value = result.brief[name];
+  for (const name of ["eligibility_facts", "notes"]) form.elements.namedItem(name).value = (result.brief[name] || []).join("\n");
+  reviewBriefDirty = false;
+  $("#reload-review-preferences").textContent = "Reload saved preferences";
+  $("#review-preferences-fields").disabled = false;
+}
+
+async function loadReviewBrief() {
+  if (reviewBriefDirty) return;
+  const epoch = ++reviewBriefEpoch;
+  const status = $("#review-preferences-status");
+  status.textContent = "Loading review preferences…";
+  $("#review-preferences-fields").disabled = true;
+  try {
+    const result = await api("/api/v1/job-reviews/brief");
+    if (epoch !== reviewBriefEpoch) return;
+    renderReviewBrief(result);
+    status.textContent = result.revision ? "Your saved preferences are ready for new reviews." : "These defaults have not been saved yet. Review them, then save your preferences.";
+  } catch (error) {
+    if (epoch === reviewBriefEpoch) status.textContent = `Could not load review preferences. ${error.message}`;
+  }
+}
+
+async function saveReviewBrief(event) {
+  event.preventDefault();
+  if (!reviewBrief) return;
+  const form = $("#review-preferences-form");
+  const brief = Object.fromEntries([...reviewBriefSelects, "stretch_policy"].map(name => [name, form.elements.namedItem(name).value.trim()]));
+  for (const name of ["eligibility_facts", "notes"]) brief[name] = form.elements.namedItem(name).value.split("\n").map(line => line.trim()).filter(Boolean);
+  const status = $("#review-preferences-status");
+  if ([brief.eligibility_facts, brief.notes].some(lines => lines.length > 20 || lines.some(line => line.length > 500))) {
+    status.textContent = "Use up to 20 lines per field, with no more than 500 characters on each line.";
+    return;
+  }
+  $("#review-preferences-fields").disabled = true;
+  status.textContent = "Saving review preferences…";
+  try {
+    const result = await api("/api/v1/job-reviews/save-brief", {method: "POST", body: JSON.stringify({
+      brief, expected_revision: reviewBrief.revision, idempotency_key: key("review-brief"),
+    })});
+    renderReviewBrief(result);
+    status.textContent = "Review preferences saved. They will apply to new reviews.";
+  } catch (error) {
+    status.textContent = `Preferences were not saved. Your edits are still here. ${error.message}`;
+  } finally { $("#review-preferences-fields").disabled = false; }
+}
+
 async function loadSettingsPage(subpage = "") {
   const [pageName, queryString] = subpage.split('?');
   const briefingId = new URLSearchParams(queryString || '').get('briefing');
   subpage = pageName;
   renderSettingsSubview(subpage);
   if (subpage === "chief") await loadChief(briefingId);
+  else if (subpage === "review-preferences") await loadReviewBrief();
   else if (subpage === "resumes") await loadSavedResumes();
   else if (subpage === "stored-records") { await loadApplications(); renderStoredRecords(); }
   else await loadSettings();
 }
 function initializeSettingsView() {
   initializeChief();
+  $("#review-preferences-form").addEventListener("submit", saveReviewBrief);
+  $("#reload-review-preferences").addEventListener("click", () => { reviewBriefDirty = false; loadReviewBrief(); });
+  $("#review-preferences-form").addEventListener("input", () => {
+    reviewBriefDirty = true;
+    $("#reload-review-preferences").textContent = "Discard edits and reload";
+    $("#review-preferences-status").textContent = "You have unsaved review preferences.";
+  });
   $("#browser-connect-code").addEventListener("click", async () => {
     const button = $("#browser-connect-code"); button.disabled = true;
     try {

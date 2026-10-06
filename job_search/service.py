@@ -54,6 +54,13 @@ class DeterministicJobSearchService:
             self._interactions = InteractionsService(self)
         return self._interactions
 
+    @property
+    def mail_understanding(self):
+        from .mail.understanding_store import MailUnderstandingService
+        if not hasattr(self, "_mail_understanding"):
+            self._mail_understanding = MailUnderstandingService(self)
+        return self._mail_understanding
+
     def request_career_reply(self, application_id: str, evidence_id: str, context: MutationContext):
         """Queue preparation without granting the caller permission to send mail."""
         from .contracts import canonical_json
@@ -181,9 +188,16 @@ class DeterministicJobSearchService:
         reason: str,
         context: MutationContext,
     ) -> Mapping[str, Any]:
-        return self.store.decide_temporal_proposal(
+        result = self.store.decide_temporal_proposal(
             temporal_proposal_id, decision, reason, context
         )
+        from .db import connect
+        from .mail.understanding_store import available
+        with connect(self.store.db_path) as con:
+            finding = con.execute("SELECT f.analysis_id FROM mail_understanding_projections p JOIN mail_understanding_findings f USING(finding_id) WHERE p.kind='temporal_proposal' AND p.target_id=?",(temporal_proposal_id,)).fetchone() if available(con) else None
+        if finding:
+            self.mail_understanding.project(finding['analysis_id'],MutationContext('temporal-projection:'+context.idempotency_key,'system','mail_understanding'))
+        return result
 
     def list_temporal_proposals(
         self, statuses: Optional[Sequence[str]] = None, *, limit: int = 200

@@ -43,13 +43,19 @@ preview does not require a push, AWS credentials, or a deployment.
 
 ## Prepare now, install when convenient
 
-1. Include the current `deploy/release-policy.json` in the reviewed change before
-   merging. Its predecessor must identify the last successfully installed release
-   and its source SHA. This is the release the candidate is tested against.
-2. After the change reaches the approved release branch, run **Prepare AWS release**
+Follow [coordinated releases](operations/coordinated-releases.md) for shared status,
+prerequisite setup, and the release-owner handoff.
+
+1. The release owner collects completed changes on `main` and checks shared
+   release status. Once per batch, propose and review `deploy/release-policy.json`
+   against the live installed predecessor; commit/merge it before preparation.
+   Feature sessions do not independently update this policy or dispatch releases.
+2. After the batch reaches `main`, run **Prepare AWS release**
    (`aws-release.yml`). It runs the tests, production
    container/browser checks and release-transition checks, then publishes immutable
-   images and a checksummed package. You can keep using the live app throughout.
+   images and a checksummed package. A matching candidate is reused without
+   rebuilding. The dispatch SHA is frozen; later merges wait for another batch.
+   You can keep using the live app throughout.
 3. Save the **prepared release receipt** from the workflow summary or artifact.
    It identifies the exact release ID, manifest SHA-256 and expected predecessor.
    A prepared receipt means the update is available, not installed.

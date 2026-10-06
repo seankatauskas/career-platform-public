@@ -16,7 +16,7 @@ PACKET_VERSION = 1
 MAX_PACKET_JOBS = 20
 MAX_PACKET_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 1024 * 1024
-_CONTEXT_META = ('rubric_version', 'profile_revision', 'resume_versions', 'fingerprint')
+_CONTEXT_META = ('rubric_version', 'profile_revision', 'resume_versions', 'fingerprint', 'search_brief', 'source_inventory')
 _CONTEXT_SECTIONS = ('facts', 'preferences', 'feedback')
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 
@@ -194,7 +194,7 @@ def import_assessments(service, packet, result):
         ordinal = integer(row['ordinal'], 'ordinal', 1)
         if ordinal not in jobs or ordinal in assessments:
             raise ContractError('foreign or duplicate result ordinal')
-        assessments[ordinal] = validate_assessment(row['assessment'], jobs[ordinal]['job'], facts)
+        assessments[ordinal] = validate_assessment(row['assessment'], jobs[ordinal]['job'], facts, packet['context'].get('rubric_version', 'job-review-v1'))
     if _context(service, packet['review_id']) != packet['context']:
         raise ContractError('review context changed since packet export')
     for ordinal, entry in jobs.items():

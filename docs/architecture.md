@@ -39,6 +39,13 @@ Migrations are ordered, checksummed, transactional, and never routed through
 - Classifiers receive sanitized text plus at most 20 candidate applications and return
   strict JSON. They have no tools, network, tokens, SQL, or mutation access.
 
+The optional shared mail architecture is [shared email understanding](mail-understanding-design.md):
+one model analysis supplies events, action requests, and temporal facts, with separate
+validation and review decisions. Receipt templates cannot short-circuit that analysis,
+and task consumers cannot independently reinterpret messages. The design includes
+contract versioning, projection ownership, evaluation, and rollout requirements;
+schema 20 supplies the runtime migration, with legacy mode as the upgrade default.
+
 ## Parallel ownership
 
 Task worktrees must start from the contract commit and stay within these boundaries:

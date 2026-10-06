@@ -15,6 +15,18 @@
 .ranking-details { margin-top: 12px; }
 #shortlist-list .shortlist-score { font-size: 12px; }
 #shortlist-list .curated-explanation { max-width: 70ch; line-height: 1.6; }
+.review-fit-labels { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 8px; font-size: 13px; line-height: 1.6; }
+.review-fit { color: var(--ink); }
+.review-condition { color: var(--accent); }
+.review-alternative { color: var(--secondary-ink); }
+.review-caveat { max-width: 70ch; margin: 8px 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.review-next-step, .review-availability, .review-related-marker { max-width: 70ch; overflow-wrap: anywhere; }
+.shortlist-related-group, .shortlist-alternatives { min-width: 0; border-top: 1px solid var(--line); }
+#shortlist-list .shortlist-related-group > h3, #shortlist-list .shortlist-alternatives > h3 { font-size: 15px; margin: 20px 20px 8px; }
+.shortlist-related-group > .help, .shortlist-alternatives > .help { margin: 0 20px 12px; }
+.shortlist-related-group .review-related-marker { display: none; }
+#shortlist-list > .shortlist-related-group:first-child, #shortlist-list > .shortlist-alternatives:first-child { border-top: 0; }
+#shortlist-list > .shortlist-related-group + .card, #shortlist-list > .shortlist-alternatives + .card { border-top: 1px solid var(--line); }
 .shortlist-company { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
 .shortlist-company-applied { color: var(--secondary-ink); font-size: 12px; font-weight: 400; line-height: 1.5; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
 .shortlist-company-applied:hover { color: var(--ink); text-decoration-color: currentColor; }

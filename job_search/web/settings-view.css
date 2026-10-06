@@ -20,6 +20,13 @@
 #settings .settings-resume-record, #settings .settings-stored-record { padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 #settings .settings-stored-record > a { font-weight: 600; }
 #settings .settings-stored-record p { margin: 8px 0 0; }
+#review-preferences-form { max-width: 900px; }
+#review-preferences-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+#review-preferences-fields legend { font-size: 16px; font-weight: 600; margin-bottom: 20px; }
+#review-preferences-fields label { display: grid; gap: 8px; margin-bottom: 20px; min-width: 0; }
+#review-preferences-fields select, #review-preferences-fields textarea { width: 100%; max-width: 100%; min-width: 0; }
+#review-preferences-fields .help { margin-top: -12px; margin-bottom: 20px; }
+.review-preference-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 0 20px; }
 #career .career-summary-section { padding: 24px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 #career .career-saved-summary { overflow-wrap: anywhere; }
 #career .career-background { white-space: pre-wrap; }

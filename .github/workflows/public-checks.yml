@@ -25,6 +25,19 @@ jobs:
       - run: npx --prefix extension playwright-core install --with-deps chromium
       - name: Check services, demo, browser behavior and recovery
         run: uv run --python 3.12 --with cryptography --with pypdf --with reportlab python scripts/check-system.py --browser --output .cache/system-checks.json
+      - name: Export the source that the daily publisher will validate
+        if: github.repository == 'seankatauskas/career-platform'
+        run: python3 scripts/prepare-public-showcase.py --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/public-export"
+      - name: Check the public export before publication
+        if: github.repository == 'seankatauskas/career-platform'
+        working-directory: ${{ runner.temp }}/public-export
+        run: |
+          set -euo pipefail
+          git init --initial-branch=main
+          git add --force --all
+          git -c user.name=validation -c user.email=validation@example.test commit --quiet -m 'Validate exported source'
+          npm ci --prefix extension
+          uv run --python 3.12 --with cryptography --with pypdf --with reportlab python scripts/check-system.py --browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -32,3 +45,4 @@ jobs:
           path: |
             .cache/system-checks.json
             .cache/console-browser/results.json
+            ${{ runner.temp }}/public-export/.cache/system-checks.json

@@ -42,6 +42,8 @@ jobs:
           docker build --platform linux/amd64 --file Dockerfile.codex-review --tag career-platform:reviewer-ci .
           reviewer_id=$(docker image inspect career-platform:reviewer-ci --format '{{.Id}}')
           python -m tests.probe_codex_review_container --image "$reviewer_id"
+          python -m tests.probe_codex_review_container --image "$reviewer_id" --screening
+          python -m tests.probe_codex_review_container --image "$reviewer_id" --adjudicator
           python scripts/prepare-acceptance-toolchain.py --output .cache/acceptance-toolchain
           python scripts/compose-acceptance.py --image career-platform:ci --toolchain-dir .cache/acceptance-toolchain --output .cache/compose-acceptance --require-linux-host
           python scripts/release-transition-acceptance.py --candidate-image career-platform:ci

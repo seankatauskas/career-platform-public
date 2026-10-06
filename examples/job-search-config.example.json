@@ -26,6 +26,9 @@
   ],
   "scraper_contact": "",
   "mail_classifier_config": null,
+  "mail_understanding_mode": "legacy",
+  "mail_understanding_source_scope": null,
+  "mail_understanding_evaluation_report": null,
   "inference_config": null,
   "inference_usage_limits": {
     "daily_requests": null,

@@ -145,6 +145,7 @@ class OutlookMailCoordinator:
         secure_ingestor: Any | None = None,
         received_since: str | None = None,
         recruiting_only: bool = False,
+        understanding: Any | None = None,
     ) -> None:
         self.mail = mail
         self.state = state
@@ -155,6 +156,7 @@ class OutlookMailCoordinator:
         self.secure_ingestor = secure_ingestor
         self.received_since = received_since
         self.recruiting_only = recruiting_only
+        self.understanding = understanding
         self._sent_folders = {}
         if received_since:
             from .contracts import parse_utc
@@ -427,6 +429,10 @@ class OutlookMailCoordinator:
                         if address:
                             recipients.append(str(address)[:512])
                 archive_id = None
+                understanding_service = getattr(self.service, "mail_understanding", None)
+                shared_owned = bool(understanding_service and understanding_service.owns_message(identity[0], identity[2]))
+                understanding_mode = self.understanding.mode if self.understanding else "legacy"
+                ingestion_coverage = ()
                 candidates, candidate_context_complete = self._candidates(
                     subject, content, content_type, received_at, sender=sender,
                     account_id=identity[0], conversation_id=str(payload.get("conversationId") or staged["conversation_id"] or ""),
@@ -450,9 +456,11 @@ class OutlookMailCoordinator:
                         received_at=received_at,
                         candidates=temporal_candidates,
                         has_attachments=bool(payload.get("hasAttachments", False)),
-                        analyze_temporal=recruiting and direction == 'inbound' and not historical and bool(temporal_candidates),
+                        analyze_temporal=recruiting and direction == 'inbound' and not historical and bool(temporal_candidates) and understanding_mode in {'legacy','shadow'} and not shared_owned,
+                        **({'report_coverage': True} if understanding_mode in {'shared','shadow','paused'} else {}),
                     )
                     archive_id = getattr(ingested, 'archive_id', None)
+                    ingestion_coverage = getattr(ingested, 'coverage', ())
                 if not recruiting:
                     mark(
                         *identity, "ignored", query_version=query_version
@@ -493,6 +501,8 @@ class OutlookMailCoordinator:
                     ),
                 )
                 evidence_id = str(evidence_result["evidence"]["evidence_id"])
+                if understanding_service and understanding_mode in {"shared", "paused"} and direction == "inbound" and not historical:
+                    understanding_service.own_evidence(evidence_id, MutationContext("understanding-owner:" + evidence_id, "system", "outlook_sync"))
                 if candidates is None:
                     candidates, candidate_context_complete = self._candidates(
                         subject, content, content_type, received_at, sender=sender,
@@ -520,6 +530,34 @@ class OutlookMailCoordinator:
                     mark(*identity, 'processed', query_version=query_version)
                     processed += 1
                     continue
+                # Shared ownership survives mode changes: legacy interpretation cannot
+                # recreate tasks or temporal proposals for an already migrated message.
+                if understanding_mode == 'paused':
+                    continue
+                if shared_owned and understanding_mode != 'shared':
+                    mark(*identity, 'processed', query_version=query_version)
+                    processed += 1
+                    continue
+                if self.understanding is not None and understanding_mode in {'shadow','shared'}:
+                    try:
+                        understood = self.understanding.process(
+                            {**observed, 'account_id': identity[0], 'immutable_message_id': identity[2]},
+                            subject=subject, body=content, body_kind=content_type,
+                            candidates=candidates, candidate_context_complete=candidate_context_complete,
+                            coverage=ingestion_coverage, heartbeat=heartbeat,
+                            replay_id='legacy-replay' if historical else None,
+                        )
+                    except Exception:
+                        if understanding_mode == 'shared':
+                            raise
+                        # Shadow failures remain diagnostic and cannot change legacy effects.
+                        understood = {'state': 'shadow_failed'}
+                    if understanding_mode == 'shared':
+                        if understood.get('state') in {'busy','paused'}:
+                            continue
+                        mark(*identity, 'processed', query_version=query_version)
+                        processed += 1
+                        continue
                 proposal = analyze_mail(
                     evidence_id=evidence_id,
                     sender_address=sender,

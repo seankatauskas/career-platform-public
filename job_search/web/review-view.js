@@ -7,6 +7,13 @@ document.querySelector("#attention").innerHTML = `
   <p id="review-feedback" class="notice" role="status" hidden></p>
   <p id="review-summary" class="meta" aria-live="polite"></p>
   <div id="attention-list" class="stack empty">Loading review items…</div>
+  <details id="mail-review-history" class="review-history">
+    <summary>Email review history</summary>
+    <p class="help">Historical reprocessing and earlier email decisions are kept here, separate from current requests.</p>
+    <button class="quiet" id="refresh-mail-history" type="button">Load email history</button>
+    <p id="mail-history-feedback" class="notice" role="status" hidden></p>
+    <div id="mail-history-list" class="stack"></div>
+  </details>
   <details id="review-history" class="review-history">
     <summary>Action history</summary>
     <p class="help">Previously reviewed drafts and calendar holds.</p>
@@ -16,6 +23,7 @@ document.querySelector("#attention").innerHTML = `
 
 function actionNeedsReview(action) { return action.status === "pending" || action.status === "needs_reconciliation"; }
 function reviewTitle(item) {
+  if (item.kind === "mail_analysis") return item.analysis?.subject || "Email findings";
   if (item.kind === "lifecycle_correction") return "Proposed application update";
   if (item.kind === "interview_revision") return "Interview change";
   if (item.kind === "mail_discovery") return "Untracked recruiting conversation";
@@ -29,7 +37,10 @@ function reviewStatus(item) {
   return item.status === "needs_reconciliation" ? "Check outcome" : item.kind === "outlook_reply_draft" || item.kind === "outlook_calendar_hold" ? "Needs approval" : "Needs review";
 }
 function getReviewItems() {
-  const rows = [...consoleState.reviews.filter(item => item.kind !== "action_proposal" && [undefined, "review", "pending", "conflict", "failed"].includes(item.status)), ...consoleState.actions.filter(actionNeedsReview)];
+  const groups = consoleState.reviews.filter(item => item.kind === "mail_analysis" && item.analysis?.mode === "shared" && !item.analysis?.replay_id && item.analysis?.current !== false);
+  const groupedProposals = new Set(groups.flatMap(item => (item.analysis.findings || []).filter(f => f.projection).map(f => `${f.projection.kind}:${f.projection.id}`)));
+  const rows = [...consoleState.reviews.filter(item => item.kind !== "action_proposal" && [undefined, "review", "pending", "conflict", "failed"].includes(item.status)
+    && (item.kind !== "mail_analysis" || groups.includes(item)) && !groupedProposals.has(`${item.kind}:${item.id}`)), ...consoleState.actions.filter(actionNeedsReview)];
   const unique = new Map();
   for (const raw of rows) {
     const id = raw.action_id || raw.id;
@@ -130,6 +141,7 @@ function renderReviewQueue() {
       focused.scrollIntoView({block: "center", behavior: "instant"});
     });
   }
+  if (!focused && consoleState.view === "review" && route[1] === "mail_analysis" && route[2]) loadMailReviewRoute(route[2]);
 }
 let reviewAttentionEpoch = 0;
 let reviewActionsEpoch = 0;
@@ -223,8 +235,181 @@ async function decideTemporalProposal(item, decision, button) {
   }
 }
 
+const MAIL_EVENT_LABELS = {
+  submission_confirmed: "Application confirmation", recruiter_contact: "Recruiter response",
+  assessment_requested: "Assessment requested", assessment_completed: "Assessment completed",
+  interview_requested: "Interview invitation", interview_scheduled: "Interview confirmed",
+  interview_completed: "Interview completed", offer_received: "Offer received", offer_accepted: "Offer accepted",
+  rejection_received: "Rejection received", withdrawn: "Application withdrawn",
+};
+const MAIL_ACTION_LABELS = {reply: "Reply", send_availability: "Share availability", complete_assessment: "Complete assessment", offer_decision: "Decide on offer", other: "Other request"};
+function mailFindingLabel(finding) {
+  const value = finding.value || {};
+  if (finding.type === "event") return MAIL_EVENT_LABELS[value.event_type] || "Application update";
+  if (finding.type === "action") return value.description || MAIL_ACTION_LABELS[value.kind] || "Requested action";
+  if (finding.type === "temporal") return value.wording || (value.kind === "interview" ? "Interview time" : "Deadline");
+  return value.description || "This email needs clarification";
+}
+function mailChoice(label, choices, value = "") {
+  const select = node("select"); select.setAttribute("aria-label", label);
+  for (const [id, title] of choices) { const option = node("option", "", title); option.value = id; select.append(option); }
+  select.value = value;
+  return select;
+}
+function mailCorrection(finding) {
+  const value = finding.value;
+  const root = node("details"); root.append(node("summary", "", "Correct this finding"));
+  root.append(node("p", "help", "Corrections keep the original finding and its supporting quotes in history. Choose Accept to save the correction."));
+  const inputs = new Map();
+  function field(name, label, choices) {
+    const wrapper = node("label", "form-field", label);
+    const input = choices ? mailChoice(label, choices, value[name] || "") : node("input");
+    if (!choices) { input.type = "text"; input.value = value[name] || ""; input.maxLength = 512; input.setAttribute("aria-label", label); }
+    wrapper.append(input); root.append(wrapper); inputs.set(name, input);
+  }
+  if (finding.type === "event") field("event_type", "Corrected application update", Object.entries(MAIL_EVENT_LABELS));
+  if (finding.type === "action") {
+    field("kind", "Corrected action", Object.entries(MAIL_ACTION_LABELS).filter(([id]) => id !== "other" || value.kind === "other"));
+    if (value.kind === "other") field("task_kind", "Task for this request", [["", "Choose a task…"], ["follow_up", "Book or follow up"], ["send_document", "Send a document"]]);
+    field("description", "Requested action");
+    field("actor", "Who must act", [["applicant", "You"], ["employer", "Employer"], ["unknown", "Unclear"]]);
+    field("obligation", "Request requirement", [["required", "Required"], ["optional", "Optional"], ["unclear", "Unclear"]]);
+    field("channel", "Action channel", [["email", "Email"], ["portal", "Employer portal"], ["other", "Other"], ["unknown", "Unclear"]]);
+  }
+  if (finding.type === "temporal") {
+    field("kind", "Time or deadline", [["interview", "Interview time"], ["deadline", "Deadline"]]);
+    field("wording", "Date wording");
+    field("starts_at", "Starts at (ISO date and time)"); field("ends_at", "Ends at (ISO date and time)");
+    field("due_at", "Due at (ISO date and time)"); field("time_zone", "Time zone");
+  }
+  return {root, replacement() {
+    if (!root.open) return null;
+    const updated = {...value};
+    for (const [name, input] of inputs) updated[name] = input.value || (["starts_at", "ends_at", "due_at", "time_zone"].includes(name) ? null : "");
+    if (updated.kind !== "other") delete updated.task_kind;
+    return JSON.stringify(updated) === JSON.stringify(value) ? null : updated;
+  }};
+}
+function mailAnalysisItem(analysis, historical = false) {
+  const row = node("article", "stack-item mail-analysis");
+  row.dataset.analysisId = analysis.analysis_id;
+  const detail = node("div", "stack");
+  detail.append(node("h3", "", analysis.subject || "Email findings"));
+  detail.append(meta([historical ? "Email review history" : "Needs review", displayDate(analysis.created_at)]));
+  const permalink = node("a", "review-context-link", "Open this email review");
+  permalink.href = `#review/mail_analysis/${encodeURIComponent(analysis.analysis_id)}${historical ? "?history=true" : ""}`;
+  detail.append(permalink);
+  if (analysis.replay_id || analysis.mode === "replay") detail.append(node("p", "help", "Historical reprocessing. These findings do not appear in regular briefings."));
+  if (analysis.current === false) detail.append(node("p", "help", "A newer analysis replaced this review. Its earlier findings remain here for reference."));
+  detail.append(node("p", "help", "Choose each finding separately. Saving a request records the task; sending email and changing calendars have their own approvals."));
+  for (const gap of analysis.coverage || []) detail.append(node("p", "notice", "Coverage: " + (gap.reason || "Some source material was not available").replaceAll("_", " ")));
+  const controls = [];
+  for (const finding of analysis.findings || []) {
+    const block = node("fieldset", "mail-finding"); block.dataset.findingId = finding.finding_id;
+    block.append(node("legend", "", mailFindingLabel(finding)));
+    const value = finding.value || {};
+    if (finding.type === "action") block.append(meta([MAIL_ACTION_LABELS[value.kind], value.obligation === "required" ? "Required request" : value.obligation === "optional" ? "Optional request" : "Requirement unclear", value.channel && value.channel.replaceAll("_", " ")]));
+    if (finding.type === "temporal") block.append(meta([value.starts_at && "Starts " + displayDate(value.starts_at), value.ends_at && "Ends " + displayDate(value.ends_at), value.due_at && "Due " + displayDate(value.due_at), value.time_zone || "Time zone not confirmed"]));
+    for (const evidence of value.evidence || []) {
+      const quote = node("blockquote", "message-body", evidence.quote);
+      quote.append(node("cite", "meta", "Source: " + evidence.source_id)); block.append(quote);
+    }
+    if (finding.replacement_of) block.append(node("p", "meta", "Reviewed correction of an earlier finding."));
+    if (!["pending", "held"].includes(finding.status) || analysis.current === false) {
+      block.append(node("p", "phase", ({accepted: "Accepted", rejected: "Rejected"})[finding.status] || finding.status));
+      detail.append(block); continue;
+    }
+    const options = [["", "Leave for later"]];
+    if (finding.type !== "uncertainty") options.push(["accepted", "Accept"]);
+    options.push(["rejected", finding.type === "uncertainty" ? "Dismiss" : "Reject"]);
+    const choice = mailChoice("Decision for " + mailFindingLabel(finding), options);
+    const appChoices = [["", "Choose an application…"], ...(analysis.candidate_application_ids || []).map(id => {
+      const app = state.applications.find(item => item.application_id === id);
+      return [id, app ? `${app.employer_snapshot} · ${app.title_snapshot}` : id];
+    })];
+    if (value.application_id && !appChoices.some(([id]) => id === value.application_id)) appChoices.push([value.application_id, value.application_id]);
+    const application = mailChoice("Application for " + mailFindingLabel(finding), appChoices, value.application_id || "");
+    block.append(choice);
+    if (finding.type !== "uncertainty") block.append(application);
+    const correction = finding.type !== "uncertainty" ? mailCorrection(finding) : null;
+    if (correction) block.append(correction.root);
+    const reason = node("input"); reason.type = "text"; reason.maxLength = 512; reason.placeholder = "Optional explanation"; reason.setAttribute("aria-label", "Reason for " + mailFindingLabel(finding)); block.append(reason);
+    controls.push({finding, choice, application, correction, reason}); detail.append(block);
+  }
+  const feedback = node("p", "notice"); feedback.hidden = true; feedback.setAttribute("role", "status");
+  const save = node("button", "", "Save selected decisions"); save.type = "button"; save.disabled = true;
+  function updateSave() {
+    save.disabled = !controls.some(c => c.choice.value) || controls.some(c => {
+      if (c.choice.value !== "accepted") return false;
+      const value = c.correction?.replacement() || c.finding.value;
+      return !c.application.value || (c.finding.type === "action" && value.kind === "other" && !value.task_kind);
+    });
+  }
+  for (const c of controls) for (const input of [c.choice, c.application, ...(c.correction?.root.querySelectorAll("input,select") || [])]) input.addEventListener("change", updateSave);
+  for (const c of controls) c.correction?.root.addEventListener("toggle", updateSave);
+  save.addEventListener("click", async () => {
+    const decisions = controls.filter(c => c.choice.value).map(c => {
+      const decision = {finding_id: c.finding.finding_id, decision: c.choice.value, application_id: c.application.value || null, reason: c.reason.value || "Reviewed in dashboard"};
+      const replacement = c.choice.value === "accepted" ? c.correction?.replacement() : null;
+      if (replacement) decision.replacement = {...replacement, application_id: c.application.value || null};
+      return decision;
+    });
+    if (!decisions.length) return;
+    save.disabled = true; feedback.hidden = true;
+    try {
+      const updated = await api(`/api/v1/mail-analyses/${encodeURIComponent(analysis.analysis_id)}/decisions`, {method: "POST", headers: {"Idempotency-Key": key("mail-review")}, body: JSON.stringify({revision: analysis.revision, decisions})});
+      row.replaceWith(mailAnalysisItem(updated, historical));
+      await Promise.all([loadReviewQueue(), loadApplications()]);
+      if (historical) await loadMailReviewHistory();
+    } catch (error) {
+      feedback.textContent = error.status === 409 ? "This email review changed. Refresh it before choosing decisions again; no decisions from this batch were saved." : error.message;
+      feedback.hidden = false;
+      if (error.status === 409) {
+        const refresh = node("button", "quiet", "Refresh this email review"); refresh.type = "button";
+        refresh.addEventListener("click", async () => { try { const updated = await api(`/api/v1/mail-analyses/${encodeURIComponent(analysis.analysis_id)}`); row.replaceWith(mailAnalysisItem(updated, historical)); } catch (failure) { feedback.textContent = failure.message; } });
+        feedback.append(refresh);
+      } else updateSave();
+    }
+  });
+  if (controls.length) detail.append(save);
+  detail.append(feedback); row.append(detail); return row;
+}
+let mailHistoryEpoch = 0;
+let mailDetailRoute = "";
+async function loadMailReviewRoute(encodedId) {
+  const route = location.hash;
+  if (mailDetailRoute === route) return;
+  mailDetailRoute = route;
+  try {
+    const analysis = await api(`/api/v1/mail-analyses/${encodedId}`);
+    if (location.hash !== route) return;
+    const historical = !!analysis.replay_id || analysis.mode !== "shared" || new URLSearchParams(route.split("?")[1] || "").get("history") === "true";
+    const list = historical ? $("#mail-history-list") : $("#attention-list");
+    if (historical) $("#mail-review-history").open = true;
+    const row = mailAnalysisItem(analysis, historical); row.tabIndex = -1; row.classList.add("review-selected");
+    list.prepend(row); row.focus({preventScroll: true}); row.scrollIntoView({block: "center", behavior: "instant"});
+  } catch (error) {
+    const feedback = $("#review-feedback"); feedback.textContent = error.message; feedback.hidden = false; mailDetailRoute = "";
+  }
+}
+async function loadMailReviewHistory() {
+  const epoch = ++mailHistoryEpoch, button = $("#refresh-mail-history"), feedback = $("#mail-history-feedback");
+  button.disabled = true; feedback.hidden = true;
+  try {
+    const result = await api("/api/v1/mail-analyses?history=true&limit=100");
+    if (epoch !== mailHistoryEpoch) return;
+    const list = $("#mail-history-list"); clear(list);
+    for (const analysis of result.analyses || []) list.append(mailAnalysisItem(analysis, true));
+    if (!(result.analyses || []).length) list.append(node("p", "empty", "No email review history."));
+    if ((result.analyses || []).length === 100) list.prepend(node("p", "help", "Showing the latest 100 email reviews."));
+  } catch (error) { if (epoch === mailHistoryEpoch) { feedback.textContent = error.message; feedback.hidden = false; } }
+  finally { if (epoch === mailHistoryEpoch) button.disabled = false; }
+}
+document.querySelector("#refresh-mail-history").addEventListener("click", loadMailReviewHistory);
+
 function reviewItem(normalized) {
     const item = normalized.raw;
+    if (item.kind === "mail_analysis") return mailAnalysisItem(item.analysis);
     const row = node("article", "stack-item");
     const detail = node("div");
     detail.append(node("h3", "", normalized.title));

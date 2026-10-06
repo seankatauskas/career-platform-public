@@ -51,6 +51,12 @@ class ExtractedAttachment:
     truncated: bool
 
 
+@dataclass(frozen=True)
+class AttachmentAcquisitionReport:
+    extracted: tuple[ExtractedAttachment, ...]
+    coverage: tuple[Mapping[str, str], ...]
+
+
 def validate_attachment_descriptor(value: Mapping[str, Any]) -> AttachmentDescriptor:
     if not isinstance(value, Mapping):
         raise AttachmentRejected("attachment descriptor must be an object")
@@ -248,3 +254,46 @@ class SecureAttachmentPipeline:
                 raise AttachmentRejected("Graph attachment body was not decoded")
             results.append(self._extractor.extract(descriptor, content))
         return tuple(results)
+
+    def acquire_report(self, immutable_message_id: str) -> AttachmentAcquisitionReport:
+        """Acquire supported sources while retaining bounded missing-source facts.
+
+        The legacy acquire method retains its original fail-fast behavior. Shared
+        ingestion uses this report so an unreadable file does not erase all other
+        evidence or silently look like a message without attachments.
+        """
+        from job_search.contracts import payload_sha256
+
+        def identity(value):
+            return "attachment-source:" + payload_sha256({"message": immutable_message_id, "attachment": str(value)[:2048]})
+
+        try:
+            raw = self._mail.list_attachments(immutable_message_id, limit=MAX_ATTACHMENT_COUNT)
+        except Exception:
+            return AttachmentAcquisitionReport((), ({"source_id": identity("listing"), "reason": "attachment_listing_unavailable"},))
+        results, coverage = [], []
+        if len(raw) >= MAX_ATTACHMENT_COUNT:
+            coverage.append({"source_id": identity("listing"), "reason": "attachment_listing_may_be_incomplete"})
+        for index, item in enumerate(raw[:MAX_ATTACHMENT_COUNT]):
+            source_id = identity(item.get("id", index) if isinstance(item, Mapping) else index)
+            try:
+                descriptor = validate_attachment_descriptor(item)
+            except AttachmentRejected:
+                coverage.append({"source_id": source_id, "reason": "attachment_unsupported"})
+                continue
+            try:
+                payload = self._mail.read_file_attachment(immutable_message_id, descriptor.attachment_id)
+                returned = validate_attachment_descriptor(payload)
+                if returned != descriptor:
+                    raise AttachmentRejected("downloaded attachment metadata changed")
+                content = payload.get("contentBytes")
+                if not isinstance(content, bytes):
+                    raise AttachmentRejected("Graph attachment body was not decoded")
+                extracted = self._extractor.extract(descriptor, content)
+            except Exception:
+                coverage.append({"source_id": source_id, "reason": "attachment_acquisition_failed"})
+                continue
+            results.append(extracted)
+            if extracted.truncated:
+                coverage.append({"source_id": source_id, "reason": "attachment_extraction_truncated"})
+        return AttachmentAcquisitionReport(tuple(results), tuple(coverage))

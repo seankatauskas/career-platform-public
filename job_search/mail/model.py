@@ -32,10 +32,25 @@ class LocalClassifierConfig:
     command: tuple[str, ...]
     allowed_read_paths: tuple[Path, ...]
     timeout_seconds: float
+    version: int = 1
 
     def build(self) -> "LocalCommandClassifier":
+        if self.version != 1:
+            raise ContractError("version 2 mail config requires the shared understanding adapter")
         return LocalCommandClassifier(
             self.command,
+            allowed_read_paths=self.allowed_read_paths,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    def build_understanding(self):
+        if self.version != 2:
+            raise ContractError("shared mail understanding requires local config version 2")
+        from .understanding_adapters import LocalMailUnderstandingAnalyzer
+
+        return LocalMailUnderstandingAnalyzer(
+            self.command,
+            producer_version=self.producer_version,
             allowed_read_paths=self.allowed_read_paths,
             timeout_seconds=self.timeout_seconds,
         )
@@ -55,9 +70,9 @@ def load_classifier_config(path: Path) -> LocalClassifierConfig:
         raise ContractError("mail classifier config must be an object")
     allowed = {"version", "producer_version", "command", "allowed_read_paths", "timeout_seconds"}
     if set(raw) != allowed:
-        raise ContractError("mail classifier config fields do not match version 1")
-    if raw.get("version") != CLASSIFIER_CONFIG_VERSION:
-        raise ContractError("mail classifier config version must be 1")
+        raise ContractError("mail classifier config fields do not match the supported schema")
+    if type(raw.get("version")) is not int or raw["version"] not in {CLASSIFIER_CONFIG_VERSION, 2}:
+        raise ContractError("mail classifier config version must be 1 or 2")
     producer_version = raw.get("producer_version")
     validate_identifier(producer_version, "producer_version")
     command = raw.get("command")
@@ -89,6 +104,7 @@ def load_classifier_config(path: Path) -> LocalClassifierConfig:
         tuple(command),
         tuple(normalized_paths),
         timeout_value,
+        raw["version"],
     )
 
 

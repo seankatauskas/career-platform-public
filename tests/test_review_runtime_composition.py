@@ -1,5 +1,7 @@
 """Real coordinator/authority/socket composition; Docker and account auth are fake."""
 import copy
+from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -13,6 +15,7 @@ from unittest.mock import Mock, patch
 from job_search.contracts import ContractError, payload_sha256
 from job_search.job_reviews.authority import ReviewAuthority
 from job_search.job_reviews.reviewer_api import ReviewerClient
+from job_search.job_reviews.codex_runtime import preload_evidence
 from job_search.job_reviews.runner import ProductionRuntime, ReviewCoordinator
 from job_search.job_reviews.runner_config import RunnerConfig
 from tests import test_agent_job_reviews as fixtures
@@ -67,6 +70,7 @@ class RuntimeCompositionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='rc-', dir='/tmp')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.fixture.service.availability_checker = lambda jobs: [dict(ats=j['ats'], job_id=j['id'], status='unknown', checked_at=self.fixture.now, source='', reason='offline fixture') for j in jobs]
         self.authority = ReviewAuthority(self.fixture.service)
         self.config = RunnerConfig(application_config=self.root / 'app.json',
             state_dir=self.root / 's', runtime_dir=self.root / 'r', auth_home=self.root / 'auth',
@@ -94,6 +98,69 @@ class RuntimeCompositionTests(unittest.TestCase):
             self.assertNotIn(grant['token'], journal)
         self.assertNotIn('Python APIs', journal)
 
+    def test_worker_api_telemetry_aggregates_only_fixed_numeric_fields(self):
+        from job_search.job_reviews.reviewer_api import assignment_proxy
+        from job_search.job_reviews.model_gateway import gateway_server, RESPONSE_REJECTION_COUNTERS
+        current = self.authority.start({'mode': 'custom', 'window_start': '2026-10-01T00:00:00Z',
+                                        'idempotency_key': 'telemetry-test'})
+        runtime_id = 'worker_' + '7' * 32
+        grant = self.authority.issue(current['review_id'], [1], 'primary', {
+            'runtime_id': runtime_id, 'model': self.config.model,
+            'reasoning_effort': self.config.reasoning_effort})
+
+        @contextmanager
+        def observed_api(*args, **kwargs):
+            callback = kwargs['telemetry_callback']
+            with assignment_proxy(*args, **kwargs) as server:
+                callback({'operation': 'context', 'elapsed_seconds': .25, 'response_bytes': 10,
+                          'status': 200, 'body': 'PRIVATE_BODY', 'headers': 'PRIVATE_HEADERS'})
+                callback({'operation': 'context', 'elapsed_seconds': .5, 'response_bytes': 20, 'status': 400})
+                callback({'operation': 'order', 'elapsed_seconds': .125, 'response_bytes': 40, 'status': 200})
+                callback({'operation': 'PRIVATE_ROUTE', 'elapsed_seconds': 1, 'response_bytes': 30,
+                          'error': 'PRIVATE_ERROR'})
+                yield server
+
+        @contextmanager
+        def observed_model(*args, **kwargs):
+            with gateway_server(*args, **kwargs) as server:
+                kwargs['telemetry_callback']({'request_started_count': 2,
+                    'gateway_request_rejected_count': 1, 'gateway_response_rejected_count': 1,
+                    'upstream_transport_failed_count': 1, 'authentication_failed_count': 1,
+                    'gateway_busy_count': 1, 'PRIVATE_untrusted_count': 1,
+                    'gateway_response_rejected_PRIVATE_count': 1,
+                    **{key: 1 for key in RESPONSE_REJECTION_COUNTERS}})
+                for invalid in (-1, True, '1', float('nan'), float('inf')):
+                    kwargs['telemetry_callback']({'request_started_count': invalid,
+                                                  'gateway_busy_count': invalid,
+                                                  **{key: invalid for key in RESPONSE_REJECTION_COUNTERS}})
+                kwargs['telemetry_callback']({'request_count': 1, 'upstream_duration_ms': 40,
+                                              'input_tokens': 20, 'upstream_status': 200, 'text': 'PRIVATE_MODEL_TEXT'})
+                for status in (429, 500, 404, 99, 600, True, '429'):
+                    kwargs['telemetry_callback']({'upstream_status': status, 'error': 'PRIVATE_ERROR'})
+                yield server
+
+        def launch(config, assignment, *_args, **_kwargs):
+            worker = ThreadWorker(assignment, config.image)
+            worker.code = 0
+            return worker
+
+        with patch('job_search.job_reviews.auth_owner.NativeAuthOwner'), \
+             patch('job_search.job_reviews.codex_runtime.launch_worker', side_effect=launch), \
+             patch('job_search.job_reviews.reviewer_api.assignment_proxy', side_effect=observed_api), \
+             patch('job_search.job_reviews.model_gateway.gateway_server', side_effect=observed_model), \
+             ProductionRuntime(self.config, self.authority) as runtime:
+            with runtime.worker(grant, runtime_id=runtime_id) as worker:
+                self.assertEqual(worker.telemetry, {'api_context_calls': 2, 'api_context_seconds': .75,
+                    'api_context_response_bytes': 30, 'request_started_count': 2, 'request_count': 1,
+                    'api_order_calls': 1, 'api_order_seconds': .125, 'api_order_response_bytes': 40,
+                    'gateway_request_rejected_count': 1, 'gateway_response_rejected_count': 1,
+                    'upstream_transport_failed_count': 1, 'authentication_failed_count': 1,
+                    'gateway_busy_count': 1, **{key: 1 for key in RESPONSE_REJECTION_COUNTERS},
+                    'upstream_duration_ms': 40, 'input_tokens': 20, 'upstream_http_2xx': 1,
+                    'upstream_http_4xx': 2, 'upstream_http_5xx': 1, 'upstream_rate_limited_count': 1})
+                self.assertNotIn('PRIVATE_', json.dumps(worker.telemetry))
+        self.authority.revoke(grant['grant_id'])
+
     def test_parallel_primary_check_complete_over_real_private_sockets(self):
         description = 'Python APIs and SQL systems. ' + 'Posting evidence. ' * 900
         with sqlite3.connect(self.fixture.db) as con:
@@ -107,6 +174,7 @@ class RuntimeCompositionTests(unittest.TestCase):
         self.fixture.profile['fingerprint'] = payload_sha256(self.fixture.facts)
         interrupted = self.authority.start({'mode': 'custom', 'window_start': '2026-10-01T00:00:00Z',
                                             'idempotency_key': 'composition-interrupted'})
+        self.authority.freeze_execution_policy(interrupted['review_id'], self.config.execution_policy())
         abandoned = self.authority.issue(interrupted['review_id'], [1], 'primary', {
             'runtime_id': 'worker_' + 'a' * 32, 'model': self.config.model,
             'reasoning_effort': self.config.reasoning_effort})
@@ -153,35 +221,29 @@ class RuntimeCompositionTests(unittest.TestCase):
 
             def consume():
                 transcript = []
-                info = client.call('assignment')
-                transcript.append(info)
-                facts = []
-                for section in ('facts', 'preferences', 'feedback'):
-                    offset = 0
-                    while True:
-                        page = client.call('context', {'section': section, 'offset': offset, 'limit': 1})
-                        transcript.append(page)
-                        if section == 'facts':
-                            facts.extend(page['facts'])
-                        offset = page['next_offset']
-                        if offset is None:
-                            break
-                self.assertEqual(len(facts), 2)
-                for job in info['jobs']:
+                class RecordingClient:
+                    def call(self, operation, args):
+                        value = client.call(operation, args)
+                        transcript.append(value)
+                        return value
+                packet = preload_evidence(RecordingClient())
+                info = packet['assignment']
+                self.assertEqual(len(packet['context']['facts']), 2)
+                if info['kind'] == 'finalizer':
+                    result = client.call('calibrations', {'calibrations': [
+                        {'ordinal': item['ordinal'], 'position': position}
+                        for position, item in enumerate(packet['calibration']['items'], 1)]})
+                    self.assertTrue(all(row['status'] == 'saved' for row in result['results']))
+                    client.call('finalize')
+                    with self.lock:
+                        self.transcripts.extend(transcript)
+                    return
+                for job in packet['jobs']:
                     self.assertNotIn('assessment', job)
-                    pages, offset, text = 0, 0, ''
-                    while True:
-                        page = client.call('job', {'ordinal': job['ordinal'], 'offset': offset, 'limit': 2000})
-                        transcript.append(page)
-                        self.assertNotIn('assessment', page)
-                        text += page['description']
-                        pages += 1
-                        offset = page['next_offset']
-                        if offset is None:
-                            break
-                    self.assertEqual(text, description)
-                    self.assertGreater(pages, 1)
-                    result = client.call('assessment', {'ordinal': job['ordinal'], 'assessment': self.fixture.assessment()})
+                    self.assertEqual(job['job']['description'], description)
+                    self.assertGreater(sum('description' in page for page in transcript), 1)
+                    result = client.call('assessments', {'assessments': [{'ordinal': job['ordinal'], 'assessment': self.fixture.assessment(eligibility='no_known_barrier', eligibility_condition='', next_step='apply', category='core')}]})
+                    self.assertEqual(result['results'][0]['status'], 'saved')
                     transcript.append(result)
                     with self.lock:
                         completed.append((info['kind'], job['ordinal']))
@@ -213,9 +275,9 @@ class RuntimeCompositionTests(unittest.TestCase):
         self.assertEqual(result['recovered_grants'], 1)
         self.assertEqual(set(completed), {('primary', 1), ('primary', 2), ('check', 1), ('check', 2)})
         self.assertEqual(len(result['receipt']['lists']), 2)
-        self.assertEqual(len(self.assignments), 4)
-        self.assertEqual(len({a['actor'] for a in self.assignments}), 4)
-        self.assertEqual(len({a['runtime_id'] for a in self.assignments}), 4)
+        self.assertEqual(len(self.assignments), 5)
+        self.assertEqual(len({a['actor'] for a in self.assignments}), 5)
+        self.assertEqual(len({a['runtime_id'] for a in self.assignments}), 5)
         self.assertNotIn('RANKING_SENTINEL_MUST_STAY_PRIVATE', json.dumps(self.transcripts))
         self.assertEqual(list(self.config.runtime_dir.rglob('*.sock')), [])
         self.assertFalse(self.config.schedule_enabled)
@@ -223,6 +285,21 @@ class RuntimeCompositionTests(unittest.TestCase):
         auth._request_headers.assert_not_called()
         self.assert_revoked()
 
+    def test_distinct_checker_profile_binds_gateway_and_real_scoped_grants(self):
+        from job_search.job_reviews.model_gateway import gateway_server
+        self.config = replace(self.config, check_model='checker-model', check_reasoning_effort='medium').validate()
+        self.authority = ReviewAuthority(self.fixture.service, approved_check_model='checker-model',
+                                         approved_check_reasoning_effort='medium')
+        observed = []
+        @contextmanager
+        def gateway(*args, **kwargs):
+            observed.append((kwargs['kind'], kwargs['model'], kwargs['reasoning_effort']))
+            with gateway_server(*args, **kwargs) as server:
+                yield server
+        with patch('job_search.job_reviews.model_gateway.gateway_server', side_effect=gateway):
+            self.test_parallel_primary_check_complete_over_real_private_sockets()
+        self.assertEqual(set(observed), {('primary', self.config.model, self.config.reasoning_effort),
+            ('check', 'checker-model', 'medium'), ('finalizer', self.config.model, self.config.reasoning_effort)})
     def test_launch_receipt_failure_terminates_worker_and_revokes_grant(self):
         original_issue = self.authority.issue
         def launch(config, assignment, private_run_dir, **sockets):
