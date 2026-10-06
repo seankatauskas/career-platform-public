@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdir} from 'node:fs/promises';
 import {chromium} from '../../extension/node_modules/playwright-core/index.mjs';
 
 // Isolated page-module fixture: no server, credentials, or external writes.
@@ -9,6 +9,7 @@ const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 try {
   await page.setContent('<span id="review-count"></span><section id="attention"></section><section id="shortlist"></section><dialog id="job-preview"><header class="job-preview-header"><div><p id="job-preview-company"></p><h2 id="job-preview-title"></h2></div><button id="job-preview-close">Close</button></header><div id="job-preview-body"></div></dialog>');
+  for (const file of ['styles.css','review-view.css']) await page.addStyleTag({content:await readFile(new URL(`../../job_search/web/${file}`,import.meta.url),'utf8')});
   await page.addScriptTag({content:`
     function node(tag, cls='', text='') { const el = document.createElement(tag); el.className = cls; el.textContent = text; return el; }
     function clear(el) { el.replaceChildren(); el.classList.remove('empty'); }
@@ -34,6 +35,10 @@ try {
       requests.push({path,options});
       if(path === '/api/v1/attention') { if (attentionFails) throw new Error('Fixture unavailable'); return attentionResponse; }
       if(path === '/api/v1/actions') return actionResponse;
+      if(path.startsWith('/api/v1/mail-review/applications?')) return {applications:[{application_id:'older-app',employer_snapshot:'Older Company',title_snapshot:'Engineer'}],next_cursor:null};
+      if(path.startsWith('/api/v1/attention/message?')) return {subject:'Interview <script>inert</script>',body:'First line\\n\\n'+'Full archived body '.repeat(200)+'Last line',available:true,truncated:false};
+      if(path === '/api/v1/mail-review/preview') {const decisions=JSON.parse(options.body).decisions;return {decisions,preview_hash:'preview-fixture',notice:'No mail is sent.',changes:decisions.map(d=>({proposal_id:d.proposal_id,decision:d.decision,application:'Example · Engineer',creates_application:!!d.new_application,event_type:d.event_type,from_phase:'preparing',to_phase:d.event_type==='rejection_received'?'terminal':'active',terminal_outcome:d.event_type==='rejection_received'?'rejected':null,next_step:d.task}))};}
+      if(path === '/api/v1/mail-review/resolve') return {resolved:[]};
       if(path === '/api/v1/mail-analyses?history=true&limit=100') return {analyses:mailAnalyses.filter(item=>item.replay_id)};
       if(path.startsWith('/api/v1/mail-analyses/')) {
         const id=path.split('/')[4]; const found=mailAnalyses.find(item=>item.analysis_id===id);
@@ -74,7 +79,7 @@ try {
   await page.waitForFunction(() => document.activeElement?.dataset.reviewKey === 'event_proposal:p1');
   assert(await page.evaluate(() => scrollY > 1000));
   await page.evaluate(() => { $('#attention').style.marginTop=''; location.hash='#review'; renderReviewQueue(); });
-  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).count(),2);
+  assert.equal(await page.getByRole('button',{name:'Resolve email',exact:true}).count(),2);
   assert.equal(await page.getByRole('button',{name:'Accept',exact:true}).count(),0);
   const approve = page.getByRole('button',{name:'Create Outlook draft',exact:true});
   await approve.click();
@@ -82,20 +87,50 @@ try {
   assert.deepEqual(JSON.parse(decision.options.body),{idempotency_key:'action-fixture',approve:true,payload_sha256:'abc'});
   assert.equal(await page.locator('#review-count').innerText(),'');
   await page.evaluate(()=>{ consoleState.reviews=[{id:'p2',kind:'event_proposal',status:'pending',detail:'interview_requested',application_id:'app1',candidate_application_ids:[]}]; renderReviewQueue(); });
-  await page.getByRole('button',{name:'Confirm update',exact:true}).click();
-  const proposalDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/p2/decision'));
-  assert.equal(JSON.parse(proposalDecision.options.body).decision,'accepted');
-  await page.evaluate(()=>{ consoleState.reviews=[{id:'late',kind:'event_proposal',status:'pending',detail:'submission_confirmed',application_id:null,candidate_application_ids:[]}]; renderReviewQueue(); });
-  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isDisabled(),true);
-  assert.match(await page.locator('#attention-list').innerText(),/No matching application yet/);
-  await page.evaluate(()=>{ consoleState.reviews[0].candidate_application_ids=['app1']; renderReviewQueue(); });
-  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
-  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isDisabled(),true);
-  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app1');
-  assert.equal(await page.getByRole('button',{name:'Confirm update',exact:true}).isEnabled(),true);
-  await page.getByRole('button',{name:'Confirm update',exact:true}).click();
-  const lateDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/late/decision'));
-  assert.equal(JSON.parse(lateDecision.options.body).selected_application_id,'app1');
+  await page.locator('#attention-list .review-message > summary').click();
+  await page.waitForFunction(()=>document.querySelector('#attention-list .message-body')?.textContent.endsWith('Last line'));
+  assert.match(await page.locator('#attention-list .message-subject').innerText(), /<script>inert<\/script>/);
+  assert.equal(await page.locator('#attention-list .review-message script').count(), 0);
+  assert((await page.locator('#attention-list .message-body').innerText()).length > 2048);
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await page.locator('#attention-list .review-message').evaluate(el=>el.open), true);
+  await page.waitForFunction(()=>document.querySelector('#attention-list .message-body')?.textContent.endsWith('Last line'));
+  await page.getByRole('button',{name:'Resolve email',exact:true}).click();
+  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
+  await page.getByRole('button',{name:'Save resolution',exact:true}).click();
+  const proposalDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/mail-review/resolve'));
+  assert.equal(JSON.parse(proposalDecision.options.body).decisions[0].event_type,'interview_requested');
+  assert.equal(JSON.parse(proposalDecision.options.body).preview_hash,'preview-fixture');
+  await page.evaluate(()=>{ consoleState.reviews=[{id:'late',kind:'event_proposal',status:'pending',detail:'submission_confirmed',evidence_quote:'Thanks for applying.',application_id:null,candidate_application_ids:[]}]; renderReviewQueue(); });
+  await page.getByRole('button',{name:'Resolve email',exact:true}).click();
+  assert.equal(await page.getByRole('combobox',{name:'Application',exact:true}).inputValue(),'');
+  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
+  assert.match(await page.locator('.mail-resolution .notice[role=status]').innerText(),/Choose an application/);
+  await page.getByRole('searchbox',{name:'Find an application'}).fill('Older Company');
+  await page.waitForFunction(()=>[...document.querySelectorAll('.mail-resolution option')].some(el=>el.value==='older-app'));
+  await page.getByRole('combobox',{name:'Application',exact:true}).selectOption('older-app');
+  assert.equal(await page.getByRole('combobox',{name:'Application',exact:true}).inputValue(),'older-app');
+  await page.getByRole('searchbox',{name:'Find an application'}).fill('Example');
+  await page.getByRole('combobox',{name:'Application',exact:true}).selectOption('app1');
+  await page.getByRole('textbox',{name:'Review note (optional)'}).fill('I checked the employer.');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await page.getByRole('textbox',{name:'Review note (optional)'}).inputValue(),'I checked the employer.');
+  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Save resolution',exact:true}).isVisible(),true);
+  await page.getByRole('combobox',{name:'What does the email mean?'}).selectOption('rejection_received');
+  await page.getByRole('textbox',{name:'Supporting words from the email'}).fill('We will not proceed to interview.');
+  assert.equal(await page.getByRole('button',{name:'Save resolution',exact:true}).isVisible(),false);
+  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
+  await mkdir(new URL('../../.cache/mail-review-ui/',import.meta.url),{recursive:true});
+  await page.locator('#attention').screenshot({path:new URL('../../.cache/mail-review-ui/mobile.png',import.meta.url).pathname});
+  await page.setViewportSize({width:1280,height:900});
+  await page.locator('#attention').screenshot({path:new URL('../../.cache/mail-review-ui/desktop.png',import.meta.url).pathname});
+  await page.getByRole('button',{name:'Save resolution',exact:true}).click();
+  const lateDecision = await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail-review/resolve').at(-1));
+  assert.equal(JSON.parse(lateDecision.options.body).decisions[0].application_id,'app1');
+  assert.equal(JSON.parse(lateDecision.options.body).decisions[0].event_type,'rejection_received');
   // One message has independent findings; legacy projections and history do not inflate current review.
   await page.evaluate(()=>{
     location.hash='#review';

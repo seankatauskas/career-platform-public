@@ -1409,7 +1409,7 @@ class LedgerStore:
 
         return self._idempotent("decide_event_proposal", context, request, operation)
 
-    def _decide_event_proposal(self, con, stamp, proposal_id, decision, selected_application_id, reason, context):
+    def _decide_event_proposal(self, con, stamp, proposal_id, decision, selected_application_id, reason, context, *, create_tasks=True):
         proposal = con.execute(
             "SELECT * FROM event_proposals WHERE proposal_id=?", (proposal_id,)
         ).fetchone()
@@ -1485,7 +1485,8 @@ class LedgerStore:
                 from .lifecycle.mail import link_accepted_evidence
                 link_accepted_evidence(con, proposal["evidence_id"], application_id, context, stamp)
             from .lifecycle.core import ensure_event_task
-            ensure_event_task(con, self, saved_event, proposal["evidence_id"], stamp)
+            if create_tasks:
+                ensure_event_task(con, self, saved_event, proposal["evidence_id"], stamp)
         else:
             con.execute(
                 "UPDATE event_proposals SET status='rejected',decided_at=? "
@@ -2969,10 +2970,10 @@ class LedgerStore:
                     "status": "review", "detail": "Submission has not been confirmed. Check the employer page or wait for a confirmation email.",
                     "created_at": attempt["created_at"], "employer": attempt["employer_snapshot"], "title": attempt["title_snapshot"]})
             for proposal in con.execute(
-                "SELECT proposal_id,evidence_id,proposed_application_id,event_type,confidence,"
-                "evidence_quote,candidate_application_ids_json,created_at "
-                "FROM event_proposals WHERE status IN ('pending','conflict') "
-                "ORDER BY created_at,proposal_id"
+                "SELECT p.proposal_id,p.evidence_id,p.proposed_application_id,p.event_type,p.confidence,"
+                "p.evidence_quote,p.candidate_application_ids_json,p.created_at,e.subject,e.sender "
+                "FROM event_proposals p JOIN mail_evidence e USING(evidence_id) WHERE p.status IN ('pending','conflict') "
+                "ORDER BY p.created_at,p.proposal_id"
             ):
                 if ('event_proposal',proposal['proposal_id']) in projected:
                     continue
@@ -2983,6 +2984,8 @@ class LedgerStore:
                         "application_id": proposal["proposed_application_id"],
                         "status": "review",
                         "detail": proposal["event_type"],
+                        "subject": proposal["subject"],
+                        "sender": proposal["sender"],
                         "confidence": proposal["confidence"],
                         "evidence_quote": proposal["evidence_quote"],
                         "candidate_application_ids": self._unassigned_mail_candidates(proposal['evidence_id'])

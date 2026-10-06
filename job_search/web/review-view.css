@@ -11,6 +11,20 @@
 .review-history #action-list { margin-top: 16px; }
 #attention :is(.message-body, .payload-preview) { overflow-wrap: anywhere; white-space: pre-wrap; }
 #attention .review-context-link { display: block; width: fit-content; margin: 8px 12px 8px 0; }
+#attention :is(.review-message, .mail-resolution) { margin: 16px 0; min-width: 0; }
+#attention :is(.review-message, .mail-resolution) > summary { cursor: pointer; font-weight: 600; }
+#attention .review-message-content { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+#attention .review-message-content h4 { margin: 0 0 8px; }
+#attention .message-subject { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 16px; }
+.mail-resolution-form { display: grid; gap: 16px; padding-top: 16px; }
+.mail-resolution-fields { display: grid; gap: 12px; }
+.mail-resolution-field { display: grid; gap: 6px; font-weight: 600; }
+.mail-resolution-field :is(input, select, textarea) { width: 100%; min-width: 0; box-sizing: border-box; font: inherit; font-weight: 400; }
+.mail-resolution-field textarea { resize: vertical; }
+.mail-resolution-form > button { justify-self: start; }
+.mail-resolution-preview { padding: 16px; border-left: 3px solid var(--accent); background: var(--panel); }
+.mail-resolution-preview h4 { margin-top: 0; }
+.mail-resolution-form [hidden] { display: none; }
 @media (max-width: 768px) {
   #attention-list .stack-item { display: flex; flex-direction: column; padding: 16px; }
   #attention-list .actions { width: 100%; }

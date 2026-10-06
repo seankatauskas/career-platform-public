@@ -1,4 +1,4 @@
-"""Deterministic rules for known ATS submission-confirmation templates."""
+"""Deterministic ATS receipt and review-only rejection templates."""
 
 from __future__ import annotations
 
@@ -15,8 +15,37 @@ from .proposals import build_proposal
 from .sanitizer import SanitizedMail
 
 
-RULE_PRODUCER_VERSION = "mail-rules-v5-identity"
+RULE_PRODUCER_VERSION = "mail-rules-v6-outcomes"
 SUBMISSION_CONFIRMATION_WINDOW_SECONDS = 15 * 60
+
+# Match whole, affirmative outcome sentences, never a keyword inside a negation,
+# hypothetical, quoted statement, or a cancellation of an interview appointment.
+_REJECTION_SENTENCE = re.compile(
+    r"(?:(?:after (?:careful )?(?:consideration|review)(?: of your application)?|"
+    r"unfortunately),?\s+)?"
+    r"(?:we(?: have|['’]ve)? (?:decided|chosen) to (?:move forward|proceed) with other candidates|"
+    r"we(?: have|['’]ve)? decided not to (?:move forward|proceed) with your (?:application|candidacy)|"
+    r"we (?:will not|won['’]t) be (?:moving forward|proceeding) with your (?:application|candidacy)|"
+    r"we (?:are not|aren['’]t) (?:moving forward|proceeding) with your (?:application|candidacy)|"
+    r"(?:we regret to inform you that )?your application (?:was not|has not been) (?:selected|successful)|"
+    r"(?:we regret to inform you that )?you (?:have not been|were not) selected)"
+    r"(?: (?:at this time|for (?:this|the) (?:role|position)))?[.!]?",
+    re.I,
+)
+_OTHER_OUTCOME_LANGUAGE = re.compile(
+    r"\b(?:reject(?:ed|ion)?|unsuccessful|other candidates|not (?:be )?(?:moving|proceeding)|"
+    r"not (?:been )?selected|not successful|regret to inform|decided not to|declin(?:e|ed)|"
+    r"no longer|unable|filled|cancel(?:led|ed|lation)|interview|offer)\b", re.I,
+)
+
+
+def _rejection_evidence(body: str) -> tuple[str, int, int] | None:
+    for sentence in re.finditer(r"[^.!?\n]+[.!?]?", body):
+        quote = sentence[0].strip()
+        if _REJECTION_SENTENCE.fullmatch(quote):
+            start = sentence.start() + len(sentence[0]) - len(sentence[0].lstrip())
+            return quote, start, start + len(quote)
+    return None
 
 
 @dataclass(frozen=True)
@@ -177,26 +206,36 @@ def match_known_template(
     from .identity import supported_candidates
     bounded = supported_candidates(bounded_candidates(candidates), mail.subject, mail.body)
     domain = _sender_domain(sender_address)
+    rejection = _rejection_evidence(mail.body)
     for template in KNOWN_TEMPLATES:
         if not _trusted_domain(domain, template.sender_domains):
             continue
-        if not template.subject_pattern.search(mail.subject):
-            continue
-        evidence = template.evidence_pattern.search(mail.body)
-        if not evidence:
-            continue
+        if rejection:
+            quote, start, end = rejection
+            event_type = ApplicationEventType.REJECTION_RECEIVED
+        else:
+            # Ambiguous outcome/stage language needs the model's whole-message
+            # interpretation; a polite opening alone cannot establish a receipt.
+            if _OTHER_OUTCOME_LANGUAGE.search(mail.subject + "\n" + mail.body):
+                continue
+            if not template.subject_pattern.search(mail.subject):
+                continue
+            evidence = template.evidence_pattern.search(mail.body)
+            if not evidence:
+                continue
+            quote, start, end = evidence[0], evidence.start(), evidence.end()
+            event_type = ApplicationEventType.SUBMISSION_CONFIRMED
         application_id, candidate_match, strong_identity = _select_candidate(
             bounded, template, mail, received_at
         )
         if not candidate_context_complete:
             application_id = None
         body_start = mail.body_range[0]
-        quote = evidence.group(0)
         proposal = build_proposal(
             evidence_id=evidence_id,
             mail=mail,
             candidates=bounded,
-            event_type=ApplicationEventType.SUBMISSION_CONFIRMED,
+            event_type=event_type,
             application_id=application_id,
             producer_kind=ProducerKind.RULE,
             producer_version=RULE_PRODUCER_VERSION,
@@ -205,12 +244,13 @@ def match_known_template(
             # required; otherwise the same useful rule result remains review-only.
             confidence=(
                 1.0
-                if sender_authenticated and candidate_context_complete and strong_identity
+                if not rejection and sender_authenticated and candidate_context_complete and strong_identity
                 else 0.99
             ),
             evidence_quote=quote,
-            span_start=body_start + evidence.start(),
-            span_end=body_start + evidence.end(),
+            span_start=body_start + start,
+            span_end=body_start + end,
         )
-        return RuleMatch(template.template_id, proposal, candidate_match)
+        template_id = template.template_id.replace("submission-v1", "rejection-v1") if rejection else template.template_id
+        return RuleMatch(template_id, proposal, candidate_match)
     return None

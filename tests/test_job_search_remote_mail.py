@@ -603,7 +603,10 @@ def test_mail_prompt_distinguishes_receipt_from_recruiter_followup() -> None:
     assert "submission_confirmed, not recruiter_contact" in prompt
     assert "payload must always be the empty object {}" in prompt
     assert "Other recruiter follow-ups" in prompt
-    assert REMOTE_MAIL_ADAPTER_VERSION == "remote-mail-json-v6-identity"
+    assert "rejection takes precedence" in prompt
+    assert "decisive outcome sentence" in prompt
+    assert "hypothetical, negated, or quoted historical statements" in prompt
+    assert REMOTE_MAIL_ADAPTER_VERSION == "remote-mail-json-v7-outcomes"
 
 
 def main() -> None:

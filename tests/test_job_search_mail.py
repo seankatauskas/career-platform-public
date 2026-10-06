@@ -267,6 +267,91 @@ def test_thanks_for_applying_receipts_use_exact_rule_evidence_before_model() -> 
             assert decide_proposal(proposal).disposition is ProposalDisposition.AUTO_APPLY
 
 
+def test_explicit_rejections_override_receipts_and_always_require_review() -> None:
+    class UnexpectedClassifier:
+        def classify(self, *args):
+            raise AssertionError("clear ATS rejection must not depend on model interpretation")
+
+    outcomes = (
+        "After careful consideration, we've decided to move forward with other candidates at this time.",
+        "After careful review, we’ve decided to move forward with other candidates at this time.",
+        "Unfortunately, we will not be moving forward with your application.",
+        "We won't be proceeding with your candidacy for this role.",
+        "We are not moving forward with your application.",
+        "We have decided not to move forward with your application.",
+        "We regret to inform you that your application was not selected.",
+        "We regret to inform you that you were not selected.",
+        "Unfortunately, you have not been selected for this position.",
+    )
+    for ats, sender in (("ashby", "no-reply@ashbyhq.com"),
+                        ("greenhouse", "no-reply@greenhouse-mail.io"),
+                        ("lever", "no-reply@lever.co"),
+                        ("workday", "no-reply@myworkday.com")):
+        for subject in ("Example Labs Application Update", "Thank you for applying to Example Labs"):
+            for outcome in outcomes:
+                mail = sanitize_mail(subject,
+                    "Hi Applicant,\n\nThank you for applying for the Software Engineer role.\n\n"
+                    + outcome + " We appreciate your interest in Example Labs, and we'll keep your "
+                    "information on file should a more relevant opportunity arise in the future.")
+                proposal = analyze_mail(evidence_id="rejection-case", sender_address=sender,
+                    mail=mail, candidates=[candidate(ats=ats)], classifier=UnexpectedClassifier(),
+                    model_version="unused-model", sender_authenticated=True)
+                assert proposal.event_type is ApplicationEventType.REJECTION_RECEIVED
+                assert proposal.proposed_application_id == "app-1"
+                assert proposal.producer_kind is ProducerKind.RULE
+                assert proposal.evidence_quote == outcome
+                assert mail.verifies_evidence(outcome, proposal.span_start, proposal.span_end)
+                assert decide_proposal(proposal).disposition is ProposalDisposition.REVIEW
+
+
+def test_outcome_rules_preserve_identity_and_sender_gates() -> None:
+    mail = sanitize_mail("Example Labs Application Update",
+        "Thank you for applying for the Software Engineer role at Example Labs. "
+        "We've decided to move forward with other candidates at this time.")
+    for items, complete in (([], True), ([candidate(employer="Different Employer")], True),
+                            ([candidate(), candidate("app-2")], True), ([candidate()], False)):
+        result = match_known_template(evidence_id="rejection-identity", sender_address="no-reply@greenhouse.io",
+            mail=mail, candidates=items, candidate_context_complete=complete)
+        assert result.proposal.event_type is ApplicationEventType.REJECTION_RECEIVED
+        assert result.proposal.proposed_application_id is None
+        assert decide_proposal(result.proposal).disposition is ProposalDisposition.REVIEW
+    assert match_known_template(evidence_id="rejection-sender", sender_address="no-reply@fakegreenhouse.io",
+        mail=mail, candidates=[candidate()]) is None
+
+
+def test_ambiguous_outcomes_fall_through_to_model_instead_of_receipt_rule() -> None:
+    for statement in (
+        "If we decide to move forward with other candidates, we will contact you.",
+        "We have not decided to move forward with other candidates.",
+        "We will not be moving forward with other candidates; we want to interview you.",
+        'A previous employer wrote "we decided to move forward with other candidates".',
+        "Your interview was cancelled; we will reschedule it.",
+        "We are unable to offer you the position.",
+        "After meeting the team, you were not selected for the role.",
+    ):
+        mail = sanitize_mail("Thank you for applying to Example Labs",
+            "Thank you for applying to Example Labs for Software Engineer. " + statement)
+        class Classifier:
+            called = False
+            def classify(self, *args):
+                self.called = True
+                return model_output(mail, event_type="recruiter_contact", quote=statement)
+        classifier = Classifier()
+        proposal = analyze_mail(evidence_id="ambiguous-outcome", sender_address="no-reply@greenhouse.io",
+            mail=mail, candidates=[candidate()], classifier=classifier, model_version="model-test")
+        assert classifier.called
+        assert proposal.producer_kind is ProducerKind.MODEL
+
+
+def test_historical_rejection_does_not_override_current_receipt() -> None:
+    mail = sanitize_mail("Application received",
+        "We have received your application for Software Engineer at Example Labs.\n"
+        "-----Original Message-----\nWe've decided to move forward with other candidates at this time.")
+    result = match_known_template(evidence_id="historical-rejection", sender_address="no-reply@greenhouse.io",
+        mail=mail, candidates=[candidate()], sender_authenticated=True)
+    assert result.proposal.event_type is ApplicationEventType.SUBMISSION_CONFIRMED
+
+
 def test_thanks_for_applying_receipts_preserve_sender_identity_and_evidence_gates() -> None:
     mail = sanitize_mail(
         "Thanks for applying to Example Labs",

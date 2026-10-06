@@ -159,6 +159,13 @@ class EncryptedArchiveMailSource:
                 'scanned': scanned, 'scan_limit': self.scan_limit,
                 'coverage': 'encrypted archived text only; unarchived messages and truncated content are not searchable'}
 
+    def get_review_message(self, message_id: str) -> Mapping[str, Any]:
+        """Read the full archived text for an explicit dashboard disclosure."""
+        validate_identifier(message_id, "message_id")
+        record = self._ledger.get_encrypted_mail_archive(message_id)
+        subject, body = _parts(self._archive.read_message(message_id))
+        return {"subject": subject, "body": body, "truncated": bool(record['truncated'])}
+
     def get_mail_message(self, message_id: str) -> Mapping[str, Any]:
         validate_identifier(message_id, "message_id")
         text = self._archive.read_message(message_id)

@@ -25,7 +25,7 @@ from .temporal import (
     TemporalSource,
 )
 
-REMOTE_MAIL_ADAPTER_VERSION = "remote-mail-json-v6-identity"
+REMOTE_MAIL_ADAPTER_VERSION = "remote-mail-json-v7-outcomes"
 MAX_REMOTE_TEMPORAL_SOURCE_CHARS = 24_000
 CLASSIFIER_MAX_OUTPUT_TOKENS = 1_024
 TEMPORAL_MAX_OUTPUT_TOKENS = 4_096
@@ -53,7 +53,16 @@ when candidates are tied or unsupported. Never invent a match solely from recenc
 An identical role title or shared ATS sender does not establish employer identity.
 If the named employer is absent from the candidates, use application_id=null.
 An explicit employer conflict overrides a previously linked conversation.
-An acknowledgment that an application was received, including "thanks for applying"
+Read the entire current message before choosing its event. An explicit employer
+rejection takes precedence over a receipt or polite opening: "we've decided to move
+forward with other candidates" and "we will not be moving forward with your
+application" are rejection_received, even after "thank you for applying". Cite the
+decisive outcome sentence, not the courtesy opening. Keeping information on file or
+inviting future applications does not undo a current rejection. Do not infer a
+rejection from hypothetical, negated, or quoted historical statements. A cancelled
+interview appointment alone does not mean the application was rejected or withdrawn.
+Only when no later outcome or recruiting stage is stated, an acknowledgment that
+an application was received, including "thanks for applying"
 or "thank you for applying", is submission_confirmed, not recruiter_contact.
 It confirms receipt only, not progress to an interview or an offer.
 Other recruiter follow-ups with no explicit new stage are recruiter_contact; do not

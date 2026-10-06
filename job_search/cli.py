@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-notification-socket", type=Path)
     parser.add_argument("--log-dir", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
+    mail_review = commands.add_parser('mail-review', help='inspect, preview, and resolve user-authorized email reviews')
+    mail_review.add_argument('action', choices=('list', 'applications', 'message', 'preview', 'apply'))
+    mail_review.add_argument('--input', default='-', help='decision JSON or saved preview JSON; - reads stdin')
+    mail_review.add_argument('--proposal-id')
+    mail_review.add_argument('--limit', type=int, default=50)
+    mail_review.add_argument('--after', default='')
+    mail_review.add_argument('--search', default='')
+    mail_review.add_argument('--idempotency-key')
     understanding = commands.add_parser("mail-understanding", help="operate shared mail evaluation and archive-only history reanalysis")
     understanding_commands = understanding.add_subparsers(dest="understanding_command", required=True)
     history = understanding_commands.add_parser("history", help="reanalyse all linked inbound history without notifications")
@@ -448,6 +456,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(str(exc)) from None
         return 0
     db_path = config.application_db
+    if args.command == 'mail-review':
+        from .mail.review import MailReviewService
+        try:
+            ledger = JobSearchLedger(db_path)
+            review = MailReviewService(ledger)
+            if args.action == 'list':
+                result = review.list_pending(args.limit, args.after)
+            elif args.action == 'applications':
+                result = review.applications(args.search, args.limit, args.after)
+            elif args.action == 'message':
+                from .review_messages import review_message
+                from .system import _DashboardMailSource
+                if not args.proposal_id:
+                    raise ContractError('message requires --proposal-id')
+                result = review_message(ledger, _DashboardMailSource(config, ledger),
+                    {'kind':'event_proposal', 'id':args.proposal_id})
+            else:
+                # A saved preview includes both decisions and explanatory changes.
+                maximum = 2 * 1024 * 1024
+                if args.input == '-':
+                    raw = sys.stdin.buffer.read(maximum + 1)
+                else:
+                    with Path(args.input).open('rb') as stream:
+                        raw = stream.read(maximum + 1)
+                if len(raw) > maximum:
+                    raise ContractError('mail review input exceeds 2 MiB')
+                payload = json.loads(raw)
+                if not isinstance(payload, dict) or 'decisions' not in payload:
+                    raise ContractError('mail review input requires decisions')
+                if args.action == 'preview':
+                    result = review.preview(payload['decisions'])
+                else:
+                    if not args.idempotency_key:
+                        raise ContractError('apply requires --idempotency-key and a saved preview')
+                    result = review.apply(payload['decisions'], payload.get('preview_hash'),
+                        MutationContext(args.idempotency_key, 'user', 'operator_mail_review'))
+            _json(result)
+        except (OSError, ValueError, ContractError) as exc:
+            raise SystemExit(str(exc)) from None
+        return 0
     if args.command == "mail-understanding":
         from .mail.understanding_replay import UnderstandingReplay
         if args.understanding_command == "evaluate":

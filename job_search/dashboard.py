@@ -1511,6 +1511,22 @@ def make_handler(
                 if path == "/api/v1/attention":
                     self._json({"items": [*controller.ledger.list_attention_items(), *controller.ledger.lifecycle.list_lifecycle_reviews()]}, session=session, new_session=new_session)
                     return
+                if path == '/api/v1/mail-review/applications':
+                    from .mail.review import MailReviewService
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    if set(query) - {'search', 'after'} or any(len(values) != 1 for values in query.values()):
+                        raise ContractError('invalid application search query')
+                    self._json(MailReviewService(controller.ledger).applications(
+                        query.get('search', [''])[0], 50, query.get('after', [''])[0]), session=session, new_session=new_session)
+                    return
+                if path == "/api/v1/attention/message":
+                    from .review_messages import review_message
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    if set(query) - {'kind', 'id', 'account_id', 'folder_ref', 'query_version'} or any(len(values) != 1 for values in query.values()):
+                        raise ContractError('invalid review message query')
+                    self._json(review_message(controller.ledger, controller.mail_source,
+                        {key: values[0] for key, values in query.items()}), session=session, new_session=new_session, exact_text=True)
+                    return
                 if path == "/api/v1/mail-analyses":
                     query = parse_qs(parsed_url.query, keep_blank_values=True)
                     if set(query) - {"history", "limit"} or any(len(v) != 1 for v in query.values()):
@@ -1674,6 +1690,19 @@ def make_handler(
                     self._json(result, status=HTTPStatus.ACCEPTED, session=session, new_session=new_session)
                     return
                 body = self._read_json()
+                if path in ('/api/v1/mail-review/preview', '/api/v1/mail-review/resolve'):
+                    from .mail.review import MailReviewService
+                    review = MailReviewService(controller.ledger)
+                    allowed = {'decisions'} if path.endswith('/preview') else {'decisions', 'preview_hash', 'idempotency_key'}
+                    if set(body) - allowed or 'decisions' not in body:
+                        raise ContractError('invalid mail review request')
+                    if path.endswith('/preview'):
+                        result = review.preview(body['decisions'])
+                    else:
+                        result = review.apply(body['decisions'], body.get('preview_hash'),
+                            self._mutation_context(self._idempotency(body), session, 'dashboard_mail_resolution'))
+                    self._json(result, session=session, new_session=new_session, exact_text=True)
+                    return
                 match = MAIL_ANALYSIS_DECISIONS_PATH.fullmatch(path)
                 if match:
                     if set(body) != {"revision", "decisions"} or not isinstance(body["revision"], str) or not body["revision"] or not isinstance(body["decisions"], list):

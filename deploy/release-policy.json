@@ -1,9 +1,9 @@
 {
   "version": 1,
   "schema_compatibility": "career-state-23-v1",
-  "test_baseline_sha": "d5bd4ae246aa50e5d15f58e1f8c20269ee635f57",
+  "test_baseline_sha": "6716bcf73428dbd972e0d024fe44d196abc34030",
   "predecessor": {
-    "release_id": "d5bd4ae246aa50e5d15f58e1f8c20269ee635f57-40",
-    "source_sha": "d5bd4ae246aa50e5d15f58e1f8c20269ee635f57"
+    "release_id": "6716bcf73428dbd972e0d024fe44d196abc34030-41",
+    "source_sha": "6716bcf73428dbd972e0d024fe44d196abc34030"
   }
 }

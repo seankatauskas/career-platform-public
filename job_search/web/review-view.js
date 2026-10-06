@@ -27,7 +27,7 @@ function reviewTitle(item) {
   if (item.kind === "lifecycle_correction") return "Proposed application update";
   if (item.kind === "interview_revision") return "Interview change";
   if (item.kind === "mail_discovery") return "Untracked recruiting conversation";
-  if (item.kind === "event_proposal") return ({interview_requested: "Interview request", submission_confirmed: "Application confirmation", rejected: "Application outcome", offer_received: "Offer received"})[item.detail] || (item.detail || "Application update").replaceAll("_", " ");
+  if (item.kind === "event_proposal") return ({interview_requested: "Interview request", submission_confirmed: "Application confirmation", rejection_received: "Application outcome", offer_received: "Offer received"})[item.detail] || (item.detail || "Application update").replaceAll("_", " ");
   if (item.kind === "temporal_proposal") return item.detail === "interview" ? "Proposed interview time" : "Application deadline";
   if (item.kind === "browser_submission") return "Check submission";
   if (item.kind === "mail_processing_failure") return item.detail || "Email processing needs attention";
@@ -88,6 +88,8 @@ function restoreReviewDisclosures(row, saved) {
 function renderReviewQueue() {
   const applicationId = new URLSearchParams(location.hash.split("?")[1] || "").get("application");
   const items = applicationId ? reviewItemsForApplication(applicationId) : getReviewItems();
+  const pendingIds = new Set(getReviewItems().map(item => item.id));
+  for (const id of mailResolutionEditors.keys()) if (!pendingIds.has(id)) mailResolutionEditors.delete(id);
   const list = document.querySelector("#attention-list");
   // Async attention/action refreshes replace cards. Preserve the user's native
   // disclosure state for the same review identity, including mailbox scope.
@@ -186,13 +188,211 @@ async function loadReviewQueue() {
   }
 }
 
+const mailResolutionEditors = new Map();
+function mailResolutionEditor(item) {
+  if (mailResolutionEditors.has(item.id)) return mailResolutionEditors.get(item.id);
+  const root = node("details", "mail-resolution");
+  root.append(node("summary", "", "Review decision"));
+  const form = node("form", "mail-resolution-form"); root.append(form);
+  const field = (label, input, parent = form) => {
+    const wrapper = node("label", "mail-resolution-field", label);
+    input.setAttribute("aria-label", label); wrapper.append(input); parent.append(wrapper); return input;
+  };
+  const decision = field("What should happen?", mailChoice("Resolution", [
+    ["record", "Record an application update"], ["keep", "Keep the message without changing status"],
+    ["dismiss", "Dismiss from review"]], "record"));
+  const updateFields = node("div", "mail-resolution-fields"); form.append(updateFields);
+  const event = field("What does the email mean?", mailChoice("Email meaning", Object.entries(MAIL_EVENT_LABELS), item.detail), updateFields);
+  const quote = field("Supporting words from the email", node("textarea"), updateFields);
+  quote.rows = 3; quote.maxLength = 512; quote.value = item.evidence_quote || "";
+  updateFields.append(node("p", "help", "If the interpretation is wrong, choose the right update and copy the supporting words from the message."));
+  const applicationFields = node("div", "mail-resolution-fields"); form.append(applicationFields);
+  const search = field("Find an application", node("input"), applicationFields); search.type = "search";
+  search.placeholder = "Search employer or role";
+  const application = field("Application", node("select"), applicationFields);
+  const searchStatus = node("p", "help"); searchStatus.setAttribute("role", "status");
+  const moreApplications = node("button", "quiet", "Load more matching applications");
+  moreApplications.type = "button"; moreApplications.hidden = true;
+  applicationFields.append(searchStatus, moreApplications);
+  const knownApplications = new Map();
+  let searchEpoch = 0, searchTimer = null, nextCursor = null;
+  let selected = item.application_id || (item.candidate_application_ids?.length === 1 ? item.candidate_application_ids[0] : "");
+  const populate = () => {
+    const query = search.value.trim().toLowerCase();
+    application.replaceChildren();
+    for (const [id, label] of [["", "Choose an application…"], ["new", "Create a missing application…"]]) {
+      const option = node("option", "", label); option.value = id; application.append(option);
+    }
+    const suggested = new Set(item.candidate_application_ids || []);
+    for (const app of state.applications) knownApplications.set(app.application_id, app);
+    const apps = [...knownApplications.values()].sort((a,b) => Number(suggested.has(b.application_id)) - Number(suggested.has(a.application_id)));
+    for (const app of apps) {
+      const label = `${app.employer_snapshot} · ${app.title_snapshot}`;
+      if (query && !label.toLowerCase().includes(query) && app.application_id !== selected) continue;
+      const option = node("option", "", `${suggested.has(app.application_id) ? "Suggested: " : ""}${label}`);
+      option.value = app.application_id; application.append(option);
+    }
+    application.value = selected;
+  };
+  const searchApplications = async (after = '') => {
+    const epoch = ++searchEpoch, query = search.value.trim();
+    moreApplications.disabled = true; searchStatus.textContent = "Searching application history…";
+    try {
+      const result = await api(`/api/v1/mail-review/applications?${new URLSearchParams({search:query, after})}`);
+      if (epoch !== searchEpoch) return;
+      for (const app of result.applications || []) knownApplications.set(app.application_id, app);
+      nextCursor = result.next_cursor;
+      moreApplications.hidden = !nextCursor;
+      searchStatus.textContent = nextCursor ? "More matches are available." : "Application history searched.";
+      populate();
+    } catch (_) {
+      if (epoch === searchEpoch) {
+        searchStatus.textContent = "Application search could not finish. Edit the search to retry.";
+        moreApplications.hidden = true;
+      }
+    } finally { if (epoch === searchEpoch) moreApplications.disabled = false; }
+  };
+  moreApplications.addEventListener("click", () => searchApplications(nextCursor));
+  populate();
+  const newFields = node("div", "mail-resolution-fields"); applicationFields.append(newFields);
+  const employer = field("Employer", node("input"), newFields); employer.maxLength = 300;
+  const title = field("Role", node("input"), newFields); title.maxLength = 500;
+  applicationFields.append(node("p", "help", "Suggestions are optional. You can select any application after checking the employer and role."));
+  const taskFields = node("div", "mail-resolution-fields"); form.append(taskFields);
+  const task = field("Your next step", mailChoice("Next step", [["", "No next step needed"],
+    ["reply", "Reply to the sender"], ["send_availability", "Share availability"],
+    ["complete_assessment", "Complete an assessment"], ["send_document", "Send a document"],
+    ["attend_interview", "Attend an interview"], ["offer_decision", "Decide on an offer"], ["follow_up", "Book a time or follow up"]]), taskFields);
+  const taskDetails = node("div", "mail-resolution-fields"); taskFields.append(taskDetails);
+  const note = field("Next-step details", node("input"), taskDetails); note.maxLength = 2000;
+  const due = field("Due date (optional)", node("input"), taskDetails); due.type = "datetime-local";
+  taskFields.append(node("p", "help", "A next step creates a task for you. It does not send a reply, accept an invitation, or book an interview."));
+  const reason = field("Review note (optional)", node("input")); reason.maxLength = 1000;
+  const previewButton = node("button", "", "Preview resolution"); previewButton.type = "submit";
+  const feedback = node("p", "notice"); feedback.setAttribute("role", "status"); feedback.hidden = true;
+  const preview = node("div", "mail-resolution-preview"); preview.hidden = true;
+  const save = node("button", "", "Save resolution"); save.type = "button"; save.hidden = true;
+  form.append(previewButton, feedback, preview, save);
+  let plan = null, commandId = null, version = 0, busy = false;
+  const invalidate = () => { version++; plan = null; preview.hidden = true; save.hidden = true; feedback.hidden = true; };
+  const update = () => {
+    updateFields.hidden = decision.value !== "record";
+    applicationFields.hidden = taskFields.hidden = decision.value === "dismiss";
+    newFields.hidden = application.value !== "new";
+    taskDetails.hidden = !task.value;
+    invalidate();
+  };
+  form.addEventListener("input", invalidate);
+  decision.addEventListener("change", update); task.addEventListener("change", update);
+  application.addEventListener("change", () => { selected = application.value; update(); });
+  search.addEventListener("input", () => {
+    ++searchEpoch; moreApplications.hidden = true; populate(); clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => searchApplications(), 250);
+  });
+  root.addEventListener("toggle", () => { if (root.open) { populate(); searchApplications(); } });
+  update();
+  const collect = () => {
+    const value = {proposal_id:item.id, decision:decision.value, reason:reason.value.trim() || "Reviewed email in dashboard."};
+    if (value.decision === "dismiss") return value;
+    if (!application.value) throw new Error("Choose an application or create a missing one.");
+    if (application.value === "new") value.new_application = {employer:employer.value, title:title.value};
+    else value.application_id = application.value;
+    if (value.decision === "record") { value.event_type = event.value; value.evidence_quote = quote.value; }
+    if (task.value) value.task = {kind:task.value, note:note.value, ...(due.value ? {due_at:new Date(due.value).toISOString().replace('.000Z','Z')} : {})};
+    return value;
+  };
+  form.addEventListener("submit", async e => {
+    e.preventDefault(); if (busy) return;
+    invalidate(); const requestedVersion = version;
+    busy = true; previewButton.disabled = true;
+    try {
+      const result = await api("/api/v1/mail-review/preview", {method:"POST", body:JSON.stringify({decisions:[collect()]})});
+      if (requestedVersion !== version) return;
+      plan = result; commandId = key("mail-resolution");
+      preview.replaceChildren(node("h4", "", "What will change"));
+      for (const change of result.changes) {
+        preview.append(node("p", "", change.decision === "dismiss" ? "Remove this item from Review. The email stays in Outlook." :
+          `${change.creates_application ? "Create" : "Use"} ${change.application}.`));
+        if (change.event_type) preview.append(node("p", "", `Record: ${MAIL_EVENT_LABELS[change.event_type] || change.event_type}. Status: ${change.from_phase.replaceAll('_',' ')} → ${change.terminal_outcome || change.to_phase.replaceAll('_',' ')}.`));
+        else if (change.decision === "keep") preview.append(node("p", "", "Attach the message to the application. Keep its current status."));
+        if (change.closes_application_work) preview.append(node("p", "", "Close this application and cancel its outstanding tasks and reminders."));
+        preview.append(node("p", "", change.next_step ? `Add next step: ${change.next_step.note}${change.next_step.due_at ? ' · Due '+displayDate(change.next_step.due_at) : ''}.` : "No new next step."));
+      }
+      preview.append(node("p", "help", result.notice)); preview.hidden = save.hidden = false;
+    } catch (error) { if (requestedVersion === version) { feedback.textContent = error.message; feedback.hidden = false; } }
+    finally { busy = false; previewButton.disabled = false; }
+  });
+  save.addEventListener("click", async () => {
+    if (!plan || busy) return;
+    busy = true; save.disabled = previewButton.disabled = true;
+    for (const input of form.querySelectorAll('input,select,textarea')) input.disabled = true;
+    const submitted = plan;
+    try {
+      await api("/api/v1/mail-review/resolve", {method:"POST", body:JSON.stringify({decisions:submitted.decisions, preview_hash:submitted.preview_hash, idempotency_key:commandId})});
+      mailResolutionEditors.delete(item.id);
+      await Promise.all([loadReviewQueue(), loadApplications()]);
+      notice("Email review resolved.");
+    } catch (error) {
+      feedback.textContent = error.status === 409 ? "This review or application changed. Preview the resolution again before saving." : error.message;
+      feedback.hidden = false;
+      if (error.status === 409) { plan = null; save.hidden = true; }
+    } finally {
+      busy = false; save.disabled = previewButton.disabled = false;
+      for (const input of form.querySelectorAll('input,select,textarea')) input.disabled = false;
+    }
+  });
+  mailResolutionEditors.set(item.id, root);
+  return root;
+}
+
+function reviewMessageDisclosure(item, payload) {
+  const details = node("details", "review-message");
+  details.append(node("summary", "", "View message"));
+  const content = node("div", "review-message-content");
+  details.append(content);
+  const show = message => {
+    content.replaceChildren(node("h4", "", "Subject"), node("p", "message-subject", message.subject || "No subject recorded."),
+      node("h4", "", "Body"), node("div", "message-body", message.body || "No message body is available."));
+    if (!message.available) content.append(node("p", "meta", message.body
+      ? "The full message is unavailable. Showing the saved evidence excerpt."
+      : "No archived email is available for this item."));
+    else if (!payload) content.append(node("p", "meta", message.truncated
+      ? "The archived message was truncated when collected."
+      : "Archived email text; original formatting and quoted history may have been removed."));
+  };
+  if (payload) {
+    show({subject: payload.subject, body: typeof payload.body === "string" ? payload.body : payload.body?.content, available: true});
+    return details;
+  }
+  let loaded = false, loading = false;
+  const load = async () => {
+    if (loaded || loading || !details.open) return;
+    loading = true;
+    content.replaceChildren(node("p", "meta", "Loading message…"));
+    content.setAttribute("aria-busy", "true");
+    const query = new URLSearchParams({kind: item.kind, id: item.id});
+    if (item.kind === "mail_processing_failure") {
+      for (const field of ["account_id", "folder_ref", "query_version"]) query.set(field, item[field]);
+    }
+    try {
+      show(await api(`/api/v1/attention/message?${query}`));
+      loaded = true;
+    } catch (_) {
+      const retry = node("button", "quiet", "Retry loading message"); retry.type = "button";
+      retry.addEventListener("click", load);
+      content.replaceChildren(node("p", "meta", "The message could not be loaded."), retry);
+    } finally { loading = false; content.removeAttribute("aria-busy"); }
+  };
+  details.addEventListener("toggle", load);
+  return details;
+}
+
 function actionPreview(action) {
   const root = node("div", "action-preview");
   const payload = action.payload || {};
   const app = state.applications.find(item => item.application_id === action.application_id);
   if (app) { root.append(jobPreviewButton(app, `${app.employer_snapshot} · ${app.title_snapshot}`)); const link = node("a", "review-context-link", "Open application"); link.href = applicationHref(app.application_id, "overview"); root.append(link, postingDates(app)); }
-  if (payload.body) root.append(node("p", "message-body", typeof payload.body === "string" ? payload.body : payload.body.content || ""));
-  if (payload.subject) root.append(node("p", "", payload.subject));
+  root.append(reviewMessageDisclosure(action, payload));
   if (payload.start || payload.starts_at) root.append(node("p", "", `${displayDate(payload.starts_at || payload.start?.dateTime || payload.start)} → ${displayDate(payload.ends_at || payload.end?.dateTime || payload.end)}`));
   const details = node("details", "technical-details"); details.append(node("summary", "", "Action details"), node("pre", "payload-preview", JSON.stringify(payload, null, 2)), node("p", "meta", `Approved content fingerprint: ${(action.payload_sha256 || "").slice(0, 12)}`)); root.append(details);
   return root;
@@ -296,6 +496,7 @@ function mailAnalysisItem(analysis, historical = false) {
   const detail = node("div", "stack");
   detail.append(node("h3", "", analysis.subject || "Email findings"));
   detail.append(meta([historical ? "Email review history" : "Needs review", displayDate(analysis.created_at)]));
+  detail.append(reviewMessageDisclosure({kind:"mail_analysis", id:analysis.analysis_id}));
   const permalink = node("a", "review-context-link", "Open this email review");
   permalink.href = `#review/mail_analysis/${encodeURIComponent(analysis.analysis_id)}${historical ? "?history=true" : ""}`;
   detail.append(permalink);
@@ -414,6 +615,7 @@ function reviewItem(normalized) {
     const detail = node("div");
     detail.append(node("h3", "", normalized.title));
     detail.append(meta([reviewStatus(normalized), `Received ${displayDate(item.created_at)}`]));
+    if (item.subject) detail.append(node("p", "", item.subject), node("p", "meta", item.sender || ""));
     if (item.confidence !== undefined) {
       const technical = node("details", "technical-details");
       technical.append(node("summary", "", "Review details"), node("p", "meta", `${Math.round(item.confidence * 100)}% confidence`));
@@ -422,6 +624,7 @@ function reviewItem(normalized) {
     const application = state.applications.find(app => app.application_id === item.application_id);
     if (application) { detail.append(jobPreviewButton(application, `${application.employer_snapshot} · ${application.title_snapshot}`)); const link = node("a", "review-context-link", "Open application messages"); link.href = applicationHref(application.application_id, "messages"); detail.append(link); }
     if (item.evidence_quote) detail.append(node("p", "meta", `“${item.evidence_quote}”`));
+    detail.append(reviewMessageDisclosure(item));
     if (item.kind === "temporal_proposal") {
       const when = item.detail === "interview"
         ? `${displayDate(item.starts_at)} – ${displayDate(item.ends_at)}`
@@ -432,7 +635,7 @@ function reviewItem(normalized) {
     }
     const actions = node("div", "actions");
     if (["lifecycle_correction","interview_revision","mail_discovery"].includes(item.kind)) renderLifecycleReview(item, detail, actions);
-    if (item.kind === "event_proposal") detail.append(node("p", "help", "Confirm that this email updates the application. This does not reply to the sender or accept an invitation."));
+    if (item.kind === "event_proposal") detail.append(node("p", "help", "Review the interpretation, choose an application, and preview what will change."));
     if (item.kind === "browser_submission") {
       detail.append(node("p", "", item.detail));
       const link = node("a", "review-context-link", "Check application record");
@@ -481,35 +684,11 @@ function reviewItem(normalized) {
       }
     }
     if (item.kind === "event_proposal") {
-      let selectedApplicationId = item.application_id;
-      const accept = node("button", "", "Confirm update");
-      if (!selectedApplicationId && (item.candidate_application_ids || []).length) {
-        const select = node("select");
-        select.setAttribute("aria-label", "Application for this proposal");
-        const placeholder = node("option", "", "Choose an application…");
-        placeholder.value = "";
-        select.append(placeholder);
-        item.candidate_application_ids.forEach((candidate) => {
-          const match = state.applications.find(app => app.application_id === candidate);
-          const option = node("option", "", match ? `${match.employer_snapshot} · ${match.title_snapshot}` : candidate);
-          option.value = candidate;
-          select.append(option);
-        });
-        select.addEventListener("change", () => {
-          selectedApplicationId = select.value;
-          accept.disabled = !selectedApplicationId;
-        });
-        actions.append(select);
-      } else if (!selectedApplicationId) {
-        actions.append(node("p", "review-context-link", "No matching application yet. This email will stay here for review; refresh after the application appears."));
-      }
-      accept.type = "button";
-      accept.disabled = !selectedApplicationId;
-      accept.addEventListener("click", () => decideProposal(item, "accepted", selectedApplicationId, accept));
-      const reject = node("button", "danger", "Reject");
-      reject.type = "button";
-      reject.addEventListener("click", () => decideProposal(item, "rejected", selectedApplicationId, reject));
-      actions.append(accept, reject);
+      const editor = mailResolutionEditor(item);
+      detail.append(editor);
+      const resolve = node("button", "", "Resolve email"); resolve.type = "button";
+      resolve.addEventListener("click", () => { editor.open = true; editor.querySelector("select")?.focus(); });
+      actions.append(resolve);
     }
     if (item.kind === "temporal_proposal") {
       const accept = node("button", "", item.kind === "temporal_proposal" ? (item.detail === "interview" ? "Save proposed time" : "Save deadline") : "Confirm update");

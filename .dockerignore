@@ -60,6 +60,7 @@ job_search/salary/web/review/*
 !job_search/portable_export.py
 !job_search/preference.py
 !job_search/reducer.py
+!job_search/review_messages.py
 !job_search/resume_integration.py
 !job_search/runtime.py
 !job_search/scanning.py
@@ -90,6 +91,7 @@ job_search/mail/*
 !job_search/mail/model.py
 !job_search/mail/pipeline.py
 !job_search/mail/policy.py
+!job_search/mail/review.py
 !job_search/mail/proposals.py
 !job_search/mail/remote.py
 !job_search/mail/rules.py

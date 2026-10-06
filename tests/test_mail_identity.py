@@ -85,6 +85,19 @@ def test_another_role_at_the_same_company_does_not_use_the_only_known_applicatio
     assert supported_selection([item], item.application_id, 'Application job-app-1', 'Received.') == item.application_id
 
 
+def test_generic_recruiting_language_does_not_invent_conflicting_identity():
+    item = candidate(employer='Northstar', title='Software Engineer')
+    assert supported_candidates([item], 'Your application at Northstar',
+        'We cannot move forward with your application at this time.') == (item,)
+    assert supported_candidates([item], 'Your application to Northstar',
+        'Apply for future openings that you feel align with your experience and motivation. '
+        'Thanks for applying for a role with us.') == (item,)
+    assert supported_candidates([item], 'Thanks for applying to the Software Engineer role at Northstar',
+        'We received your application.') == (item,)
+    assert not supported_candidates([item], 'Thanks for applying to Other Employer',
+        'We cannot move forward with your application at this time.')
+
+
 def test_keyword_free_reply_can_keep_a_reviewed_thread_but_not_a_shared_sender():
     item = candidate()
     assert not supported_candidates([replace(item, match_context='sender previously linked to application')], 'Re: Hello', 'Tuesday works.')

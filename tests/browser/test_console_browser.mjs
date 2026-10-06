@@ -382,7 +382,9 @@ with sqlite3.connect(sys.argv[1]) as con:
   await applicationRole.getByRole('link', {name:'Interview request · Needs review',exact:true}).click();
   await page.locator('#attention-list').filter({hasText:'schedule a conversation'}).waitFor();
   await snapshot('review'); await pace(page);
-  await page.locator('#attention-list').getByRole('button',{name:'Confirm update',exact:true}).click();
+  await page.locator('#attention-list').getByRole('button',{name:'Resolve email',exact:true}).click();
+  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
+  await page.getByRole('button',{name:'Save resolution',exact:true}).click();
   await page.waitForFunction(()=>consoleState.reviews.length===0);
   await page.locator('#review-count').filter({hasText:/^$/}).waitFor({state:'attached'});
   await applicationRole.locator('.pending-note').waitFor({state:'detached'});
@@ -394,6 +396,7 @@ with sqlite3.connect(sys.argv[1]) as con:
   await advance('reply');
   await page.reload();
   await page.goto(url+`/#applications/${applicationId}/actions`);
+  await page.locator('#attention-list .review-message > summary').click();
   await page.locator('#attention-list .message-body').filter({hasText:'Hi Morgan'}).waitFor();
   assert.equal(await page.locator('#review-count').innerText(), '1');
   assert.match(await applicationRole.locator('.pending-note').textContent(), /Reply draft · Needs (approval|review)/);
@@ -475,7 +478,7 @@ for name in ['retry','dismiss']:
   await page.evaluate(() => window.__reviewRefreshForTest);
   await page.unroute('**/api/v1/actions', holdReviewActions);
   await failedMail.getByText('evidence quote and span do not match sanitized mail',{exact:true}).waitFor({state:'visible'});
-  assert.equal(await page.locator('#attention-list article').filter({hasText:'Mail failure dismiss'}).locator('details').getAttribute('open'), null);
+  assert.equal(await page.locator('#attention-list article').filter({hasText:'Mail failure dismiss'}).locator('details').evaluateAll(items => items.every(item => !item.open)), true);
   report.checks.push('An in-flight Review refresh preserves expanded technical details without opening unrelated records.');
   await snapshot('mail-failure-review');
   const retryResponse = page.waitForResponse(response => response.url().endsWith('/api/v1/mail/failures/resolve'));

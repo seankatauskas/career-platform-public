@@ -24,6 +24,9 @@ The generated [OpenWiki](../openwiki/quickstart.md) describes the original colle
 
 ## Interface
 
+- [Resolve email reviews](mail-review.md): manual corrections, application matching,
+  missing records, explicit next steps, and agent-assisted batch resolution.
+
 - [Design language](design-language.md): palette, typography, component hierarchy, and media capture conventions.
 
 - [Local-first setup and full-state migration](operations/local-first-setup.md) — enroll paused, use an unchanged resume, then connect accounts.

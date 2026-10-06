@@ -26,6 +26,13 @@ def _names(subject: str, text: str) -> tuple[str, ...]:
         for match in re.finditer(pattern, subject + "\n" + text, re.I):
             name = re.split(r"\.\s|\s+(?:for|has|was|is|we)\b|\s+[|–—]\s", match[1], maxsplit=1, flags=re.I)[0]
             name = name.strip(" .,:;\"'“”")
+            # These are time/process phrases, not competing employer identities.
+            if re.match(r"(?:this|that|the present|any) (?:time|stage|point)\b", name, re.I):
+                continue
+            # "Applying to the Engineer role at Acme" names Acme, not the role.
+            role_employer = re.fullmatch(r"(?:the )?.+? (?:role|position) at (.+)", name, re.I)
+            if role_employer:
+                name = role_employer[1].strip(" .,:;")
             if name:
                 names.append(name)
     return tuple(names)
@@ -48,7 +55,12 @@ def supported_candidates(
     from .rules import employer_named
     names = _names(subject, text)
     message = subject + "\n" + text
-    roles = re.findall(r"\b(?:apply|applying|application) for (?:the )?([^\n.!?]{1,160}?) (?:role|position)\b", message, re.I)
+    # Only a specific named role can contradict the stored title. Generic prose
+    # such as "apply for a role" or future-opening encouragement cannot do so.
+    roles = re.findall(r"\b(?:apply|applying|application) for (?:the )?([^\n.!?]{1,100}?) (?:role|position)\b", message, re.I)
+    roles = [role for role in roles if len(role.split()) <= 10
+             and not re.match(r"(?:a|an|any|another|future|other|open|different|new)\b", role, re.I)
+             and not re.search(r"\b(?:you|we|our|your|that|which)\b", role, re.I)]
     supported = []
     for candidate in candidates:
         # A conflicting explicit employer overrides even an old thread link or ID.

@@ -180,6 +180,9 @@ class _DashboardMailSource:
     def get_mail_message(self, message_id: str):
         return _archive_source(self.config, self.ledger).get_mail_message(message_id)
 
+    def get_review_message(self, message_id: str):
+        return _archive_source(self.config, self.ledger).get_review_message(message_id)
+
 
 def _archive_source(config: RuntimeConfigV1, ledger: JobSearchLedger):
     from .mail import build_archive_mail_source
