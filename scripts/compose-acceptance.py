@@ -297,8 +297,8 @@ print(json.dumps({'supervisor_exec':True,'temporary_exec_blocked':True}))
         if mail_overlay.is_file():
             for service in SERVICES:
                 mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("mail-inference.json","openrouter-api-key")}))')
-                assert all(value == (service == "core") for value in mounts.values()), service
-            report["checks"].append("Only core receives the dedicated mail profile and OpenRouter key; all other service boundaries remain unchanged.")
+                assert all(value == (service in {"core", "dashboard"}) for value in mounts.values()), service
+            report["checks"].append("Only core and dashboard receive the dedicated mail profile and OpenRouter key for mail processing and archived review analysis.")
 
         for service in SERVICES:
             mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("briefing-inference.json","briefing-api-key","interaction-token")}))')

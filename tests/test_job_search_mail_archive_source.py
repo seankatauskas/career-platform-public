@@ -122,6 +122,13 @@ def test_source_searches_decrypted_all_mail_without_exposing_graph_identity() ->
         assert set(message) == {"message_id", "subject", "excerpt"}
         assert len(message["excerpt"]) <= MAX_MESSAGE_EXCERPT
 
+        review = source.get_review_message(str(target["archive_id"]))
+        assert review == {
+            'subject': 'Interview next steps',
+            'body': 'A' * 3000 + ' Please discuss platform reliability on Thursday. ' + 'Z' * 100,
+            'truncated': False,
+        }
+
 
 def test_archive_index_is_metadata_only_and_scan_and_result_counts_are_bounded() -> None:
     class Ledger:

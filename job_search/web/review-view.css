@@ -1,7 +1,20 @@
 /* Review uses the same normalized queue as application notices and navigation. */
 #attention .section-heading { margin-bottom: 16px; }
 #review-summary { margin: 0 0 16px; }
-#attention-list .stack-item { padding: 24px; gap: 24px; align-items: start; }
+#attention .review-card { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0; gap: 20px; align-items: start; overflow-wrap: anywhere; }
+#attention .review-card-content { min-width: 0; padding: 24px 24px 0; }
+#attention .review-card-content:last-child { padding-bottom: 24px; }
+#attention .review-card-header { margin-bottom: 20px; }
+#attention .review-card-header h3 { font-size: 18px; line-height: 1.45; font-weight: 600; margin: 0 0 8px; }
+#attention .review-card-header .meta { margin: 0; }
+#attention .review-card-kind { margin: 0 0 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
+#attention .review-evidence { margin: 0 0 20px; padding: 0 0 0 14px; border-left: 2px solid var(--line-strong); color: var(--secondary-ink); font-size: 15px; line-height: 1.65; }
+#attention .review-card-actions { min-width: 0; margin: 0; padding: 16px 24px 20px; border-top: 1px solid var(--line); gap: 8px; }
+#attention .review-card-actions > button:first-child { margin-right: auto; }
+#attention .review-card-actions > :is(button, a) { min-width: 0; max-width: 100%; font-size: 13px; white-space: normal; }
+#attention .review-card-actions > button { min-height: 40px; }
+#attention .review-card-content :is(button, input, select, textarea) { max-width: 100%; }
+#attention .review-card-content button { white-space: normal; overflow-wrap: anywhere; }
 #attention-list h3 { margin-top: 0; }
 #attention-list .actions { flex-wrap: wrap; align-content: start; }
 #attention-list .technical-details { margin: 16px 0; }
@@ -25,8 +38,23 @@
 .mail-resolution-preview { padding: 16px; border-left: 3px solid var(--accent); background: var(--panel); }
 .mail-resolution-preview h4 { margin-top: 0; }
 .mail-resolution-form [hidden] { display: none; }
-@media (max-width: 768px) {
-  #attention-list .stack-item { display: flex; flex-direction: column; padding: 16px; }
-  #attention-list .actions { width: 100%; }
-  #attention-list .actions > :is(button, select) { max-width: 100%; white-space: normal; }
+#attention .review-suggestion { min-width: 0; margin: 20px 0; padding: 16px; background: var(--subtle); border: 1px solid var(--line); border-radius: 6px; }
+#attention .review-suggestion > p { margin: 6px 0 0; overflow-wrap: anywhere; }
+#attention .review-suggestion > .review-match-label { margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 500; }
+#attention .review-suggestion > .review-match-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.45; }
+#attention .review-suggestion > .review-match-employer { margin: 3px 0 10px; color: var(--secondary-ink); }
+#attention .review-application-choice { min-width: 0; margin: 16px 0 0; gap: 6px; }
+#attention .review-application-choice select { width: 100%; min-width: 0; min-height: 40px; font-size: 14px; }
+#attention .review-match-empty { margin: 12px 0 0; color: var(--secondary-ink); font-size: 14px; line-height: 1.6; }
+#attention .mail-finding { min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 6px; }
+#attention .mail-finding > :is(select, input) { display: block; width: 100%; margin: 8px 0; }
+#attention .mail-finding .message-body { margin: 12px 0; }
+#attention .mail-finding cite { display: block; margin-top: 8px; }
+@media (max-width: 600px) {
+  #attention .review-card-content { padding: 16px 16px 0; }
+  #attention .review-card-content:last-child { padding-bottom: 16px; }
+  #attention .review-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 16px; }
+  #attention .review-card-actions > :first-child { grid-column: 1 / -1; }
+  #attention .review-card-actions > button:first-child { margin-right: 0; }
+  #attention .review-suggestion { padding: 12px; }
 }

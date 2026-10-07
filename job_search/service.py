@@ -237,9 +237,14 @@ class DeterministicJobSearchService:
         selected_application_id: Optional[str],
         reason: str,
         context: MutationContext,
+        *,
+        review_mail_content: Optional[Mapping[str, Any]] = None,
+        review_job_snapshot: Optional[JobSnapshot] = None,
     ) -> Mapping[str, Any]:
         return self.store.decide_event_proposal(
-            proposal_id, decision, selected_application_id, reason, context
+            proposal_id, decision, selected_application_id, reason, context,
+            review_mail_content=review_mail_content,
+            review_job_snapshot=review_job_snapshot,
         )
 
     def auto_apply_event_proposal(

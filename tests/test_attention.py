@@ -401,10 +401,11 @@ def test_budget_deferral_propagates_while_fallback_finalization_remains_availabl
 def test_explicit_reminder_delivery_preserves_requested_time_during_quiet_hours():
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as d:
-        ledger,s,app,clock=setup(d,Clock('2026-10-05T07:00:00Z'))
+        ledger,s,app,clock=setup(d,Clock('2026-10-05T06:59:00Z'))
         live(s,mode='briefings_only',quiet_hours_enabled=True)
-        with patch('job_search.store.utc_now',return_value='2026-10-05T06:59:00Z'):
-            reminder=ledger.create_reminder(dict(application_id=app,note='Requested overnight reminder',due_at=clock.stamp()),ctx('reminder','user'))['reminder']
+        with patch('job_search.store.utc_now',side_effect=clock.stamp):
+            reminder=ledger.create_reminder(dict(application_id=app,note='Requested overnight reminder',due_at='2026-10-05T07:00:00Z'),ctx('reminder','user'))['reminder']
+        clock.advance(1)
         s.from_notification(NotificationIntent('reminder.due',reminder['reminder_id'],'Reminder','Requested overnight reminder',app,{'reminder_id':reminder['reminder_id']}))
         row=notifications(ledger)[0]
         with connect(ledger.store.db_path) as con:

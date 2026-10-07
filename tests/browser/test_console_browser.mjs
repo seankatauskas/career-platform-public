@@ -27,6 +27,8 @@ if (captureDark) await context.addInitScript(() => {
 const recordingStarted=Date.now();
 const page = await context.newPage();
 const pageErrors=[]; page.on('pageerror',error=>pageErrors.push(error.message));
+const initialStatusRequests=[];
+page.on('request',request=>{const endpoint=new URL(request.url()).pathname;if(['/api/v1/health','/api/v1/ops'].includes(endpoint))initialStatusRequests.push(endpoint);});
 const report={passed:false, checks:[], fixture:'Real dashboard, ledger, workers and MCP; fictional records and external responses.', screenshots:[]};
 // Poison historical application provenance to prove it never becomes visible UI.
 const modelDiagnostics = {ranking_score:.987654,semantic_score:.876543,final_score:.765432,
@@ -104,6 +106,57 @@ try {
   assert.match(await page.title(),/Applications/);
   await page.waitForFunction(() => consoleState.initialized);
   assert.equal(await page.locator('#application-workspace').isVisible(), false);
+  await page.waitForFunction(()=>document.querySelector('#notification-status').textContent!=='Checking system status…');
+  assert(initialStatusRequests.includes('/api/v1/health'));
+  assert.equal(initialStatusRequests.includes('/api/v1/ops'),false);
+  // Initial Review gets only cheap header health. A delayed result must not
+  // overwrite the newer diagnostic status after navigating to Operations.
+  const statusProbe=await context.newPage();
+  const probeRequests=[];
+  statusProbe.on('request',request=>probeRequests.push(new URL(request.url()).pathname));
+  statusProbe.on('pageerror',error=>pageErrors.push(error.message));
+  let releaseHeaderHealth;
+  let headerResponseStatus=200;
+  let heldHeaderHealth=new Promise(resolve=>{releaseHeaderHealth=resolve;});
+  await statusProbe.route('**/api/v1/health',async route=>{
+    await heldHeaderHealth;
+    await route.fulfill({status:headerResponseStatus,json:headerResponseStatus===200?{status:'healthy'}:{error:'Delayed health outage'}});
+  });
+  await statusProbe.route('**/api/v1/ops',async route=>{
+    const response=await route.fetch();const body=await response.json();
+    body.readiness={...body.readiness,status:'blocked',capabilities:[]};
+    body.recovery={...body.recovery,items:[]};
+    body.notifications={...body.notifications,items:[],reconciliation:[]};
+    await route.fulfill({response,json:body});
+  });
+  try {
+    await statusProbe.goto(url+'/#review');
+    await statusProbe.waitForFunction(()=>consoleState.initialized && reviewAttentionLoaded && reviewActionsLoaded);
+    assert(probeRequests.includes('/api/v1/health'));
+    assert.equal(probeRequests.includes('/api/v1/ops'),false);
+    await statusProbe.evaluate(()=>{loadHeaderHealth();loadHeaderHealth();});
+    assert.equal(probeRequests.filter(path=>path==='/api/v1/health').length,1);
+    await statusProbe.goto(url+'/#settings/operations');
+    await statusProbe.locator('#readiness-summary h3').filter({hasText:'Your search needs attention'}).waitFor();
+    await statusProbe.waitForFunction(()=>!document.querySelector('#ops').hasAttribute('aria-busy'));
+    assert(probeRequests.includes('/api/v1/ops'));
+    assert(await statusProbe.locator('#health-detail .metric').count()>0);
+    assert.equal(await statusProbe.locator('#notification-status').textContent(),'Your search needs attention.');
+    releaseHeaderHealth();
+    await statusProbe.evaluate(async()=>{await headerHealthTask;});
+    assert.equal(await statusProbe.locator('#notification-status').textContent(),'Your search needs attention.');
+    headerResponseStatus=503;
+    heldHeaderHealth=new Promise(resolve=>{releaseHeaderHealth=resolve;});
+    await statusProbe.goto(url+'/#review');await statusProbe.reload();
+    await statusProbe.waitForFunction(()=>consoleState.initialized && reviewAttentionLoaded && reviewActionsLoaded);
+    await statusProbe.goto(url+'/#settings/operations');
+    await statusProbe.locator('#readiness-summary h3').filter({hasText:'Your search needs attention'}).waitFor();
+    await statusProbe.waitForFunction(()=>!document.querySelector('#ops').hasAttribute('aria-busy'));
+    releaseHeaderHealth();
+    await statusProbe.evaluate(async()=>{await headerHealthTask?.catch(()=>{});});
+    assert.equal(await statusProbe.locator('#notification-status').textContent(),'Your search needs attention.');
+  } finally {releaseHeaderHealth();await statusProbe.close();}
+  report.checks.push('Applications and Review load cheap header health without Operations; full diagnostics load on navigation and ignore stale header results.');
   await page.goto(url+'/#applications');
   await page.waitForFunction(() => consoleState.initialized);
   await page.reload();
@@ -381,10 +434,15 @@ with sqlite3.connect(sys.argv[1]) as con:
   await page.locator('#application-needs-review').uncheck();
   await applicationRole.getByRole('link', {name:'Interview request · Needs review',exact:true}).click();
   await page.locator('#attention-list').filter({hasText:'schedule a conversation'}).waitFor();
+  await page.locator('#attention-list .review-message > summary').click();
+  await page.locator('#attention-list .review-message .message-body').filter({hasText:'schedule a conversation'}).waitFor();
   await snapshot('review'); await pace(page);
-  await page.locator('#attention-list').getByRole('button',{name:'Resolve email',exact:true}).click();
-  await page.getByRole('button',{name:'Preview resolution',exact:true}).click();
-  await page.getByRole('button',{name:'Save resolution',exact:true}).click();
+  assert.match(await page.locator('#attention-list .review-suggestion').innerText(), /Likely application/);
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.locator('#attention-list').evaluate(el=>el.scrollWidth<=el.clientWidth));
+  await snapshot('review-mobile');
+  await page.setViewportSize(viewport);
+  await page.locator('#attention-list').getByRole('button',{name:'Record interview request',exact:true}).click();
   await page.waitForFunction(()=>consoleState.reviews.length===0);
   await page.locator('#review-count').filter({hasText:/^$/}).waitFor({state:'attached'});
   await applicationRole.locator('.pending-note').waitFor({state:'detached'});

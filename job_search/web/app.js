@@ -202,7 +202,7 @@ async function initialize() {
       $("#review-count").textContent = "";
       $("#review-count").title = "Review count unavailable";
     });
-    if (consoleState.view !== "ops") loadHealth().catch(() => {
+    if (consoleState.view !== "ops") loadHeaderHealth().catch(() => {
       renderHeaderNotification("System status could not be loaded. Open Operations to retry.", true);
     });
   } catch (error) {

@@ -248,6 +248,8 @@ requirements/*
 !job_search/mail/identity.py
 
 !job_search/job_preview.py
+!job_search/review_recommendations.py
+!job_search/review_recovery.py
 !job_search/web/job-preview.js
 
 !job_search/application_documents.py

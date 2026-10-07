@@ -46,6 +46,43 @@ and task consumers cannot independently reinterpret messages. The design include
 contract versioning, projection ownership, evaluation, and rollout requirements;
 schema 20 supplies the runtime migration, with legacy mode as the upgrade default.
 
+Dashboard Review adds read-only action and application suggestions to
+`GET /api/v1/attention`. Event buttons name the proposed update, such as recording
+a rejection or confirming receipt. Matching uses the archived email subject and
+body when available, with saved evidence as a fallback. Employer, role, job ID,
+and existing conversation evidence rank applications, including records without
+observed submissions. The best supported match is preselected, with a note when
+several roles have similar evidence. If no application matches, a bounded,
+metadata-only catalog search suggests an existing posting, including closed jobs.
+Users can change the suggested application or job before confirming. A catalog
+selection creates or reuses its application record and applies the email action
+in one transaction; it does not invent a submission observation. Suggestions do
+not create events or mail links until the user clicks
+the corresponding action, and confirmations revalidate the selection through the
+ledger. The full email body stays out of the attention response and command
+receipts; the existing message disclosure provides it separately.
+
+Review cards keep email content and the editable job choice above a separate
+action footer, so long subjects, job titles, and unmatched guidance cannot
+compress the message column. Identity disambiguation runs once per candidate
+set and is reused for its result rows; suggestions are still recomputed from
+current evidence on each request.
+
+Dashboard startup uses `GET /api/v1/health` for the header's background-work
+status. Full readiness and ranking diagnostics load when Operations opens.
+An Operations response reuses its policy inspection for ranking coverage within
+that request; coverage counts stay in read-only SQL rather than materializing
+the whole catalog in Python. No cross-request diagnostic cache is used.
+
+For failed mailbox processing with an available archive, Review prepares a new
+pending proposal through `POST /api/v1/mail/failures/analyze`. This uses the
+configured mail classifier and validates its evidence against the archived
+message; it does not fetch Graph again or apply an application event. Opening
+Review starts this bounded recovery in the background, so an archived receipt can
+offer a preselected job and “Confirm application received” even when the extension
+missed the submission. GET requests remain passive. Unavailable analysis keeps
+the retry/dismiss controls, and confirming the proposed action remains explicit.
+
 ## Parallel ownership
 
 Task worktrees must start from the contract commit and stay within these boundaries:

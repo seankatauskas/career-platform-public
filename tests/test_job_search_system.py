@@ -83,6 +83,21 @@ def test_hermes_resume_view_never_constructs_model_or_document_tools() -> None:
         assert gateway.toolchain is None
 
 
+def test_dashboard_archive_analysis_is_lazy_and_respects_mail_configuration() -> None:
+    from dataclasses import replace
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        config = RuntimeConfigV1.defaults(Path(directory))
+        classifier = object()
+        with patch('job_search.runtime._configured_mail_models', return_value=(classifier, None, None, 'test-v1')) as models:
+            disabled = build_dashboard_controller(config)
+            assert disabled.review_classifier_factory is None
+            enabled = build_dashboard_controller(replace(config, remote_mail_inference_enabled=True))
+            assert callable(enabled.review_classifier_factory)
+            models.assert_not_called()
+            assert enabled.review_classifier_factory() == (classifier, 'test-v1')
+            models.assert_called_once()
+
+
 def test_dashboard_only_receives_cost_snapshot_path_not_billing_clients() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = RuntimeConfigV1.defaults(Path(directory))

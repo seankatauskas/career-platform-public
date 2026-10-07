@@ -36,6 +36,58 @@ function reviewTitle(item) {
 function reviewStatus(item) {
   return item.status === "needs_reconciliation" ? "Check outcome" : item.kind === "outlook_reply_draft" || item.kind === "outlook_calendar_hold" ? "Needs approval" : "Needs review";
 }
+function reviewEventActionLabel(item) {
+  if (item.suggested_resolution?.action === "accept" && item.suggested_resolution.label) return item.suggested_resolution.label;
+  return ({submission_confirmed: "Confirm application received", interview_requested: "Record interview request",
+    recruiter_contact: "Record recruiter contact", assessment_requested: "Record assessment request",
+    assessment_completed: "Record assessment completed", interview_scheduled: "Record interview scheduled",
+    interview_completed: "Record interview completed", rejected: "Record rejection", rejection_received: "Record rejection",
+    offer_received: "Record offer", offer_accepted: "Record offer accepted", withdrawn: "Record withdrawal"})[item.detail] || "Confirm update";
+}
+function recommendedReviewApplication(item, candidates) {
+  const suggestion = item.suggested_resolution;
+  return suggestion && !suggestion.requires_selection && candidates.includes(suggestion.application_id)
+    ? suggestion.application_id : "";
+}
+function reviewJobValue(job) { return `job:${job.ats}:${job.id}`; }
+function reviewJobMatches(item) {
+  const jobs = [...(item.job_matches || []), item.suggested_resolution?.job].filter(job => job?.ats && job?.id);
+  return [...new Map(jobs.map(job => [reviewJobValue(job), job])).values()];
+}
+function selectedReviewJob(item, value) {
+  return reviewJobMatches(item).find(job => reviewJobValue(job) === value);
+}
+function recommendedReviewSelection(item, candidates) {
+  const applicationId = recommendedReviewApplication(item, candidates);
+  if (applicationId) return applicationId;
+  const suggestion = item.suggested_resolution;
+  return suggestion?.job && !suggestion.requires_selection && selectedReviewJob(item, reviewJobValue(suggestion.job))
+    ? reviewJobValue(suggestion.job) : "";
+}
+function renderReviewSuggestion(item, detail) {
+  const suggestion = item.suggested_resolution;
+  if (!suggestion) return;
+  const section = node("div", "review-suggestion");
+  const match = (item.application_matches || []).find(app => app.application_id === suggestion.application_id);
+  const application = state.applications.find(app => app.application_id === suggestion.application_id);
+  if (suggestion.application_id) {
+    const employer = application?.employer_snapshot || match?.employer;
+    const title = application?.title_snapshot || match?.title;
+    section.append(node("p", "review-match-label", "Likely application"),
+      node("p", "review-match-title", title || employer || suggestion.application_id));
+    if (employer && title) section.append(node("p", "review-match-employer", employer));
+  } else if (suggestion.job) {
+    section.append(node("p", "review-match-label", "Likely job"),
+      node("p", "review-match-title", suggestion.job.title || suggestion.job.company),
+      node("p", "review-match-employer", suggestion.job.company));
+    section.append(node("p", "help", "Confirmation creates the application record and links this email."));
+  } else if (["event_proposal", "mail_discovery"].includes(item.kind)) {
+    section.append(node("p", "review-match-label", "Application match"));
+  }
+  if (suggestion.explanation) section.append(node("p", "meta", suggestion.explanation));
+  detail.append(section);
+  return section;
+}
 function getReviewItems() {
   const groups = consoleState.reviews.filter(item => item.kind === "mail_analysis" && item.analysis?.mode === "shared" && !item.analysis?.replay_id && item.analysis?.current !== false);
   const groupedProposals = new Set(groups.flatMap(item => (item.analysis.findings || []).filter(f => f.projection).map(f => `${f.projection.kind}:${f.projection.id}`)));
@@ -94,6 +146,10 @@ function renderReviewQueue() {
   // Async attention/action refreshes replace cards. Preserve the user's native
   // disclosure state for the same review identity, including mailbox scope.
   const disclosures = captureReviewDisclosures(list);
+  const applicationSelections = new Map([...list.querySelectorAll('[data-review-key]')].flatMap(row => {
+    const select = row.querySelector('[data-review-application]');
+    return select?.dataset.reviewSelectionChanged ? [[row.dataset.reviewKey, select.value]] : [];
+  }));
   const history = document.querySelector("#action-list");
   const historyDisclosures = captureReviewDisclosures(history);
   clear(list);
@@ -118,6 +174,12 @@ function renderReviewQueue() {
     const row = item.raw.action_id ? actionItem(item.raw) : reviewItem(item);
     row.dataset.reviewKey = item.key;
     restoreReviewDisclosures(row, disclosures);
+    const applicationSelect = row.querySelector('[data-review-application]');
+    const savedApplication = applicationSelections.get(item.key);
+    if (applicationSelect && savedApplication !== undefined && [...applicationSelect.options].some(option => option.value === savedApplication)) {
+      applicationSelect.value = savedApplication;
+      applicationSelect.dispatchEvent(new Event('change'));
+    }
     row.tabIndex = -1;
     row.id = `review-${encodeURIComponent(item.key)}`;
     if (route[1] === encodeURIComponent(item.kind) && route[2] === encodeURIComponent(item.id)) { row.classList.add("review-selected"); focused = row; }
@@ -147,6 +209,61 @@ function renderReviewQueue() {
 }
 let reviewAttentionEpoch = 0;
 let reviewActionsEpoch = 0;
+const reviewFailureAnalyses = new Map();
+const reviewFailureAnalysisQueue = [];
+let reviewFailureAnalysisTask = null;
+function reviewFailureIdentity(item) {
+  return JSON.stringify([item.account_id, item.folder_ref, item.query_version, item.id]);
+}
+function queueReviewFailureAnalysis(retryItem = null) {
+  if (consoleState.view !== "review") return Promise.resolve();
+  if (!retryItem && reviewFailureAnalysisTask) return reviewFailureAnalysisTask;
+  // Snapshot the loaded queue. Refreshes during this batch cannot append more
+  // work; each identity gets one automatic attempt and requests stay sequential.
+  const candidates = retryItem ? [retryItem] : consoleState.reviews.filter(item =>
+    item.kind === "mail_processing_failure" && item.can_analyze_archive === true
+      && !reviewFailureAnalyses.has(reviewFailureIdentity(item)));
+  for (const item of candidates) {
+    if (item.can_analyze_archive !== true) continue;
+    const identity = reviewFailureIdentity(item);
+    const previous = reviewFailureAnalyses.get(identity);
+    if (["pending", "running"].includes(previous?.status)) continue;
+    reviewFailureAnalyses.set(identity, {status: "pending", commandId: previous?.commandId || key("mail-analysis")});
+    reviewFailureAnalysisQueue.push(item);
+  }
+  if (retryItem && reviewFailureAnalysisQueue.length) renderReviewQueue();
+  if (reviewFailureAnalysisTask || !reviewFailureAnalysisQueue.length) return reviewFailureAnalysisTask || Promise.resolve();
+  renderReviewQueue();
+  reviewFailureAnalysisTask = Promise.resolve().then(async () => {
+    while (reviewFailureAnalysisQueue.length && consoleState.view === "review") {
+      const item = reviewFailureAnalysisQueue.shift();
+      const identity = reviewFailureIdentity(item);
+      const analysis = reviewFailureAnalyses.get(identity);
+      if (!consoleState.reviews.some(row => row.kind === "mail_processing_failure"
+        && row.can_analyze_archive === true && reviewFailureIdentity(row) === identity)) {
+        analysis.status = "complete";
+        continue;
+      }
+      analysis.status = "running";
+      renderReviewQueue();
+      try {
+        await api("/api/v1/mail/failures/analyze", {method: "POST", body: JSON.stringify({
+          account_id: item.account_id, folder_ref: item.folder_ref,
+          query_version: item.query_version, message_id: item.id, idempotency_key: analysis.commandId,
+        })});
+        analysis.status = "complete";
+        // Only analysis is prepared here. The resulting proposal still requires
+        // the user's normal confirmation before any application record changes.
+        await loadReviewQueue();
+      } catch (error) {
+        analysis.status = "failed";
+        analysis.error = error.message;
+        renderReviewQueue();
+      }
+    }
+  }).finally(() => { reviewFailureAnalysisTask = null; });
+  return reviewFailureAnalysisTask;
+}
 async function fetchReviewAttention() {
   const epoch = ++reviewAttentionEpoch;
   try {
@@ -167,7 +284,10 @@ async function fetchReviewActions() {
     }
   } catch (error) { if (epoch === reviewActionsEpoch) reviewActionsError = error; throw error; }
 }
-async function loadAttention() { try { await fetchReviewAttention(); } finally { renderReviewQueue(); } }
+async function loadAttention() {
+  try { await fetchReviewAttention(); } finally { renderReviewQueue(); }
+  queueReviewFailureAnalysis();
+}
 async function loadActions() { try { await fetchReviewActions(); } finally { renderReviewQueue(); } }
 let reviewLoadEpoch = 0;
 async function loadReviewQueue() {
@@ -183,6 +303,7 @@ async function loadReviewQueue() {
     renderReviewQueue();
     const failure = results.find(result => result.status === "rejected");
     if (failure) { feedback.textContent = `Some review items could not be refreshed. Previous items are kept. ${failure.reason.message}`; feedback.hidden = false; }
+    if (results[0].status === "fulfilled") queueReviewFailureAnalysis();
   } finally {
     if (epoch === reviewLoadEpoch) { button.disabled = false; document.querySelector("#attention-list").removeAttribute("aria-busy"); }
   }
@@ -401,12 +522,13 @@ function actionPreview(action) {
 async function decideProposal(item, decision, selectedApplicationId, button) {
   button.disabled = true;
   try {
+    const job = selectedReviewJob(item, selectedApplicationId);
     await api(`/api/v1/proposals/${item.id}/decision`, {
       method: "POST",
       body: JSON.stringify({
         idempotency_key: key("review"),
         decision,
-        selected_application_id: selectedApplicationId,
+        ...(job && decision === "accepted" ? {selected_job: {ats: job.ats, id: job.id}} : {selected_application_id: job ? null : selectedApplicationId}),
         reason: decision === "accepted" ? "confirmed in dashboard" : "rejected in dashboard",
       }),
     });
@@ -491,9 +613,9 @@ function mailCorrection(finding) {
   }};
 }
 function mailAnalysisItem(analysis, historical = false) {
-  const row = node("article", "stack-item mail-analysis");
+  const row = node("article", "stack-item review-card mail-analysis");
   row.dataset.analysisId = analysis.analysis_id;
-  const detail = node("div", "stack");
+  const detail = node("div", "stack review-card-content");
   detail.append(node("h3", "", analysis.subject || "Email findings"));
   detail.append(meta([historical ? "Email review history" : "Needs review", displayDate(analysis.created_at)]));
   detail.append(reviewMessageDisclosure({kind:"mail_analysis", id:analysis.analysis_id}));
@@ -572,8 +694,11 @@ function mailAnalysisItem(analysis, historical = false) {
       } else updateSave();
     }
   });
-  if (controls.length) detail.append(save);
-  detail.append(feedback); row.append(detail); return row;
+  if (controls.length) {
+    const actions = node("footer", "actions review-card-actions");
+    actions.append(save); row.append(actions);
+  }
+  detail.append(feedback); row.prepend(detail); return row;
 }
 let mailHistoryEpoch = 0;
 let mailDetailRoute = "";
@@ -611,20 +736,24 @@ document.querySelector("#refresh-mail-history").addEventListener("click", loadMa
 function reviewItem(normalized) {
     const item = normalized.raw;
     if (item.kind === "mail_analysis") return mailAnalysisItem(item.analysis);
-    const row = node("article", "stack-item");
-    const detail = node("div");
-    detail.append(node("h3", "", normalized.title));
-    detail.append(meta([reviewStatus(normalized), `Received ${displayDate(item.created_at)}`]));
-    if (item.subject) detail.append(node("p", "", item.subject), node("p", "meta", item.sender || ""));
+    const row = node("article", "stack-item review-card");
+    const detail = node("div", "review-card-content");
+    const header = node("header", "review-card-header");
+    if (item.subject) header.append(node("p", "review-card-kind", normalized.title));
+    header.append(node("h3", "", item.subject || normalized.title));
+    header.append(meta([item.sender, reviewStatus(normalized), `Received ${displayDate(item.created_at)}`]));
+    detail.append(header);
+    let technical;
     if (item.confidence !== undefined) {
-      const technical = node("details", "technical-details");
+      technical = node("details", "technical-details");
       technical.append(node("summary", "", "Review details"), node("p", "meta", `${Math.round(item.confidence * 100)}% confidence`));
-      detail.append(technical);
     }
     const application = state.applications.find(app => app.application_id === item.application_id);
     if (application) { detail.append(jobPreviewButton(application, `${application.employer_snapshot} · ${application.title_snapshot}`)); const link = node("a", "review-context-link", "Open application messages"); link.href = applicationHref(application.application_id, "messages"); detail.append(link); }
-    if (item.evidence_quote) detail.append(node("p", "meta", `“${item.evidence_quote}”`));
+    if (item.evidence_quote) detail.append(node("blockquote", "review-evidence", item.evidence_quote));
+    const suggestion = renderReviewSuggestion(item, detail);
     detail.append(reviewMessageDisclosure(item));
+    if (technical) detail.append(technical);
     if (item.kind === "temporal_proposal") {
       const when = item.detail === "interview"
         ? `${displayDate(item.starts_at)} – ${displayDate(item.ends_at)}`
@@ -633,9 +762,8 @@ function reviewItem(normalized) {
       detail.append(node("p", "meta", `${when} · ${item.time_zone}`));
       detail.append(node("p", "help", "Saves the proposed time to this application. It does not accept an invitation or notify anyone."));
     }
-    const actions = node("div", "actions");
+    const actions = node("footer", "actions review-card-actions");
     if (["lifecycle_correction","interview_revision","mail_discovery"].includes(item.kind)) renderLifecycleReview(item, detail, actions);
-    if (item.kind === "event_proposal") detail.append(node("p", "help", "Review the interpretation, choose an application, and preview what will change."));
     if (item.kind === "browser_submission") {
       detail.append(node("p", "", item.detail));
       const link = node("a", "review-context-link", "Check application record");
@@ -643,7 +771,28 @@ function reviewItem(normalized) {
       actions.append(link);
     }
     if (item.kind === "mail_processing_failure") {
-      detail.append(node("p", "meta", "This email could not be analyzed. Retry it on the next mailbox sync, or dismiss it if no application update is needed. Dismissing keeps the email in Outlook."));
+      const analysis = reviewFailureAnalyses.get(reviewFailureIdentity(item));
+      const analyzing = ["pending", "running"].includes(analysis?.status);
+      if (analyzing) {
+        const progress = node("p", "review-analysis-status meta", "Finding matching job and suggested action…");
+        progress.setAttribute("role", "status");
+        detail.append(progress);
+      } else if (analysis?.status === "failed") {
+        detail.append(node("p", "review-analysis-status meta", "A suggested action could not be prepared. You can try again or use the controls below."));
+        const error = node("details");
+        error.append(node("summary", "", "Analysis details"), node("p", "meta", analysis.error));
+        detail.append(error);
+      } else if (analysis?.status === "complete") {
+        detail.append(node("p", "review-analysis-status meta", "Analysis completed. Refresh to see the prepared review item."));
+      }
+      if (!analyzing) detail.append(node("p", "meta", "Retry this email on the next mailbox sync, or dismiss it if no application update is needed. Dismissing keeps the email in Outlook."));
+      if (item.can_analyze_archive === true) {
+        const analyze = node("button", analyzing ? "quiet" : "review-suggested-action", analysis?.status === "failed" ? "Retry suggested action" : "Find suggested action");
+        analyze.type = "button";
+        analyze.disabled = analyzing || analysis?.status === "complete";
+        analyze.addEventListener("click", () => queueReviewFailureAnalysis(item));
+        actions.append(analyze);
+      }
       if (item.error) {
         const explanation = /evidence quote.*span|span.*sanitized/i.test(item.error)
           ? "The analysis could not verify its supporting text in the email. No application status was changed."
@@ -661,9 +810,10 @@ function reviewItem(normalized) {
           actions.append(link);
         }
       } catch (_) {}
+      const suggestedFailureAction = item.suggested_resolution?.action === "dismiss" || item.can_retry === false ? "dismiss" : "retry";
       for (const [action, label] of [["retry", "Retry processing"], ["dismiss", "Dismiss"]]) {
-        const button = node("button", "", label); button.type = "button";
-        button.disabled = action === "retry" && item.can_retry === false;
+        const button = node("button", !item.can_analyze_archive && action === suggestedFailureAction ? "review-suggested-action" : "quiet", label); button.type = "button";
+        button.disabled = analyzing || action === "retry" && item.can_retry === false;
         const commandId = key("mail-review");
         button.addEventListener("click", async () => {
           const buttons = [...actions.querySelectorAll("button")];
@@ -684,9 +834,56 @@ function reviewItem(normalized) {
       }
     }
     if (item.kind === "event_proposal") {
+      const candidateIds = [...new Set([item.application_id, ...(item.candidate_application_ids || [])].filter(Boolean))];
+      const jobs = reviewJobMatches(item);
+      const recommendedId = recommendedReviewSelection(item, candidateIds);
+      let selectedApplicationId = item.suggested_resolution ? recommendedId : item.application_id;
+      const accept = node("button", "review-suggested-action", reviewEventActionLabel(item));
+      if (jobs.length || (candidateIds.length && (!item.application_id || candidateIds.length > 1 || item.suggested_resolution?.requires_selection))) {
+        const select = node("select");
+        select.setAttribute("aria-label", "Application for this proposal");
+        select.dataset.reviewApplication = "true";
+        const placeholder = node("option", "", "Choose an application…");
+        placeholder.value = "";
+        select.append(placeholder);
+        const orderedIds = [...new Set([...(item.application_matches || []).map(match => match.application_id).filter(id => candidateIds.includes(id)), ...candidateIds])];
+        orderedIds.forEach((candidate) => {
+          const match = state.applications.find(app => app.application_id === candidate);
+          const suggestedMatch = (item.application_matches || []).find(app => app.application_id === candidate);
+          const description = match ? `${match.employer_snapshot} · ${match.title_snapshot}`
+            : suggestedMatch ? `${suggestedMatch.employer} · ${suggestedMatch.title}` : candidate;
+          const option = node("option", "", `${description}${candidate === recommendedId ? " (suggested)" : ""}`);
+          option.value = candidate;
+          select.append(option);
+        });
+        for (const job of jobs) {
+          const value = reviewJobValue(job);
+          const option = node("option", "", `${job.company} · ${job.title} · New application${value === recommendedId ? " (suggested)" : ""}`);
+          option.value = value;
+          select.append(option);
+        }
+        select.value = selectedApplicationId;
+        select.addEventListener("change", () => {
+          select.dataset.reviewSelectionChanged = "true";
+          selectedApplicationId = select.value;
+          accept.disabled = !selectedApplicationId;
+        });
+        const choice = node("label", "review-application-choice", "Application or job");
+        choice.append(select);
+        (suggestion || detail).append(choice);
+      } else if (!selectedApplicationId) {
+        (suggestion || detail).append(node("p", "review-match-empty", "No matching application yet. Use Resolve email to find or create the right record."));
+      }
+      accept.type = "button";
+      accept.disabled = !selectedApplicationId;
+      accept.addEventListener("click", () => decideProposal(item, "accepted", selectedApplicationId, accept));
+      const reject = node("button", "danger", "Reject");
+      reject.type = "button";
+      reject.addEventListener("click", () => decideProposal(item, "rejected", selectedApplicationId, reject));
+      actions.append(accept, reject);
       const editor = mailResolutionEditor(item);
       detail.append(editor);
-      const resolve = node("button", "", "Resolve email"); resolve.type = "button";
+      const resolve = node("button", "quiet", "Resolve email"); resolve.type = "button";
       resolve.addEventListener("click", () => { editor.open = true; editor.querySelector("select")?.focus(); });
       actions.append(resolve);
     }
@@ -739,14 +936,14 @@ async function reconcileAction(action, resolution, remoteId, button) {
 }
 
 function actionItem(action) {
-    const row = node("article", "stack-item");
-    const detail = node("div");
+    const row = node("article", "stack-item review-card");
+    const detail = node("div", "review-card-content");
     detail.append(node("h3", "", ({ outlook_reply_draft: "Reply draft", outlook_calendar_hold: "Private interview hold" })[action.kind] || action.kind.replaceAll("_", " ")));
     detail.append(meta([action.status === "needs_reconciliation" ? "Check outcome" : action.status.replaceAll("_", " "), action.expires_at ? `Expires ${displayDate(action.expires_at)}` : ""]));
     if (action.status === "pending") detail.append(node("p", "help", action.kind === "outlook_reply_draft" ? "Creates a draft in Outlook for you to review and send." : "Creates a private, tentative calendar hold. No attendees are invited."));
     detail.append(actionPreview(action));
 
-    const actions = node("div", "actions");
+    const actions = node("footer", "actions review-card-actions");
     if (action.status === "pending") {
       const approve = node("button", "", action.kind === "outlook_reply_draft" ? "Create Outlook draft" : "Create private tentative hold");
       approve.type = "button";

@@ -117,6 +117,36 @@ def test_progress_counts_current_families_per_policy_and_handles_missing_state()
         assert ranking_progress(config)['state'] == 'idle'
 
 
+def test_progress_sql_coverage_preserves_orphan_and_duplicate_family_semantics():
+    with progress_fixture() as config:
+        with sqlite3.connect(config.jobs_db) as con:
+            con.execute("INSERT INTO job_families VALUES ('orphan','a','missing')")
+            con.execute("INSERT INTO job_families VALUES ('f1','a','1')")
+        with sqlite3.connect(config.preference_db) as con:
+            con.execute("INSERT INTO preference_scores VALUES ('s','orphan')")
+            con.execute("INSERT INTO preference_scores VALUES ('s','f1')")
+            con.execute("INSERT INTO preference_scores VALUES ('b','removed')")
+        fingerprints = {path: path.read_bytes() for path in (config.jobs_db, config.preference_db, config.proxy_db)}
+        report = ranking_progress(config)
+        assert report['available'] and report['total_families'] == report['postings'] == 2
+        for counts in report['policies'].values():
+            assert counts['ranked_families'] == 2 and counts['unranked_families'] == 0
+        assert all(path.read_bytes() == original for path, original in fingerprints.items())
+
+
+def test_progress_reuses_complete_request_policy_status_and_rechecks_missing_or_partial_status():
+    with progress_fixture() as config:
+        complete = {'selective': {'status': 'ready'}, 'broad': {'status': 'stale'}}
+        with patch('job_search.ranking.progress.inspect_policies', side_effect=AssertionError('repeated inspection')):
+            report = ranking_progress(config, policy_status=complete)
+        assert report['policies']['selective']['freshness'] == 'ready'
+        assert report['policies']['broad']['freshness'] == 'stale'
+        for incomplete in (None, {}, {'selective': {'status': 'ready'}}, {'selective': {}, 'broad': {}}):
+            with patch('job_search.ranking.progress.inspect_policies', return_value=complete) as inspect:
+                assert ranking_progress(config, policy_status=incomplete)['available']
+            assert inspect.call_count == 1
+
+
 @contextmanager
 def progress_fixture():
     with fixture() as (config, store):

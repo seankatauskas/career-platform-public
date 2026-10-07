@@ -264,75 +264,81 @@ class LedgerStore:
         }
 
         def operation(con: sqlite3.Connection, stamp: str) -> Mapping[str, Any]:
-            existing = con.execute(
-                "SELECT * FROM applications WHERE ats=? AND job_id=?",
-                (snapshot.ats, snapshot.job_id),
-            ).fetchone()
-            if existing:
-                return {"created": False, "application": _row(existing)}
-
-            application_id = _new_id()
-            con.execute(
-                "INSERT INTO applications "
-                "(application_id,ats,job_id,family_id,title_snapshot,employer_snapshot,"
-                "company_slug_snapshot,job_url_snapshot,recommendation_session_id,"
-                "recommendation_impression_id,recommendation_model_run_id,"
-                "recommendation_policy_id,recommendation_rank,semantic_score,ranking_score,"
-                "current_phase,terminal_outcome,started_at,submitted_at,confirmed_at,"
-                "last_activity_at,last_event_seq,projection_sha256,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    application_id,
-                    snapshot.ats,
-                    snapshot.job_id,
-                    snapshot.family_id,
-                    snapshot.title,
-                    snapshot.employer,
-                    snapshot.company_slug,
-                    snapshot.job_url,
-                    provenance.session_id,
-                    provenance.impression_id,
-                    provenance.model_run_id,
-                    provenance.policy_id,
-                    provenance.rank,
-                    provenance.semantic_score,
-                    provenance.ranking_score,
-                    ApplicationPhase.PREPARING.value,
-                    None,
-                    stamp,
-                    None,
-                    None,
-                    stamp,
-                    0,
-                    "",
-                    stamp,
-                ),
-            )
-            start_dedupe = "application-started:" + payload_sha256(
-                {"ats": snapshot.ats, "job_id": snapshot.job_id}
-            )
-            self._append_event(
-                con,
-                application_id,
-                ApplicationEventType.APPLICATION_STARTED,
-                stamp,
-                {"snapshot": asdict(snapshot), "provenance": asdict(provenance)},
-                start_dedupe,
-                context,
-                stamp,
-            )
-            self._project(con, application_id)
-            return {
-                "created": True,
-                "application": self._application(con, application_id),
-            }
+            return self._start_application(con, snapshot, provenance, context, stamp)
 
         return self._idempotent("start_application", context, request, operation)
+
+    def _start_application(self, con, snapshot, provenance, context, stamp):
+        """Create or reuse a catalog application within the caller's transaction."""
+        existing = con.execute(
+            "SELECT * FROM applications WHERE ats=? AND job_id=?",
+            (snapshot.ats, snapshot.job_id),
+        ).fetchone()
+        if existing:
+            return {"created": False, "application": _row(existing)}
+
+        application_id = _new_id()
+        con.execute(
+            "INSERT INTO applications "
+            "(application_id,ats,job_id,family_id,title_snapshot,employer_snapshot,"
+            "company_slug_snapshot,job_url_snapshot,recommendation_session_id,"
+            "recommendation_impression_id,recommendation_model_run_id,"
+            "recommendation_policy_id,recommendation_rank,semantic_score,ranking_score,"
+            "current_phase,terminal_outcome,started_at,submitted_at,confirmed_at,"
+            "last_activity_at,last_event_seq,projection_sha256,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                application_id,
+                snapshot.ats,
+                snapshot.job_id,
+                snapshot.family_id,
+                snapshot.title,
+                snapshot.employer,
+                snapshot.company_slug,
+                snapshot.job_url,
+                provenance.session_id,
+                provenance.impression_id,
+                provenance.model_run_id,
+                provenance.policy_id,
+                provenance.rank,
+                provenance.semantic_score,
+                provenance.ranking_score,
+                ApplicationPhase.PREPARING.value,
+                None,
+                stamp,
+                None,
+                None,
+                stamp,
+                0,
+                "",
+                stamp,
+            ),
+        )
+        start_dedupe = "application-started:" + payload_sha256(
+            {"ats": snapshot.ats, "job_id": snapshot.job_id}
+        )
+        self._append_event(
+            con,
+            application_id,
+            ApplicationEventType.APPLICATION_STARTED,
+            stamp,
+            {"snapshot": asdict(snapshot), "provenance": asdict(provenance)},
+            start_dedupe,
+            context,
+            stamp,
+        )
+        self._project(con, application_id)
+        return {
+            "created": True,
+            "application": self._application(con, application_id),
+        }
 
     def record_mail_evidence(
         self,
         evidence: Mapping[str, Any],
         context: MutationContext,
+        *,
+        _transaction: Optional[Tuple[sqlite3.Connection, str]] = None,
     ) -> Mapping[str, Any]:
         account_id = str(evidence.get("account_id") or "").strip()
         immutable_id = str(evidence.get("immutable_message_id") or "").strip()
@@ -398,6 +404,9 @@ class LedgerStore:
                 "created": True,
             }
 
+        if _transaction is not None:
+            context.validate()
+            return operation(*_transaction)
         return self._idempotent("record_mail_evidence", context, normalized, operation)
 
     def get_mail_evidence(self, evidence_id: str) -> Mapping[str, Any]:
@@ -1270,7 +1279,8 @@ class LedgerStore:
         )
 
     def create_event_proposal(
-        self, proposal: EventProposalInput, context: MutationContext
+        self, proposal: EventProposalInput, context: MutationContext, *,
+        _transaction: Optional[Tuple[sqlite3.Connection, str]] = None,
     ) -> Mapping[str, Any]:
         context.validate()
         validate_identifier(proposal.evidence_id, "evidence_id")
@@ -1379,6 +1389,8 @@ class LedgerStore:
             ).fetchone()
             return {"created": True, "proposal": _row(saved)}
 
+        if _transaction is not None:
+            return operation(*_transaction)
         return self._idempotent("create_event_proposal", context, request, operation)
 
     def decide_event_proposal(
@@ -1388,6 +1400,9 @@ class LedgerStore:
         selected_application_id: Optional[str],
         reason: str,
         context: MutationContext,
+        *,
+        review_mail_content: Optional[Mapping[str, Any]] = None,
+        review_job_snapshot: Optional[JobSnapshot] = None,
     ) -> Mapping[str, Any]:
         validate_identifier(proposal_id, "proposal_id")
         if context.actor_kind != "user":
@@ -1396,6 +1411,10 @@ class LedgerStore:
             raise ContractError("proposal decision must be accepted or rejected")
         if selected_application_id:
             validate_identifier(selected_application_id, "application_id")
+        if review_job_snapshot is not None:
+            review_job_snapshot.validate()
+            if selected_application_id or decision != 'accepted':
+                raise ContractError('catalog selection requires acceptance without an application selection')
         request = {
             "proposal_id": proposal_id,
             "decision": decision,
@@ -1403,13 +1422,17 @@ class LedgerStore:
             "reason": reason,
             "actor_kind": context.actor_kind,
         }
+        if review_job_snapshot is not None:
+            request['selected_job'] = {'ats': review_job_snapshot.ats, 'id': review_job_snapshot.job_id}
 
         def operation(con: sqlite3.Connection, stamp: str) -> Mapping[str, Any]:
-            return self._decide_event_proposal(con, stamp, proposal_id, decision, selected_application_id, reason, context)
+            return self._decide_event_proposal(con, stamp, proposal_id, decision, selected_application_id, reason, context,
+                review_mail_content=review_mail_content, review_job_snapshot=review_job_snapshot)
 
         return self._idempotent("decide_event_proposal", context, request, operation)
 
-    def _decide_event_proposal(self, con, stamp, proposal_id, decision, selected_application_id, reason, context, *, create_tasks=True):
+    def _decide_event_proposal(self, con, stamp, proposal_id, decision, selected_application_id, reason, context, *,
+                               create_tasks=True, review_mail_content=None, review_job_snapshot=None):
         proposal = con.execute(
             "SELECT * FROM event_proposals WHERE proposal_id=?", (proposal_id,)
         ).fetchone()
@@ -1420,6 +1443,18 @@ class LedgerStore:
         application_id = selected_application_id or proposal["proposed_application_id"]
         event_result = None
         if decision == "accepted":
+            if review_job_snapshot is not None:
+                from .mail.context import CandidateApplication
+                from .mail.identity import review_supported_candidates
+                content = review_mail_content or {}
+                candidate = CandidateApplication(application_id='catalog-review',
+                    ats=review_job_snapshot.ats, job_id=review_job_snapshot.job_id,
+                    employer=review_job_snapshot.employer, title=review_job_snapshot.title,
+                    company_slug=review_job_snapshot.company_slug)
+                if not review_supported_candidates([candidate], content.get('subject', ''), content.get('body', '')):
+                    raise ContractError('selected job has no supporting mail identity')
+                application_id = self._start_application(con, review_job_snapshot,
+                    RecommendationProvenance(), context, stamp)['application']['application_id']
             if not application_id:
                 raise ContractError("acceptance requires an application selection")
             candidates = json.loads(proposal["candidate_application_ids_json"])
@@ -1427,10 +1462,10 @@ class LedgerStore:
                 # The browser may have delivered the application after this
                 # email was processed. Resolve review choices from current
                 # local evidence, without another provider call or auto-link.
-                candidates = self._unassigned_mail_candidates(proposal["evidence_id"])
-            if candidates and application_id not in candidates:
+                candidates = self._unassigned_mail_candidates(proposal["evidence_id"], review_mail_content=review_mail_content)
+            if review_job_snapshot is None and candidates and application_id not in candidates:
                 raise ContractError("selected application is not a proposal candidate")
-            if not proposal["proposed_application_id"] and application_id not in candidates:
+            if review_job_snapshot is None and not proposal["proposed_application_id"] and application_id not in candidates:
                 raise ContractError("selected application has no supporting mail identity")
             application = self._application(con, application_id)
             event_type = ApplicationEventType(proposal["event_type"])
@@ -2700,9 +2735,13 @@ class LedgerStore:
 
     def list_mail_candidates(
         self, *, received_at: str = "", account_id: str = "",
-        conversation_id: str = "", sender: str = "",
+        conversation_id: str = "", sender: str = "", include_unsubmitted: bool = False,
     ) -> Sequence[Mapping[str, Any]]:
-        """Read application history for local retrieval before bounding model context."""
+        """Read application history for local retrieval before bounding model context.
+
+        Unsubmitted tracked applications are included only for explicit review.
+        Automatic ingestion keeps its submission/evidence eligibility boundary.
+        """
         with connect(self.db_path) as con:
             rows = [_row(row) for row in con.execute(
                 "SELECT a.*, "
@@ -2721,10 +2760,11 @@ class LedgerStore:
                 "OR EXISTS(SELECT 1 FROM lifecycle_mail_observations o JOIN lifecycle_mail_links l USING(observation_id) "
                 "WHERE o.evidence_id=e.evidence_id AND l.application_id=a.application_id)) "
                 "AND e.account_id=? AND lower(e.sender)=lower(?) AND ?<>'') AS same_sender "
-                "FROM applications a WHERE a.submitted_at IS NOT NULL OR a.confirmed_at IS NOT NULL "
+                "FROM applications a WHERE ? OR a.submitted_at IS NOT NULL OR a.confirmed_at IS NOT NULL "
                 "OR a.ats='external' OR EXISTS(SELECT 1 FROM lifecycle_mail_links l WHERE l.application_id=a.application_id) OR EXISTS(SELECT 1 FROM browser_attempts b WHERE b.application_id=a.application_id) "
                 "ORDER BY a.updated_at DESC,a.application_id",
-                (received_at, account_id, conversation_id, conversation_id, account_id, sender, sender),
+                (received_at, account_id, conversation_id, conversation_id, account_id, sender, sender,
+                 include_unsubmitted),
             )]
 
             if conversation_id and account_id:
@@ -2938,23 +2978,37 @@ class LedgerStore:
             return {"status":status, "action":action, "message_id":message_id}
         return self._idempotent("resolve_mail_failure", context, request, operation)
 
-    def _unassigned_mail_candidates(self, evidence_id: str) -> list[str]:
+    def _unassigned_mail_candidates(
+        self, evidence_id: str, *, review_mail_content: Optional[Mapping[str, Any]] = None,
+    ) -> list[str]:
+        """Revalidate identity using a server-loaded archive, or the saved excerpt.
+
+        The optional content must come from the authenticated archive reader,
+        never from a browser request. It remains local to this read and is not
+        included in the decision's persisted idempotency payload.
+        """
         from .mail.context import CandidateApplication
-        from .mail.identity import supported_candidates
+        from .mail.identity import review_supported_candidates
         from .mail.matching import rank_mail_candidates
         evidence = self.get_mail_evidence(evidence_id)
+        subject = evidence['subject']
+        body = evidence['excerpt']
+        if review_mail_content is not None:
+            subject = review_mail_content.get('subject', subject)
+            body = review_mail_content.get('body', body)
         rows = rank_mail_candidates(self.list_mail_candidates(
             received_at=evidence['received_at'], account_id=evidence['account_id'],
             conversation_id=evidence['conversation_id'], sender=evidence['sender'],
-        ), evidence['excerpt'])
+            include_unsubmitted=True,
+        ), subject + '\n' + body)
         candidates = [CandidateApplication(
             application_id=row['application_id'], ats=row['ats'], job_id=row['job_id'],
             employer=row['employer_snapshot'], company_slug=row['company_slug_snapshot'],
             title=row['title_snapshot'], phase=row['current_phase'],
             match_context=row['mail_match_context'],
         ) for row in rows]
-        return [c.application_id for c in supported_candidates(
-            candidates, evidence['subject'], evidence['excerpt'])][:20]
+        return [c.application_id for c in review_supported_candidates(
+            candidates, subject, body)][:20]
 
     def list_attention_items(self) -> Sequence[Mapping[str, Any]]:
         with connect(self.db_path) as con:

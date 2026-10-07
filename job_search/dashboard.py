@@ -186,6 +186,7 @@ class DashboardController:
         demo_mode: bool = False,
         automation_config: Any = None,
         cost_snapshot_path: Optional[Path] = None,
+        review_classifier_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         from .curated import CuratedShortlists
         self.curated = CuratedShortlists(ledger.store.db_path, jobs)
@@ -197,6 +198,8 @@ class DashboardController:
         self._readiness = readiness
         self.notification_recovery = notification_recovery
         self.mail_source = mail_source
+        self.review_classifier_factory = review_classifier_factory
+        self._review_analysis_lock = threading.Lock()
         self.demo_mode = demo_mode
         self.automation_config = automation_config
         self.cost_snapshot_path = cost_snapshot_path
@@ -869,14 +872,14 @@ class DashboardController:
         except ValueError as exc:
             raise ContractError(str(exc)) from exc
 
-    def pipeline_view(self) -> Mapping[str, Any]:
+    def pipeline_view(self, *, policy_status=None) -> Mapping[str, Any]:
         from .scanning import scan_status
         from .ranking.progress import ranking_progress
         collection = scan_status(self.automation_config) if self.automation_config else None
         if collection is not None and self.demo_mode:
             collection = {**collection, "available": False, "reason": "Real scans are disabled in this local preview."}
         return {"collection": collection,
-                "ranking": ranking_progress(self.automation_config) if self.automation_config else None}
+                "ranking": ranking_progress(self.automation_config, policy_status=policy_status) if self.automation_config else None}
 
     def ops_view(self) -> Mapping[str, Any]:
         from .activation import controls
@@ -885,13 +888,14 @@ class DashboardController:
         delivery = self.notification_recovery.list_pending() if self.notification_recovery else {
             "items": [], "bridge_available": False, "reason_code": "not_configured", "truncated": False
         }
+        readiness = self.readiness_view()
         return {
             "automation": automation,
-            **self.pipeline_view(),
+            **self.pipeline_view(policy_status=readiness.get('ranking_policies')),
             "status": health["status"],
             "checked_at": health["checked_at"],
             "health": health,
-            "readiness": self.readiness_view(),
+            "readiness": readiness,
             "costs": self.cost_view(),
             "recovery": {"items": self.recovery_work()},
             "reminders": {
@@ -1509,7 +1513,11 @@ def make_handler(
                     self._json(controller.ledger.get_application_timeline(match.group(1)), session=session, new_session=new_session)
                     return
                 if path == "/api/v1/attention":
-                    self._json({"items": [*controller.ledger.list_attention_items(), *controller.ledger.lifecycle.list_lifecycle_reviews()]}, session=session, new_session=new_session)
+                    from .review_recommendations import enrich_review_items
+                    items = [*controller.ledger.list_attention_items(), *controller.ledger.lifecycle.list_lifecycle_reviews()]
+                    self._json({"items": enrich_review_items(controller.ledger, controller.mail_source, items, controller.jobs,
+                               can_analyze_archives=controller.review_classifier_factory is not None)},
+                               session=session, new_session=new_session)
                     return
                 if path == '/api/v1/mail-review/applications':
                     from .mail.review import MailReviewService
@@ -1723,6 +1731,20 @@ def make_handler(
                     return
                 if path.startswith("/api/v1/lifecycle/"):
                     from .lifecycle.dashboard import mutate
+                    if path == '/api/v1/lifecycle/discoveries/decide' and body.get('selected_job') is not None:
+                        from .review_messages import review_message
+                        from .review_recommendations import review_job_snapshot
+                        if set(body) - {'idempotency_key', 'discovery_id', 'decision', 'selected_job'} or body.get('decision') != 'link_job':
+                            raise ContractError('invalid catalog discovery decision')
+                        content = review_message(controller.ledger, controller.mail_source,
+                            {'kind': 'mail_discovery', 'id': body.get('discovery_id')})
+                        snapshot = review_job_snapshot(controller.jobs, body['selected_job'], content)
+                        result = controller.ledger.lifecycle.decide_discovery(
+                            {key: value for key, value in body.items() if key != 'idempotency_key'},
+                            self._mutation_context(idempotency_key, session, 'dashboard_lifecycle'),
+                            review_job_snapshot=snapshot)
+                        self._json(result, session=session, new_session=new_session)
+                        return
                     result = mutate(controller.ledger.lifecycle, path[len("/api/v1/lifecycle/"):], body,
                         self._mutation_context(idempotency_key, session, "dashboard_lifecycle"))
                     self._json(result, session=session, new_session=new_session)
@@ -1885,6 +1907,18 @@ def make_handler(
                     )
                     self._json(result, session=session, new_session=new_session)
                     return
+                if path == "/api/v1/mail/failures/analyze":
+                    if set(body) - {'idempotency_key', 'account_id', 'folder_ref', 'query_version', 'message_id'}:
+                        raise ContractError('invalid archived mail review request')
+                    if controller.review_classifier_factory is None:
+                        raise ContractError('mail analysis is not configured')
+                    from .review_recovery import recover_review
+                    with controller._review_analysis_lock:
+                        classifier, model_version = controller.review_classifier_factory()
+                        result = recover_review(controller.ledger, controller.mail_source, body, classifier, model_version,
+                            usage_limits=getattr(controller.automation_config, 'inference_usage_limits', None))
+                    self._json(result, session=session, new_session=new_session)
+                    return
                 if path == "/api/v1/mail/failures/resolve":
                     result = controller.ledger.resolve_mail_failure(
                         str(body.get("account_id") or ""), str(body.get("folder_ref") or ""),
@@ -1896,6 +1930,15 @@ def make_handler(
                     return
                 match = PROPOSAL_DECISION_PATH.fullmatch(path)
                 if match:
+                    from .review_messages import review_message
+                    # Resolve evidence on the server; browser-provided text never
+                    # authorizes a different application association.
+                    review_mail_content = review_message(controller.ledger, controller.mail_source,
+                        {'kind': 'event_proposal', 'id': match.group(1)})
+                    snapshot = None
+                    if body.get('selected_job') is not None:
+                        from .review_recommendations import review_job_snapshot
+                        snapshot = review_job_snapshot(controller.jobs, body['selected_job'], review_mail_content)
                     result = controller.ledger.decide_event_proposal(
                         match.group(1),
                         str(body.get("decision") or ""),
@@ -1904,6 +1947,8 @@ def make_handler(
                         else None,
                         str(body.get("reason") or ""),
                         self._mutation_context(idempotency_key, session, "dashboard_review"),
+                        review_mail_content=review_mail_content,
+                        review_job_snapshot=snapshot,
                     )
                     self._json(result, session=session, new_session=new_session)
                     return

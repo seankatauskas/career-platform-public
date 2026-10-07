@@ -176,6 +176,13 @@ class EncryptedArchiveMailSource:
             "excerpt": _excerpt(body, 0, 0, MAX_MESSAGE_EXCERPT),
         }
 
+    def get_review_message(self, message_id: str) -> Mapping[str, Any]:
+        """Dashboard disclosure of the archived text without the agent excerpt cap."""
+        validate_identifier(message_id, "message_id")
+        record = self._ledger.get_encrypted_mail_archive(message_id)
+        subject, body = _parts(self._archive.read_message(message_id))
+        return {"subject": subject, "body": body, "truncated": bool(record['truncated'])}
+
 
 def build_archive_mail_source(
     ledger: Any,

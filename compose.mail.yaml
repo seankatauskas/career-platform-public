@@ -1,6 +1,21 @@
-# Opt-in overlay: only the mail worker receives the dedicated profile and key.
+# Opt-in overlay: the mail worker and dashboard's archived review analysis receive
+# the dedicated profile and key. Other services retain their existing boundaries.
 # AWS operations select it when runtime mail_inference_config is configured.
 services:
+  dashboard:
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/mail-inference.json"
+        target: /run/job-search/mail-inference.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/openrouter-api-key"
+        target: /run/job-search/openrouter-api-key
+        read_only: true
+        bind:
+          create_host_path: false
   core:
     volumes:
       - type: bind

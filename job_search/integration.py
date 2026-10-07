@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -174,6 +175,118 @@ class LocalJobCatalog:
                 (*parameters, limit),
             ).fetchall()
         return tuple(dict(row) for row in rows)
+
+    def review_candidates(self, subject: str, body: str, limit: int = 20) -> Sequence[Mapping[str, Any]]:
+        """Find email-related postings, including jobs with no application record.
+
+        Only company identities and metadata for matching boards are read. Closed
+        postings remain eligible because their recruiting emails can arrive later.
+        This lookup never creates an application or infers a submission.
+        """
+        from .mail.context import CandidateApplication
+        from .mail.identity import review_supported_candidates, unique_supported_application
+        from .mail.matching import rank_mail_candidates
+        from .mail.rules import _searchable
+
+        if not isinstance(subject, str) or not isinstance(body, str):
+            raise ContractError("review subject and body must be strings")
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ContractError("review candidate limit must be between 1 and 50")
+        if not self.jobs_db.is_file():
+            return ()
+        message = subject + "\n" + body
+        haystack = _searchable(message)
+        if not haystack:
+            return ()
+        words = haystack.split()
+        word_set = set(words)
+
+        def contains(value):
+            value = _searchable(str(value or ""))
+            return len(value) >= 4 and bool(re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", haystack))
+
+        def score(title, job_id):
+            role = _searchable(str(title or ""))
+            role_words = set(role.split()) - {"the", "a", "of", "and", "i", "ii", "iii"}
+            return (100 if contains(job_id) else 0) + (30 if contains(title) else
+                10 * len(word_set & role_words) / len(role_words) if role_words else 0)
+
+        with closing(sqlite3.connect(self.jobs_db.as_uri() + "?mode=ro", uri=True, timeout=10)) as con:
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA query_only = ON")
+            columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+            if not {"ats", "id", "company", "title"}.issubset(columns):
+                return ()
+            selected = [field for field in (*self._RESULT_FIELDS, "closed_at") if field in columns]
+            projection = ",".join(selected)
+            boards = [(row['ats'], row['company']) for row in con.execute(
+                "SELECT DISTINCT ats,company FROM jobs WHERE company IS NOT NULL")]
+            # Match compact board slugs against whole words, without normalizing
+            # the full email once for every company in the catalog.
+            names = {_searchable(str(company)).replace(" ", "") for _, company in boards}
+            names = {name for name in names if len(name) >= 3}
+            maximum = max(map(len, names), default=0)
+            mentioned = set()
+            for start in range(len(words)):
+                value = ""
+                for end in range(start, len(words)):
+                    value += words[end]
+                    if len(value) > maximum:
+                        break
+                    if value in names:
+                        mentioned.add(value)
+            matches = [(ats, company) for ats, company in boards
+                       if _searchable(str(company)).replace(" ", "") in mentioned]
+            rows = {}
+            truncated = False
+            candidate_cap = max(100, limit * 5)
+            con.create_function("review_role_score", 2, score)
+            for ats, company in matches:
+                found = con.execute(
+                    f"SELECT {projection} FROM jobs WHERE ats=? AND company=? "
+                    "ORDER BY review_role_score(title,id) DESC,id LIMIT ?",
+                    (ats, company, candidate_cap + 1),
+                ).fetchall()
+                truncated = truncated or len(found) > candidate_cap
+                for row in found[:candidate_cap]:
+                    rows[(row['ats'], row['id'])] = dict(row)
+            # A posting ID can identify the employer even when the email omits
+            # its name. Composite-key lookups use the existing (ats,id) index.
+            identifiers = sorted({variant for token in re.findall(r"[\w][\w-]{3,255}", message)
+                                  for variant in (token, token.lower())})
+            for ats in sorted({ats for ats, _ in boards}):
+                for start in range(0, len(identifiers), 200):
+                    batch = identifiers[start:start + 200]
+                    placeholders = ",".join("?" for _ in batch)
+                    for row in con.execute(f"SELECT {projection} FROM jobs WHERE ats=? AND id IN ({placeholders})", (ats, *batch)):
+                        rows[(row['ats'], row['id'])] = dict(row)
+
+        ranked = rank_mail_candidates([
+            {**row, "application_id": f"catalog:{row['ats']}:{row['id']}",
+             "job_id": row['id'], "employer_snapshot": row['company'],
+             "company_slug_snapshot": row['company'], "title_snapshot": row['title']}
+            for row in rows.values()
+        ], message)
+        candidates = [CandidateApplication(
+            row['application_id'], row['ats'], row['id'], row['company'], row['title'], row['company'],
+        ) for row in ranked]
+        supported = review_supported_candidates(candidates, subject, body)
+        eligible = {candidate.application_id for candidate in supported}
+        unique_id = unique_supported_application(supported, subject, body)
+        result = []
+        for row in ranked:
+            identity = row['application_id']
+            if identity not in eligible:
+                continue
+            unique = identity == unique_id
+            result.append({**{field: row[field] for field in selected},
+                "match_reason": row['mail_match_context'], "match_score": row['mail_match_score'],
+                "match_confidence": "high" if unique and not truncated else "medium",
+                "match_unique": unique and not truncated,
+                "candidates_truncated": truncated or len(supported) > limit})
+            if len(result) == limit:
+                break
+        return tuple(result)
 
     def get_job(self, ats: str, job_id: str) -> Mapping[str, Any]:
         """Read one exact normalized posting, including its bounded description.

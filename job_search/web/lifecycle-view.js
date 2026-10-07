@@ -138,15 +138,39 @@ function renderLifecycleReview(item, detail, actions) {
         actions.append(lifecycleButton(label,'mail/direction',{observation_id:observation.observation_id,direction,reason:'Reviewed message direction in dashboard',expected_updated_at:observation.updated_at}));
       }
     }
-    detail.append(node('p','','This recruiting conversation is not linked to an application. Review the employer and role before creating a record.'));
+    detail.append(node('p','','Link this recruiting conversation to an existing application, or review the employer and role to create a record.'));
     const form=node('div','controls');
     const employer=lifecycleField(form,'Employer','employer'); employer.value=proposal.employer || '';
     const title=lifecycleField(form,'Role','title'); title.value=proposal.title || '';
-    const create=node('button','','Create application record');create.type='button';
+    const applications=new Map(state.applications.map(a=>[a.application_id,a]));
+    for(const match of item.application_matches || []) {
+      if(!applications.has(match.application_id)) applications.set(match.application_id,{
+        application_id:match.application_id,employer_snapshot:match.employer,title_snapshot:match.title,
+      });
+    }
+    const jobs=reviewJobMatches(item);
+    const recommendedId=recommendedReviewSelection(item,[...applications.keys()]);
+    const create=node('button',recommendedId?'quiet':'','Create application record');create.type='button';
     create.addEventListener('click',()=>lifecycleCommand('discoveries/decide',{discovery_id:item.id,decision:'create',employer:employer.value,title:title.value},create).catch(()=>{}));
-    const existing=lifecycleField(form,'Or link existing application','application_id',[['','Select application'],...state.applications.map(a=>[a.application_id,`${a.employer_snapshot} · ${a.title_snapshot}`])]);
-    const link=node('button','quiet','Link application');link.type='button';link.addEventListener('click',()=>{if(existing.value)lifecycleCommand('discoveries/decide',{discovery_id:item.id,decision:'link',application_id:existing.value},link).catch(()=>{});});
-    detail.append(form);actions.append(create,link,lifecycleButton('Dismiss','discoveries/decide',{discovery_id:item.id,decision:'dismiss'}));
+    const matchIds=(item.application_matches || []).map(a=>a.application_id);
+    const choices=[...applications.values()].sort((a,b)=>{
+      const index=id=>{const value=matchIds.indexOf(id);return value<0?Infinity:value;};
+      return index(a.application_id)-index(b.application_id);
+    });
+    const existing=lifecycleField(form,'Or link existing application','application_id',[['','Select application'],
+      ...choices.map(a=>[a.application_id,`${a.employer_snapshot} · ${a.title_snapshot}${a.application_id===recommendedId?' (suggested)':''}`]),
+      ...jobs.map(job=>[reviewJobValue(job),`${job.company} · ${job.title} · New application${reviewJobValue(job)===recommendedId?' (suggested)':''}`])]);
+    existing.dataset.reviewApplication='true';
+    existing.value=recommendedId;
+    const link=node('button',recommendedId?'review-suggested-action':'quiet',selectedReviewJob(item,existing.value)?'Link job and create record':'Link application');link.type='button';link.disabled=!existing.value;
+    existing.addEventListener('change',()=>{existing.dataset.reviewSelectionChanged='true';link.disabled=!existing.value;link.className=existing.value?'review-suggested-action':'quiet';create.className=existing.value?'quiet':'';link.textContent=selectedReviewJob(item,existing.value)?'Link job and create record':'Link application';});
+    link.addEventListener('click',()=>{
+      if(!existing.value)return;
+      const job=selectedReviewJob(item,existing.value);
+      const selection=job?{decision:'link_job',selected_job:{ats:job.ats,id:job.id}}:{decision:'link',application_id:existing.value};
+      lifecycleCommand('discoveries/decide',{discovery_id:item.id,...selection},link).catch(()=>{});
+    });
+    detail.append(form);actions.append(link,create,lifecycleButton('Dismiss','discoveries/decide',{discovery_id:item.id,decision:'dismiss'}));
   } else {
     const values=proposal.payload || proposal.details || {};
     const describe=(object)=>{const list=node('dl','lifecycle-proposal');for(const [key,value] of Object.entries(object)){if(value===null || value==='' || ['calendar_account_id','calendar_event_id','calendar_uid','calendar_change_key','base_revision_id','base_round_status'].includes(key))continue; list.append(node('dt','',key.replaceAll('_',' '))); const dd=node('dd'); if(value && typeof value==='object'&&!Array.isArray(value))dd.append(describe(value));else dd.textContent=Array.isArray(value)?value.join(', '):String(value);list.append(dd);}return list;};

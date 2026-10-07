@@ -230,11 +230,16 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     mcp = compose.split("\n  mcp:\n", 1)[1].split("\n  core:\n", 1)[0]
     core = compose.split("\n  core:\n", 1)[1].split("\n  model:\n", 1)[0]
     mail = (ROOT / "compose.mail.yaml").read_text(encoding="utf-8")
-    assert "  core:" in mail
-    assert all("  " + name + ":" not in mail for name in ("dashboard", "mcp", "model", "tools", "hermes"))
-    assert mail.count("create_host_path: false") == 2
-    assert "target: /run/job-search/openrouter-api-key" in mail
-    assert "target: /run/job-search/mail-inference.json" in mail
+    assert set(re.findall(r"^  ([a-z_-]+):$", mail, flags=re.MULTILINE)) == {"core", "dashboard"}
+    for service in ("core", "dashboard"):
+        mounts = mail.split("\n  " + service + ":\n", 1)[1]
+        mounts = re.split(r"\n  [a-z_-]+:\n", mounts, maxsplit=1)[0]
+        assert mounts.count("type: bind") == 2
+        assert mounts.count("read_only: true") == 2
+        assert mounts.count("create_host_path: false") == 2
+        assert "target: /run/job-search/openrouter-api-key" in mounts
+        assert "target: /run/job-search/mail-inference.json" in mounts
+        assert "hermes.env" not in mounts
     assert "network_mode: host" in compose and "ports:" not in compose
     assert 'JOB_SEARCH_PLATFORM:-linux/amd64' in compose
     assert compose.count("replicas: 1") == 5

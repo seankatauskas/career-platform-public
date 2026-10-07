@@ -150,6 +150,10 @@ def build_dashboard_controller(
     jobs = LocalJobCatalog(config.jobs_db)
     if has_outlook_config(environment):
         ledger.lifecycle.calendar = _DashboardCalendarSource(config)
+    def review_classifier():
+        from .runtime import _configured_mail_models
+        classifier, _, _, version = _configured_mail_models(config, environment)
+        return classifier, version
     return DashboardController(
         ledger,
         preferences,
@@ -166,6 +170,9 @@ def build_dashboard_controller(
         readiness=lambda: runtime_readiness(config, use_snapshot=True),
         notification_recovery=build_notification_recovery(config, ledger),
         mail_source=mail_source or _DashboardMailSource(config, ledger),
+        review_classifier_factory=(review_classifier if config.mail_understanding_mode not in {'shared', 'paused'}
+            and (config.mail_classifier_config or environment.get('JOB_SEARCH_MAIL_CLASSIFIER_CONFIG')
+                 or config.remote_mail_inference_enabled) else None),
         automation_config=config,
         cost_snapshot_path=(Path(environment["JOB_SEARCH_COST_SNAPSHOT"])
                             if environment.get("JOB_SEARCH_COST_SNAPSHOT") else None),

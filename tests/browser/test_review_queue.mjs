@@ -5,6 +5,7 @@ import {chromium} from '../../extension/node_modules/playwright-core/index.mjs';
 // Isolated page-module fixture: no server, credentials, or external writes.
 const browser = await chromium.launch({channel:'chromium', headless:true});
 const page = await browser.newPage({viewport:{width:1280,height:900}});
+page.setDefaultTimeout(10000);
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 try {
@@ -31,12 +32,26 @@ try {
     let attentionResponse = {items:[]}; let actionResponse = {actions:[]};
     let mailAnalyses = []; let mailDecisionConflict = false;
     let attentionFails = false;
+    let archiveAnalysisFails = false; let archiveAnalysisItems = [];
+    let archiveAnalysisGate = null; let releaseArchiveAnalysis;
+    let archiveAnalysisActive = 0; let archiveAnalysisMaxActive = 0;
     async function api(path, options) {
       requests.push({path,options});
       if(path === '/api/v1/attention') { if (attentionFails) throw new Error('Fixture unavailable'); return attentionResponse; }
       if(path === '/api/v1/actions') return actionResponse;
+      if(path === '/api/v1/mail/failures/analyze') {
+        archiveAnalysisActive += 1;
+        archiveAnalysisMaxActive = Math.max(archiveAnalysisMaxActive, archiveAnalysisActive);
+        try {
+          if (archiveAnalysisGate) await archiveAnalysisGate;
+          await new Promise(resolve=>setTimeout(resolve,0));
+          if (archiveAnalysisFails) throw new Error('Saved email analysis unavailable');
+          attentionResponse = {items:archiveAnalysisItems};
+          return {status:'proposal_created'};
+        } finally { archiveAnalysisActive -= 1; }
+      }
+      if(path.startsWith('/api/v1/attention/message?')) return {subject:'Interview <script>not markup</script>',body:'First line\\n\\n'+'Full archived body '.repeat(200)+'\\nLast line',available:true,truncated:false};
       if(path.startsWith('/api/v1/mail-review/applications?')) return {applications:[{application_id:'older-app',employer_snapshot:'Older Company',title_snapshot:'Engineer'}],next_cursor:null};
-      if(path.startsWith('/api/v1/attention/message?')) return {subject:'Interview <script>inert</script>',body:'First line\\n\\n'+'Full archived body '.repeat(200)+'Last line',available:true,truncated:false};
       if(path === '/api/v1/mail-review/preview') {const decisions=JSON.parse(options.body).decisions;return {decisions,preview_hash:'preview-fixture',notice:'No mail is sent.',changes:decisions.map(d=>({proposal_id:d.proposal_id,decision:d.decision,application:'Example · Engineer',creates_application:!!d.new_application,event_type:d.event_type,from_phase:'preparing',to_phase:d.event_type==='rejection_received'?'terminal':'active',terminal_outcome:d.event_type==='rejection_received'?'rejected':null,next_step:d.task}))};}
       if(path === '/api/v1/mail-review/resolve') return {resolved:[]};
       if(path === '/api/v1/mail-analyses?history=true&limit=100') return {analyses:mailAnalyses.filter(item=>item.replay_id)};
@@ -50,7 +65,7 @@ try {
       return {};
     }
   `});
-  for (const file of ['shortlist-view.js','review-view.js','job-preview.js']) await page.addScriptTag({content:await readFile(new URL(`../../job_search/web/${file}`,import.meta.url),'utf8')});
+  for (const file of ['shortlist-view.js','review-view.js','job-preview.js','lifecycle-view.js']) await page.addScriptTag({content:await readFile(new URL(`../../job_search/web/${file}`,import.meta.url),'utf8')});
   // index.html loads the page modules before app.js defines this shared helper.
   // Do not let the fixture hide an eager dependency on that later script.
   assert.deepEqual(errors, []);
@@ -75,11 +90,26 @@ try {
   assert.equal(await page.locator('#action-list > article').count(), 1);
   assert.equal(await page.evaluate(()=>reviewItemsForApplication('app1').length), 4);
   assert.equal(await page.evaluate(()=>reviewItemsForApplication('app2').length), 0);
+  const messagePanel = page.locator('[data-review-key="event_proposal:p1"] .review-message');
+  assert.equal(await messagePanel.getAttribute('open'), null);
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path.startsWith('/api/v1/attention/message?')).length), 0);
+  await messagePanel.locator('summary').click();
+  await messagePanel.locator('.message-body').waitFor();
+  assert.equal(await messagePanel.locator('.message-subject').textContent(), 'Interview <script>not markup</script>');
+  assert.equal(await messagePanel.locator('script').count(), 0);
+  assert.equal(await messagePanel.locator('.message-body').textContent(), 'First line\n\n'+'Full archived body '.repeat(200)+'\nLast line');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.notEqual(await messagePanel.getAttribute('open'), null);
+  await messagePanel.locator('.message-body').waitFor();
+  const draftPanel = page.locator('[data-review-key="outlook_reply_draft:a1"] .review-message');
+  await draftPanel.locator('summary').click();
+  assert.equal(await draftPanel.locator('.message-subject').textContent(), 'Interview reply');
+  assert.equal(await draftPanel.locator('.message-body').textContent(), 'Thanks');
   await page.evaluate(() => { location.hash='#review/event_proposal/p1'; $('#attention').style.marginTop='2000px'; renderReviewQueue(); });
   await page.waitForFunction(() => document.activeElement?.dataset.reviewKey === 'event_proposal:p1');
   assert(await page.evaluate(() => scrollY > 1000));
   await page.evaluate(() => { $('#attention').style.marginTop=''; location.hash='#review'; renderReviewQueue(); });
-  assert.equal(await page.getByRole('button',{name:'Resolve email',exact:true}).count(),2);
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).count(),2);
   assert.equal(await page.getByRole('button',{name:'Accept',exact:true}).count(),0);
   const approve = page.getByRole('button',{name:'Create Outlook draft',exact:true});
   await approve.click();
@@ -87,9 +117,365 @@ try {
   assert.deepEqual(JSON.parse(decision.options.body),{idempotency_key:'action-fixture',approve:true,payload_sha256:'abc'});
   assert.equal(await page.locator('#review-count').innerText(),'');
   await page.evaluate(()=>{ consoleState.reviews=[{id:'p2',kind:'event_proposal',status:'pending',detail:'interview_requested',application_id:'app1',candidate_application_ids:[]}]; renderReviewQueue(); });
+  await page.getByRole('button',{name:'Record interview request',exact:true}).click();
+  const proposalDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/p2/decision'));
+  assert.equal(JSON.parse(proposalDecision.options.body).decision,'accepted');
+  await page.evaluate(()=>{ consoleState.reviews=[{id:'late',kind:'event_proposal',status:'pending',detail:'submission_confirmed',application_id:null,candidate_application_ids:[]}]; renderReviewQueue(); });
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isDisabled(),true);
+  assert.match(await page.locator('#attention-list').innerText(),/No matching application yet/);
+  await page.evaluate(()=>{ consoleState.reviews[0].candidate_application_ids=['app1']; renderReviewQueue(); });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isDisabled(),true);
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app1');
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isEnabled(),true);
+  await page.getByRole('button',{name:'Confirm application received',exact:true}).click();
+  const lateDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/late/decision'));
+  assert.equal(JSON.parse(lateDecision.options.body).selected_application_id,'app1');
+  // Suggestions come from the server's subject/body match, including applications
+  // outside the currently loaded page of the application table.
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'recommended',kind:'event_proposal',status:'review',detail:'rejected',
+      application_id:null,candidate_application_ids:['app1','app2'],
+      suggested_resolution:{action:'accept',label:'Record rejection',application_id:'app2',confidence:'high',
+        explanation:'The email subject names Other Company and the body names Data Engineer.',requires_selection:false},
+      application_matches:[{application_id:'app2',employer:'Other Company',title:'Data Engineer',confidence:'high',explanation:'Employer and role match.'},
+        {application_id:'app1',employer:'Example',title:'Engineer',confidence:'low',explanation:'Role only.'}]}];
+    renderReviewQueue();
+  });
+  const recommendedCard = page.locator('[data-review-key="event_proposal:recommended"]');
+  const applicationChoice = recommendedCard.getByRole('combobox',{name:'Application for this proposal'});
+  assert.equal(await applicationChoice.inputValue(),'app2');
+  assert.match(await applicationChoice.locator('option:checked').innerText(),/Other Company.*Data Engineer/);
+  assert.match(await recommendedCard.innerText(),/email subject names Other Company/);
+  assert.equal(await recommendedCard.getByRole('button',{name:'Record rejection',exact:true}).isEnabled(),true);
+  const postsBeforeOverride = await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length);
+  await applicationChoice.selectOption('app1');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await applicationChoice.inputValue(),'app1');
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length),postsBeforeOverride);
+  await recommendedCard.getByRole('button',{name:'Record rejection',exact:true}).click();
+  const overrideDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/recommended/decision'));
+  assert.equal(JSON.parse(overrideDecision.options.body).selected_application_id,'app1');
+
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'offer',kind:'event_proposal',status:'review',detail:'offer_received',
+      application_id:null,candidate_application_ids:['app1'],
+      suggested_resolution:{action:'accept',label:'Record offer',application_id:'app1',confidence:'high',explanation:'Employer and title are in the email.',requires_selection:false}}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'app1');
+  await page.getByRole('button',{name:'Record offer',exact:true}).click();
+  const offerDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/offer/decision'));
+  assert.equal(JSON.parse(offerDecision.options.body).selected_application_id,'app1');
+
+  // A suggestion that still requires selection must not silently choose an app.
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'ambiguous',kind:'event_proposal',status:'review',detail:'interview_requested',
+      application_id:null,candidate_application_ids:['app1','app2'],
+      suggested_resolution:{action:'review',label:'Choose an application',application_id:'app1',confidence:'low',
+        explanation:'Two applications match the same employer.',requires_selection:true}}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).isDisabled(),true);
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app2');
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).isEnabled(),true);
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('');
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).isDisabled(),true);
+  await page.evaluate(() => {
+    // A stale recommendation cannot become a valid selection by itself.
+    consoleState.reviews[0].suggested_resolution = {action:'accept',label:'Record interview request',application_id:'missing',confidence:'high',requires_selection:false};
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).isDisabled(),true);
+
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'discovery',kind:'mail_discovery',status:'review',
+      candidate_application_ids:['app1','app2'],
+      proposal:{employer:'Other Company',title:'Data Engineer',observation:{subject:'Your Data Engineer application',sender:'recruiter@example.test',direction:'inbound'}},
+      suggested_resolution:{action:'link',label:'Link application',application_id:'app2',confidence:'high',explanation:'The subject and email body name this role.',requires_selection:false},
+      application_matches:[{application_id:'app2',employer:'Other Company',title:'Data Engineer',confidence:'high',explanation:'Employer and role match.'}]}];
+    renderReviewQueue();
+  });
+  const discoveryCard = page.locator('[data-review-key="mail_discovery:discovery"]');
+  const discoveryChoice = discoveryCard.getByRole('combobox',{name:'Or link existing application'});
+  assert.equal(await discoveryChoice.inputValue(),'app2');
+  assert.match(await discoveryChoice.locator('option:checked').innerText(),/Other Company.*Data Engineer/);
+  await discoveryChoice.selectOption('app1');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await discoveryChoice.inputValue(),'app1');
+  await discoveryCard.getByRole('button',{name:'Link application',exact:true}).click();
+  const linkDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/lifecycle/discoveries/decide'));
+  assert.equal(JSON.parse(linkDecision.options.body).decision,'link');
+  assert.equal(JSON.parse(linkDecision.options.body).application_id,'app1');
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'unmatched-discovery',kind:'mail_discovery',status:'review',
+      proposal:{employer:'New Employer',title:'Designer',observation:{subject:'Designer role',direction:'inbound'}},
+      suggested_resolution:{action:'review',label:'Review application details',application_id:null,confidence:'low',explanation:'No tracked application matches.',requires_selection:true},application_matches:[]}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Or link existing application'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Link application',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Create application record',exact:true}).isEnabled(),true);
+  // A strong subject/body recommendation can correct an earlier association.
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'assigned',kind:'event_proposal',status:'review',detail:'submission_confirmed',
+      application_id:'app1',candidate_application_ids:['app2'],
+      suggested_resolution:{action:'accept',label:'Confirm application received',application_id:'app2',confidence:'high',requires_selection:false}}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'app2');
+  await page.getByRole('button',{name:'Confirm application received',exact:true}).click();
+  const assignedDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/proposals/assigned/decision'));
+  assert.equal(JSON.parse(assignedDecision.options.body).selected_application_id,'app2');
+
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'conflicting-assignment',kind:'event_proposal',status:'review',detail:'submission_confirmed',
+      application_id:'app1',candidate_application_ids:['app1'],
+      suggested_resolution:{action:'review',label:'Choose an application',application_id:null,confidence:'low',requires_selection:true,
+        explanation:'The email body conflicts with the previous association.'}}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isDisabled(),true);
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app1');
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isEnabled(),true);
+
+  await page.evaluate(() => {
+    consoleState.reviews = [{id:'failure',kind:'mail_processing_failure',status:'failed',can_retry:false,
+      account_id:'fixture-account',folder_ref:'inbox',query_version:'v1'}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('button',{name:'Retry processing',exact:true}).isDisabled(),true);
+  assert.equal(await page.locator('.review-suggested-action').innerText(),'Dismiss');
+  await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+  const dismissDecision = await page.evaluate(()=>requests.find(r=>r.path==='/api/v1/mail/failures/resolve'));
+  assert.equal(JSON.parse(dismissDecision.options.body).action,'dismiss');
+  assert.equal(JSON.parse(dismissDecision.options.body).message_id,'failure');
+  // A catalog-only recommendation creates its application only on confirmation.
+  const beforeCatalog = await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length);
+  await page.evaluate(() => {
+    const job={ats:'greenhouse',id:'job:42',company:'Catalog Company',title:'Data Engineer',jobUrl:'https://example.test/job'};
+    consoleState.reviews=[{id:'catalog-event',kind:'event_proposal',status:'review',detail:'rejected',candidate_application_ids:[],
+      job_matches:[job],suggested_resolution:{action:'accept',label:'Record rejection',application_id:null,job,requires_selection:false,
+        explanation:'Employer and role match this collected posting.'}}];
+    renderReviewQueue();
+  });
+  const catalogChoice=page.getByRole('combobox',{name:'Application for this proposal'});
+  assert.equal(await catalogChoice.inputValue(),'job:greenhouse:job:42');
+  assert.match(await page.locator('.review-suggestion').innerText(),/Likely job[\s\S]*Catalog Company/);
+  assert.match(await page.locator('.review-suggestion').innerText(),/creates (?:an|the) application record/);
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length),beforeCatalog);
+  await page.getByRole('button',{name:'Record rejection',exact:true}).click();
+  const catalogDecision=await page.evaluate(()=>JSON.parse(requests.find(r=>r.path==='/api/v1/proposals/catalog-event/decision').options.body));
+  assert.deepEqual(catalogDecision.selected_job,{ats:'greenhouse',id:'job:42'});
+  assert.equal('selected_application_id' in catalogDecision,false);
+
+  await page.evaluate(() => {
+    const job={ats:'ashby',id:'catalog-override',company:'Catalog Company',title:'Engineer'};
+    consoleState.reviews=[{id:'catalog-override',kind:'event_proposal',status:'review',detail:'submission_confirmed',candidate_application_ids:['app1'],
+      job_matches:[job],suggested_resolution:{action:'accept',label:'Confirm application received',application_id:null,job,requires_selection:false}}];
+    renderReviewQueue();
+  });
+  await catalogChoice.selectOption('app1');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await catalogChoice.inputValue(),'app1');
+  await page.getByRole('button',{name:'Confirm application received',exact:true}).click();
+  const catalogOverride=await page.evaluate(()=>JSON.parse(requests.find(r=>r.path==='/api/v1/proposals/catalog-override/decision').options.body));
+  assert.equal(catalogOverride.selected_application_id,'app1');
+  assert.equal('selected_job' in catalogOverride,false);
+
+  await page.evaluate(() => {
+    const job={ats:'lever',id:'discovery-job',company:'Catalog Company',title:'Designer'};
+    consoleState.reviews=[{id:'catalog-discovery',kind:'mail_discovery',status:'review',
+      proposal:{employer:'Catalog Company',title:'Designer',observation:{subject:'Your Designer role',direction:'inbound'}},
+      job_matches:[job],suggested_resolution:{action:'link_job',label:'Link job and create record',application_id:null,job,requires_selection:false}}];
+    renderReviewQueue();
+  });
+  const catalogDiscovery=page.getByRole('combobox',{name:'Or link existing application'});
+  assert.equal(await catalogDiscovery.inputValue(),'job:lever:discovery-job');
+  assert.equal(await page.getByRole('button',{name:'Link job and create record',exact:true}).isEnabled(),true);
+  await catalogDiscovery.selectOption('app1');
+  assert.equal(await page.getByRole('button',{name:'Link application',exact:true}).isEnabled(),true);
+  await catalogDiscovery.selectOption('job:lever:discovery-job');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await catalogDiscovery.inputValue(),'job:lever:discovery-job');
+  await page.getByRole('button',{name:'Link job and create record',exact:true}).click();
+  const catalogLink=await page.evaluate(()=>JSON.parse(requests.filter(r=>r.path==='/api/v1/lifecycle/discoveries/decide').at(-1).options.body));
+  assert.equal(catalogLink.decision,'link_job');
+  assert.deepEqual(catalogLink.selected_job,{ats:'lever',id:'discovery-job'});
+  assert.equal('application_id' in catalogLink,false);
+
+  await page.evaluate(() => {
+    const job={ats:'ashby',id:'rejected-job',company:'Catalog Company',title:'Engineer'};
+    consoleState.reviews=[{id:'reject-catalog-match',kind:'event_proposal',status:'review',detail:'submission_confirmed',candidate_application_ids:[],
+      job_matches:[job],suggested_resolution:{action:'accept',application_id:null,job,requires_selection:false}}];
+    renderReviewQueue();
+  });
+  await page.getByRole('button',{name:'Reject',exact:true}).click();
+  const rejectCatalog=await page.evaluate(()=>JSON.parse(requests.find(r=>r.path==='/api/v1/proposals/reject-catalog-match/decision').options.body));
+  assert.equal(rejectCatalog.decision,'rejected');
+  assert.equal('selected_job' in rejectCatalog,false);
+  assert.equal(rejectCatalog.selected_application_id,null);
+
+  // Prefer a recommended existing application when both forms are present.
+  await page.evaluate(() => {
+    const job={ats:'ashby',id:'already-tracked',company:'Example',title:'Engineer'};
+    consoleState.reviews=[{id:'existing-preferred',kind:'event_proposal',status:'review',detail:'interview_requested',candidate_application_ids:['app1'],
+      job_matches:[job],suggested_resolution:{action:'accept',label:'Record interview request',application_id:'app1',job,requires_selection:false}}];
+    renderReviewQueue();
+  });
+  assert.equal(await catalogChoice.inputValue(),'app1');
+  await page.evaluate(()=>{consoleState.reviews[0].suggested_resolution.requires_selection=true;renderReviewQueue();});
+  assert.equal(await catalogChoice.inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Record interview request',exact:true}).isDisabled(),true);
+  // Preparing an archived Graph failure exposes a proposed update automatically,
+  // while recording that update still requires the user's action.
+  const archivePostsBefore=await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length);
+  await page.evaluate(async () => {
+    const job={ats:'greenhouse',id:'archive-role',company:'Fixture Finance',title:'Backend Engineer'};
+    attentionResponse={items:[{id:'archive-success',kind:'mail_processing_failure',status:'failed',can_retry:false,
+      can_analyze_archive:true,account_id:'fixture-account',folder_ref:'inbox',query_version:'archive-v1',
+      error:'Graph request failed (400)'}]};
+    archiveAnalysisItems=[{id:'archive-proposal',kind:'event_proposal',status:'review',detail:'submission_confirmed',
+      candidate_application_ids:[],job_matches:[job],suggested_resolution:{action:'accept',label:'Confirm application received',
+        application_id:null,job,requires_selection:false,explanation:'The archived subject and body identify this role.'}}];
+    await loadReviewQueue();
+  });
+  await page.locator('[data-review-key="event_proposal:archive-proposal"]').waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'job:greenhouse:archive-role');
+  assert.equal(await page.getByRole('button',{name:'Confirm application received',exact:true}).isEnabled(),true);
+  const archivePreparation=await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze'));
+  assert.equal(archivePreparation.length,1);
+  const archiveBody=JSON.parse(archivePreparation[0].options.body);
+  assert.equal(archiveBody.account_id,'fixture-account');
+  assert.equal(archiveBody.folder_ref,'inbox');
+  assert.equal(archiveBody.query_version,'archive-v1');
+  assert.equal(archiveBody.message_id,'archive-success');
+  assert.equal(typeof archiveBody.idempotency_key,'string');
+  assert(archiveBody.idempotency_key.length>0);
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length),archivePostsBefore+1);
+  assert.equal(await page.evaluate(()=>requests.some(r=>r.path==='/api/v1/proposals/archive-proposal/decision')),false);
+  await page.getByRole('button',{name:'Confirm application received',exact:true}).click();
+  const archiveConfirmation=await page.evaluate(()=>JSON.parse(requests.find(r=>r.path==='/api/v1/proposals/archive-proposal/decision').options.body));
+  assert.deepEqual(archiveConfirmation.selected_job,{ats:'greenhouse',id:'archive-role'});
+
+  // A preparation error keeps the review usable and never retries on every render.
+  await page.evaluate(async () => {
+    archiveAnalysisFails=true;
+    attentionResponse={items:[{id:'archive-error',kind:'mail_processing_failure',status:'failed',can_retry:true,
+      can_analyze_archive:true,account_id:'fixture-account',folder_ref:'inbox',query_version:'archive-v1'}]};
+    await loadReviewQueue();
+    await queueReviewFailureAnalysis();
+  });
+  await page.getByRole('button',{name:'Retry processing',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Retry processing',exact:true}).isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Dismiss',exact:true}).isEnabled(),true);
+  const failedPreparationCount=await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id==='archive-error').length);
+  assert.equal(failedPreparationCount,1);
+  await page.evaluate(async ()=>{renderReviewQueue();await Promise.all([loadReviewQueue(),loadReviewQueue()]);renderReviewQueue();});
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id==='archive-error').length),failedPreparationCount);
+  assert.equal(await page.getByRole('button',{name:'Dismiss',exact:true}).isEnabled(),true);
+  await page.evaluate(()=>{archiveAnalysisFails=false;archiveAnalysisItems=[];});
+  await page.getByRole('button',{name:'Retry suggested action',exact:true}).click();
+  await page.waitForFunction(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id==='archive-error').length===2);
+  await page.evaluate(async()=>{await queueReviewFailureAnalysis();attentionResponse={items:[]};});
+  await page.evaluate(async()=>{
+    archiveAnalysisFails=true;
+    attentionResponse={items:['inbox','archive'].map(folder_ref=>({id:'same-message-id',kind:'mail_processing_failure',status:'failed',
+      can_analyze_archive:true,can_retry:true,account_id:'fixture-account',folder_ref,query_version:'archive-v1'}))};
+    await loadReviewQueue();
+    await queueReviewFailureAnalysis();
+  });
+  const scopedAnalyses=await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id==='same-message-id').map(r=>JSON.parse(r.options.body)));
+  assert.deepEqual(scopedAnalyses.map(body=>body.folder_ref).sort(),['archive','inbox']);
+  await page.evaluate(async()=>{
+    attentionResponse={items:[0,1,2,3].map(index=>({id:'bounded-analysis-'+index,kind:'mail_processing_failure',status:'failed',
+      can_analyze_archive:true,can_retry:true,account_id:'fixture-account',folder_ref:'inbox',query_version:'archive-v1'}))};
+    await loadReviewQueue();
+    await reviewFailureAnalysisTask;
+  });
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id.startsWith('bounded-analysis-')).length),4);
+  assert.equal(await page.evaluate(()=>archiveAnalysisMaxActive),1);
+  await page.evaluate(async()=>{await loadReviewQueue();await reviewFailureAnalysisTask;});
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id.startsWith('bounded-analysis-')).length),4);
+  // Leaving Review pauses queued work after the current request; returning resumes.
+  await page.evaluate(async()=>{
+    archiveAnalysisGate=new Promise(resolve=>{releaseArchiveAnalysis=resolve;});
+    attentionResponse={items:[0,1].map(index=>({id:'navigation-analysis-'+index,kind:'mail_processing_failure',status:'failed',
+      can_analyze_archive:true,can_retry:true,account_id:'fixture-account',folder_ref:'inbox',query_version:'archive-v1'}))};
+    await loadReviewQueue();
+  });
+  await page.waitForFunction(()=>requests.some(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id==='navigation-analysis-0'));
+  await page.evaluate(async()=>{consoleState.view='applications';releaseArchiveAnalysis();await reviewFailureAnalysisTask;});
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id.startsWith('navigation-analysis-')).length),1);
+  await page.evaluate(async()=>{consoleState.view='review';archiveAnalysisGate=null;await loadReviewQueue();await reviewFailureAnalysisTask;});
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.path==='/api/v1/mail/failures/analyze' && JSON.parse(r.options.body).message_id.startsWith('navigation-analysis-')).length),2);
+  assert.equal(await page.evaluate(()=>archiveAnalysisMaxActive),1);
+  await page.evaluate(()=>{attentionResponse={items:[]};archiveAnalysisFails=false;});
+  await page.evaluate(() => { consoleState.reviews=[]; renderReviewQueue(); });
+  // Exercise the real main-column width: medium screens retain the sidebar.
+  // Long unmatched explanations and selected roles must not squeeze evidence
+  // into a narrow column or overlap the separate action footer.
+  await page.evaluate(()=>{
+    const main=document.createElement('main');
+    $('#attention').before(main);main.append($('#attention'));
+    const job={ats:'greenhouse',id:'layout-role',company:'Northstar International Financial Technology and Services',
+      title:'Senior Staff Software Engineer, Distributed Infrastructure and Enterprise Financial Data Platforms'};
+    consoleState.reviews=[
+      {id:'layout-unmatched',kind:'event_proposal',status:'review',detail:'submission_confirmed',subject:'Thank you for your application to our distributed infrastructure engineering team',
+        candidate_application_ids:[],evidence_quote:'We have received your application and our team will review your experience.',
+        suggested_resolution:{action:'review',application_id:null,requires_selection:true,explanation:'The email identifies an employer, but none of the saved applications or collected roles matches this conversation. Review the email and choose the correct application before confirming.'}},
+      {id:'layout-matched',kind:'event_proposal',status:'review',detail:'interview_requested',subject:'Interview invitation for the enterprise financial data platforms engineering position',
+        candidate_application_ids:['app1'],job_matches:[job],evidence_quote:'Please choose an interview time to discuss your distributed systems experience.',
+        suggested_resolution:{action:'accept',label:'Record interview request',application_id:null,job,requires_selection:false,
+          explanation:'The employer and role in the subject and body match this collected posting.'}}
+    ];
+    renderReviewQueue();
+  });
+  await mkdir(new URL('../../.cache/review-layout/',import.meta.url),{recursive:true});
+  for(const width of [390,900,1024,1440]) {
+    await page.setViewportSize({width,height:1000});
+    const dimensions=await page.locator('#attention-list > article').evaluateAll(cards=>cards.map(card=>{
+      const content=card.querySelector('.review-card-content');
+      const actions=card.querySelector('.review-card-actions');
+      if(!content || !actions) return {hasStructure:false};
+      const contentBox=content.getBoundingClientRect(),actionsBox=actions.getBoundingClientRect();
+      const style=getComputedStyle(card);
+      const inner=card.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight);
+      const controls=[...actions.children].map(el=>el.getBoundingClientRect());
+      return {hasStructure:true,contentWidth:contentBox.width,inner,actionGap:actionsBox.top-contentBox.bottom,
+        cardOverflow:card.scrollWidth-card.clientWidth,paragraphActions:actions.querySelectorAll('p,select').length,
+        controlsInside:controls.every(box=>box.left>=actionsBox.left-1 && box.right<=actionsBox.right+1),
+        noControlOverlap:controls.every((a,index)=>controls.slice(index+1).every(b=>a.right<=b.left || b.right<=a.left || a.bottom<=b.top || b.bottom<=a.top))};
+    }));
+    for(const measure of dimensions) {
+      assert.equal(measure.hasStructure,true,`Review content/footer structure at ${width}px`);
+      assert(measure.contentWidth>=measure.inner*.95,`Evidence retains the full content width at ${width}px: ${JSON.stringify(measure)}`);
+      assert(measure.actionGap>=12,`Actions are separated from content at ${width}px`);
+      assert(measure.cardOverflow<=1,`Card overflow at ${width}px`);
+      assert.equal(measure.paragraphActions,0);
+      assert.equal(measure.controlsInside,true);
+      assert.equal(measure.noControlOverlap,true);
+    }
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Page overflow at ${width}px`);
+    const choice=page.getByRole('combobox',{name:'Application for this proposal'});
+    assert.equal(await choice.inputValue(),'job:greenhouse:layout-role');
+    assert(await choice.evaluate(el=>el.getBoundingClientRect().width>=Math.min(280,el.parentElement.clientWidth*.9)),`Usable selector width at ${width}px`);
+    assert.equal(await page.locator('[data-review-key="event_proposal:layout-unmatched"]').getByRole('button',{name:'Confirm application received',exact:true}).isDisabled(),true);
+    await page.locator('#attention').screenshot({path:new URL(`../../.cache/review-layout/review-${width}.png`,import.meta.url).pathname});
+  }
+  await page.getByRole('combobox',{name:'Application for this proposal'}).selectOption('app1');
+  await page.evaluate(()=>renderReviewQueue());
+  assert.equal(await page.getByRole('combobox',{name:'Application for this proposal'}).inputValue(),'app1');
+  await page.evaluate(()=>{const main=$('#attention').parentElement;main.replaceWith($('#attention'));consoleState.reviews=[];renderReviewQueue();});
+  await page.setViewportSize({width:1280,height:900});
+  {
+  await page.evaluate(()=>{ consoleState.reviews=[{id:'manual-p2',kind:'event_proposal',status:'pending',detail:'interview_requested',application_id:'app1',candidate_application_ids:[]}]; renderReviewQueue(); });
   await page.locator('#attention-list .review-message > summary').click();
   await page.waitForFunction(()=>document.querySelector('#attention-list .message-body')?.textContent.endsWith('Last line'));
-  assert.match(await page.locator('#attention-list .message-subject').innerText(), /<script>inert<\/script>/);
+  assert.match(await page.locator('#attention-list .message-subject').innerText(), /<script>not markup<\/script>/);
   assert.equal(await page.locator('#attention-list .review-message script').count(), 0);
   assert((await page.locator('#attention-list .message-body').innerText()).length > 2048);
   await page.evaluate(()=>renderReviewQueue());
@@ -195,6 +581,7 @@ try {
   assert.equal(bookingDecision.decisions[0].replacement.kind,'other');
   assert.equal(bookingDecision.decisions[0].replacement.task_kind,'follow_up');
   assert.equal(bookingDecision.decisions[0].replacement.application_id,'app1');
+  }
   await page.evaluate(()=>renderShortlist({recommendations:[],model:{ready:false},session_id:null}));
   assert.match(await page.locator('#shortlist-list').innerText(),/refresh to load saved model rankings/);
   await page.evaluate(()=>renderShortlist({recommendations:[],model:{ready:true},session_id:'saved',options:{days:7}}));
@@ -263,5 +650,5 @@ try {
   }
   await lab.close();
   assert.deepEqual(errors,[]);
-  console.log('ok (Review normalization, ordering, decision bodies, empty states, preview access)');
+  console.log('ok (Review normalization, ordering, decision bodies, suggested matches and overrides, empty states, preview access)');
 } finally { await browser.close(); }

@@ -588,8 +588,11 @@ copies only `OPENROUTER_API_KEY` from the pinned `hermes.env` secret version int
 the dedicated key file. Both files are owner-only and covered by secret-update
 rollback. Recovery derives them from the recorded original secret versions; neither
 requires a separate secret inventory entry. The optional `compose.mail.yaml` overlay
-mounts them read-only into **core only**, not the model worker, dashboard, MCP, or
-document tools. Hermes's other environment entries are never exposed to core.
+mounts them read-only into **core and dashboard**. Core uses them for mailbox
+processing; dashboard uses them to recover failed email analysis from the existing
+archive when Review loads. Both honor the remote-mail opt-in. The model worker,
+MCP, and document tools do not receive these mounts. Hermes's other environment
+entries are never exposed to core or dashboard.
 
 Pause through the operations command, materialize secrets, and run a bounded mail
 provider smoke test before setting `remote_mail_inference_enabled: true` and

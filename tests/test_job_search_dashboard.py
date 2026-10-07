@@ -395,6 +395,18 @@ def test_attention_review_interviews_and_outlook_action_approval() -> None:
         )
         items = json.loads(body)["items"]
         assert status == 200 and items[0]["evidence_quote"].startswith("Please")
+        suggested = items[0]['suggested_resolution']
+        assert suggested['action'] == 'accept'
+        assert suggested['application_id'] == application_id
+        assert not suggested['requires_selection']
+        assert 'interview' in suggested['label'].lower()
+        message_path = f"/api/v1/attention/message?kind=event_proposal&id={proposal['proposal_id']}"
+        status, _, body = request(server, "GET", message_path, headers={"Cookie": cookie})
+        assert status == 200 and json.loads(body) == {
+            'subject': 'Interview', 'body': evidence_quote, 'available': False, 'truncated': False,
+        }
+        assert request(server, "GET", message_path + '&id=other', headers={"Cookie": cookie})[0] == 400
+        assert request(server, "GET", '/api/v1/attention/message?kind=unknown&id=missing', headers={"Cookie": cookie})[0] == 400
         status, _headers, body = post(
             server,
             f"/api/v1/proposals/{proposal['proposal_id']}/decision",
@@ -441,6 +453,167 @@ def test_attention_review_interviews_and_outlook_action_approval() -> None:
         )
         assert status == 200 and json.loads(body)["decision"] == "approve"
 
+
+def test_attention_suggests_discovery_match_without_linking_until_clicked() -> None:
+    from job_search.db import connect
+    from tests.test_job_search_lifecycle_mail import observation
+
+    with dashboard() as (server, _controller, ledger, _preferences):
+        cookie, csrf = session(server)
+        application_id = start_direct(ledger, 'suggested-link')
+        observed = observation('suggested-link')
+        observed['subject'] = 'Your application to Example Co for Product Engineer'
+        record = ledger.lifecycle.observe_mail(
+            observed, MutationContext('suggested-observation', 'system', 'test'),
+        )['observation']
+        discovery = ledger.lifecycle.propose_discovery(
+            {'observation_id': record['observation_id']},
+            MutationContext('suggested-discovery', 'system', 'test'),
+        )['discovery']
+        status, _, body = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200
+        item = next(row for row in json.loads(body)['items'] if row['id'] == discovery['discovery_id'])
+        suggestion = item['suggested_resolution']
+        assert suggestion['action'] == 'link'
+        assert suggestion['application_id'] == application_id
+        assert item['application_matches'][0]['application_id'] == application_id
+        with connect(ledger.store.db_path) as con:
+            assert con.execute('SELECT COUNT(*) FROM lifecycle_mail_links').fetchone()[0] == 0
+        status, _, body = post(server, '/api/v1/lifecycle/discoveries/decide', {
+            'idempotency_key': 'suggested-link-decision', 'discovery_id': item['id'],
+            'decision': 'link', 'application_id': suggestion['application_id'],
+        }, cookie, csrf)
+        assert status == 200 and json.loads(body)['application_id'] == application_id
+        status, _, body = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200 and not json.loads(body)['items']
+
+
+def test_attention_matches_full_archived_body_and_revalidates_confirmation() -> None:
+    from job_search.mail.archive import EncryptedMailArchive, KeychainArchiveKeyProvider
+    from job_search.mail.archive_source import EncryptedArchiveMailSource
+    from tests.test_job_search_mail_archive_source import EncryptedPersistence, TestCipher, save_message
+
+    with dashboard() as (server, controller, ledger, _preferences):
+        cookie, csrf = session(server)
+        application_id = start_direct(ledger, 'full-body')
+        other_id = start_direct(ledger, 'unrelated-body')
+        for index, identity in enumerate((application_id, other_id)):
+            ledger.record_submission(identity, stamp(-60), MutationContext(f'body-submit-{index}', 'user', 'test'))
+        quote = 'We received your application.'
+        evidence = ledger.record_mail_evidence({
+            'account_id': 'outlook-personal', 'immutable_message_id': 'graph-message-full-body',
+            'sender': 'noreply@example.test', 'subject': 'Application update',
+            'received_at': stamp(), 'body_sha256': 'd' * 64, 'excerpt': quote,
+        }, MutationContext('body-evidence', 'system', 'test'))['evidence']
+        proposal = ledger.create_event_proposal(EventProposalInput(
+            evidence['evidence_id'], None, ApplicationEventType.SUBMISSION_CONFIRMED,
+            ProducerKind.MODEL, 'test', .99, [], quote, 0, len(quote),
+            {'occurred_at': stamp()}, 'body-proposal',
+        ), MutationContext('body-proposal', 'model', 'test'))['proposal']
+        provider = KeychainArchiveKeyProvider(Path(ledger.store.db_path).parent / 'test-archive',
+                                             persistence=EncryptedPersistence())
+        archive = EncryptedMailArchive(ledger, provider, cipher_factory=TestCipher)
+        full_body = quote + '\n' + 'Additional information. ' * 100 + '\nPosting ID: job-full-body'
+        save_message(archive, 'full-body', 'Application update', full_body)
+        controller.mail_source = EncryptedArchiveMailSource(ledger, archive)
+        status, _, body = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200
+        item = next(row for row in json.loads(body)['items'] if row['id'] == proposal['proposal_id'])
+        assert item['candidate_application_ids'] == [application_id]
+        assert item['suggested_resolution']['application_id'] == application_id
+        assert full_body not in body.decode()
+        decision = {'idempotency_key': 'body-decision', 'decision': 'accepted',
+                    'selected_application_id': other_id, 'reason': 'reviewed',
+                    'review_mail_content': {'subject': '', 'body': 'job-unrelated-body'}}
+        path = f"/api/v1/proposals/{proposal['proposal_id']}/decision"
+        assert post(server, path, decision, cookie, csrf)[0] == 400
+        decision.pop('review_mail_content')
+        decision['selected_application_id'] = application_id
+        status, _, result = post(server, path, decision, cookie, csrf)
+        assert status == 200 and json.loads(result)['event']['event_type'] == 'submission_confirmed'
+        assert post(server, path, decision, cookie, csrf)[0] == 200
+
+
+
+def review_catalog(controller, ledger):
+    import sqlite3
+    from job_search.integration import LocalJobCatalog
+    path = Path(ledger.store.db_path).parent / 'review-jobs.db'
+    with sqlite3.connect(path) as con:
+        con.execute('CREATE TABLE jobs (ats TEXT,id TEXT,company TEXT,title TEXT,description TEXT,jobUrl TEXT,closed_at TEXT,PRIMARY KEY(ats,id))')
+        con.executemany('INSERT INTO jobs VALUES (?,?,?,?,?,?,?)', [
+            ('ashby', 'catalog-platform', 'Example Co', 'Platform Engineer', '', 'https://example.test/platform', None),
+            ('ashby', 'catalog-design', 'Unrelated Company', 'Product Designer', '', 'https://example.test/design', None),
+        ])
+    controller.jobs = LocalJobCatalog(path)
+
+
+def test_catalog_only_job_is_preselected_and_recorded_with_one_review_command():
+    from job_search.db import connect
+    with dashboard() as (server, controller, ledger, _preferences):
+        cookie, csrf = session(server)
+        review_catalog(controller, ledger)
+        quote = 'We cannot proceed with your application for the Senior Platform Engineer role at Example Co.'
+        evidence = ledger.record_mail_evidence({
+            'account_id': 'personal', 'immutable_message_id': 'catalog-event',
+            'sender': 'recruiter@example.test', 'subject': 'Application update',
+            'received_at': stamp(), 'body_sha256': 'f' * 64, 'excerpt': quote,
+        }, MutationContext('catalog-evidence', 'system', 'test'))['evidence']
+        proposal = ledger.create_event_proposal(EventProposalInput(
+            evidence['evidence_id'], None, ApplicationEventType.REJECTION_RECEIVED,
+            ProducerKind.MODEL, 'test', .99, [], quote, 0, len(quote), {}, 'catalog-review',
+        ), MutationContext('catalog-proposal', 'model', 'test'))['proposal']
+        status, _, body = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200
+        suggestion = json.loads(body)['items'][0]['suggested_resolution']
+        assert suggestion['job']['id'] == 'catalog-platform'
+        assert suggestion['label'] == 'Record rejection' and not suggestion['requires_selection']
+        assert not ledger.list_applications()
+        decision = {'idempotency_key': 'catalog-review-decision', 'decision': 'accepted',
+                    'selected_job': {'ats': 'ashby', 'id': 'catalog-design'}}
+        endpoint = f"/api/v1/proposals/{proposal['proposal_id']}/decision"
+        assert post(server, endpoint, decision, cookie, csrf)[0] == 400
+        assert not ledger.list_applications()
+        decision['selected_job']['id'] = 'catalog-platform'
+        status, _, body = post(server, endpoint, decision, cookie, csrf)
+        assert status == 200 and json.loads(body)['event']['event_type'] == 'rejection_received'
+        assert post(server, endpoint, decision, cookie, csrf)[0] == 200
+        applications = ledger.list_applications()
+        assert len(applications) == 1
+        app = applications[0]
+        assert app['job_id'] == 'catalog-platform' and app['terminal_outcome'] == 'rejected'
+        assert app['submitted_at'] is None
+        with connect(ledger.store.db_path) as con:
+            assert con.execute("SELECT COUNT(*) FROM application_events WHERE event_type='submission_observed'").fetchone()[0] == 0
+            assert con.execute('SELECT COUNT(*) FROM lifecycle_mail_links').fetchone()[0] == 1
+
+
+def test_catalog_discovery_creates_linked_record_on_click_only():
+    from tests.test_job_search_lifecycle_mail import observation
+    with dashboard() as (server, controller, ledger, _preferences):
+        cookie, csrf = session(server)
+        review_catalog(controller, ledger)
+        incoming = observation('catalog-discovery')
+        incoming['subject'] = 'Your application to Example Co for Platform Engineer'
+        observed = ledger.lifecycle.observe_mail(incoming,
+            MutationContext('catalog-observation', 'system', 'test'))['observation']
+        discovery = ledger.lifecycle.propose_discovery({'observation_id': observed['observation_id']},
+            MutationContext('catalog-discovery', 'system', 'test'))['discovery']
+        status, _, body = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200
+        suggestion = json.loads(body)['items'][0]['suggested_resolution']
+        assert suggestion['action'] == 'link_job' and suggestion['job']['id'] == 'catalog-platform'
+        assert not ledger.list_applications()
+        values = {'idempotency_key': 'catalog-discovery-click', 'discovery_id': discovery['discovery_id'],
+                  'decision': 'link_job', 'selected_job': {'ats': 'ashby', 'id': 'catalog-platform'}}
+        endpoint = '/api/v1/lifecycle/discoveries/decide'
+        status, _, body = post(server, endpoint, values, cookie, csrf)
+        assert status == 200, body
+        application_id = json.loads(body)['application_id']
+        assert post(server, endpoint, values, cookie, csrf)[0] == 200
+        app = ledger.get_application_timeline(application_id)['application']
+        assert app['ats'] == 'ashby' and app['job_id'] == 'catalog-platform'
+        assert app['submitted_at'] is None and app['current_phase'] == 'preparing'
 
 def test_temporal_proposals_are_visible_and_user_can_accept_or_reject() -> None:
     with dashboard() as (server, _controller, ledger, _preferences):
@@ -661,6 +834,10 @@ def test_mail_failure_review_is_scoped_idempotent_and_requires_csrf():
         status, _, body = request(server, "GET", "/api/v1/attention", headers={"Cookie":cookie})
         items = json.loads(body)['items']
         assert status == 200 and {item['query_version'] for item in items} == {1,2}
+        message_path = '/api/v1/attention/message?kind=mail_processing_failure&id=failed-mail&account_id=personal&folder_ref=inbox&query_version=2'
+        status, _, body = request(server, 'GET', message_path, headers={'Cookie':cookie})
+        assert status == 200 and json.loads(body)['available'] is False
+        assert request(server, 'GET', message_path.replace('account_id=personal', 'account_id=other'), headers={'Cookie':cookie})[0] == 400
         payload = dict(account_id="personal", folder_ref="inbox", message_id="failed-mail",
                        query_version=2, action="retry", idempotency_key="retry-failure")
         path = "/api/v1/mail/failures/resolve"
@@ -677,6 +854,75 @@ def test_mail_failure_review_is_scoped_idempotent_and_requires_csrf():
         assert post(server, path, {**payload,'action':'send','idempotency_key':'invalid'}, cookie, csrf)[0] == 400
         assert ledger.list_attention_items() == []
 
+
+
+def test_failed_archived_receipt_prepares_matching_job_and_action_without_submission():
+    from dataclasses import replace
+    from job_search.db import connect
+    from job_search.mail.archive import EncryptedMailArchive, KeychainArchiveKeyProvider
+    from job_search.mail.archive_source import EncryptedArchiveMailSource
+    from job_search.outlook.state import SQLiteOutlookState
+    from tests.test_job_search_sync import change
+    from tests.test_job_search_mail_archive_source import EncryptedPersistence, TestCipher, save_message
+
+    with dashboard() as (server, controller, ledger, _preferences):
+        review_catalog(controller, ledger)
+        subject = "We've received your application for Platform Engineer (NYC) at Example Co"
+        quote = 'Thank you for applying for the Platform Engineer (NYC) position at Example Co!'
+        body = quote + ' We will review your application and contact you about next steps.'
+        staged = replace(change('graph-message-recover'), subject=subject,
+                         sender_address='recruiter@example.test', received_at=stamp())
+        state = SQLiteOutlookState(ledger.store.db_path)
+        state.stage_changes('outlook-personal', 'inbox', [staged], query_version=2)
+        state.mark_message('outlook-personal', 'inbox', staged.immutable_id, 'failed',
+                           'Microsoft Graph request failed (400: BadRequest)', query_version=2)
+        provider = KeychainArchiveKeyProvider(Path(ledger.store.db_path).parent / 'archive-test',
+                                             persistence=EncryptedPersistence())
+        archive = EncryptedMailArchive(ledger, provider, cipher_factory=TestCipher)
+        save_message(archive, 'recover', subject, body)
+        controller.mail_source = EncryptedArchiveMailSource(ledger, archive)
+
+        class Classifier:
+            calls = 0
+            def classify(self, text, candidates):
+                self.calls += 1
+                assert 'Platform Engineer' in text
+                return {'event_type': 'submission_confirmed', 'application_id': None,
+                        'confidence': .99, 'evidence_quote': quote, 'span_start': text.index(quote),
+                        'span_end': text.index(quote) + len(quote), 'payload': {}}
+        classifier = Classifier()
+        controller.review_classifier_factory = lambda: (classifier, 'review-test-v1')
+        cookie, csrf = session(server)
+        status, _, raw = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        assert status == 200 and json.loads(raw)['items'][0]['can_analyze_archive']
+        assert classifier.calls == 0 and not ledger.list_applications()
+        values = {'idempotency_key': 'recover-archived-receipt', 'account_id': 'outlook-personal',
+                  'folder_ref': 'inbox', 'query_version': 2, 'message_id': staged.immutable_id}
+        endpoint = '/api/v1/mail/failures/analyze'
+        assert post(server, endpoint, values, cookie, 'wrong-csrf')[0] == 403
+        assert classifier.calls == 0
+        assert post(server, endpoint, {**values, 'account_id': 'wrong'}, cookie, csrf)[0] == 400
+        status, _, raw = post(server, endpoint, values, cookie, csrf)
+        assert status == 200, raw
+        proposal_id = json.loads(raw)['proposal_id']
+        assert classifier.calls == 1 and not ledger.list_applications()
+        assert post(server, endpoint, values, cookie, csrf)[0] == 200
+        assert classifier.calls == 1
+        status, _, raw = request(server, 'GET', '/api/v1/attention', headers={'Cookie': cookie})
+        items = json.loads(raw)['items']
+        assert status == 200 and len(items) == 1 and items[0]['kind'] == 'event_proposal'
+        suggestion = items[0]['suggested_resolution']
+        assert suggestion['label'] == 'Confirm application received'
+        assert suggestion['job']['id'] == 'catalog-platform' and not suggestion['requires_selection']
+        status, _, raw = post(server, f'/api/v1/proposals/{proposal_id}/decision', {
+            'idempotency_key': 'confirm-recovered-receipt', 'decision': 'accepted',
+            'selected_job': {'ats': 'ashby', 'id': 'catalog-platform'},
+        }, cookie, csrf)
+        assert status == 200, raw
+        assert json.loads(raw)['event']['event_type'] == 'submission_confirmed'
+        with connect(ledger.store.db_path) as con:
+            assert con.execute("SELECT COUNT(*) FROM application_events WHERE event_type='submission_observed'").fetchone()[0] == 0
+        assert len(ledger.list_applications()) == 1
 
 def test_scan_endpoint_requires_csrf_and_only_accepts_fixed_scan() -> None:
     from dataclasses import replace

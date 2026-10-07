@@ -58,7 +58,9 @@ def inspect_policies(preference_db: Path, proxy_db: Path, jobs_db: Path | None =
             for policy in POLICIES:
                 run=runs.get(policy)
                 row=con.execute('SELECT artifact_path,manifest_json FROM preference_model_runs WHERE run_id=?',(run,)).fetchone()
-                count=con.execute('SELECT COUNT(*) FROM preference_scores WHERE run_id=?',(run,)).fetchone()[0] if row else 0
+                count, latest = con.execute(
+                    'SELECT COUNT(*),MAX(scored_at) FROM preference_scores WHERE run_id=?',
+                    (run,)).fetchone() if row else (0, None)
                 exists=bool(row and (Path(row[0])/'model.pkl').is_file())
                 state=con.execute('SELECT value FROM preference_state WHERE key=?',('policy_refresh:'+policy,)).fetchone()
                 receipt=json.loads(state[0]) if state else None
@@ -66,7 +68,6 @@ def inspect_policies(preference_db: Path, proxy_db: Path, jobs_db: Path | None =
                     and isinstance(receipt.get('result'), dict)
                     and receipt['result'].get('scored_families') == count
                     and (total_families is None or count == total_families))
-                latest = con.execute('SELECT MAX(scored_at) FROM preference_scores WHERE run_id=?', (run,)).fetchone()[0] if row else None
                 stale = False
                 if watermark:
                     observed = datetime.fromisoformat(watermark.replace('Z','+00:00'))

@@ -231,12 +231,20 @@ class MailMixin:
             rows = con.execute('SELECT d.*,m.subject,m.evidence_id,m.archive_id,m.direction,m.received_at,m.sent_at,m.updated_at AS observation_updated_at FROM lifecycle_discoveries d JOIN lifecycle_mail_observations m USING(observation_id) WHERE d.status=? AND d.discovery_id>? ORDER BY d.discovery_id LIMIT ?', (status, cursor or '', limit+1)).fetchall()
         return {'items': [dict(r) for r in rows[:limit]], 'next_cursor': rows[limit-1]['discovery_id'] if len(rows)>limit else None, 'complete': len(rows)<=limit}
 
-    def decide_discovery(self, payload, context):
+    def decide_discovery(self, payload, context, *, review_job_snapshot=None):
         if context.actor_kind != 'user':
             raise ContractError('discovery decisions require user review')
         decision = payload.get('decision')
-        if decision not in {'link','create','dismiss'}:
+        if decision not in {'link','create','dismiss','link_job'}:
             raise ContractError('invalid discovery decision')
+        if decision == 'link_job':
+            if review_job_snapshot is None:
+                raise ContractError('catalog discovery requires a server-validated job')
+            review_job_snapshot.validate()
+            if payload.get('selected_job') != {'ats': review_job_snapshot.ats, 'id': review_job_snapshot.job_id}:
+                raise ContractError('selected job does not match the validated catalog job')
+        elif review_job_snapshot is not None:
+            raise ContractError('catalog selection requires a link_job decision')
         def operation(con, stamp):
             row = con.execute('SELECT * FROM lifecycle_discoveries WHERE discovery_id=?', (payload['discovery_id'],)).fetchone()
             if not row or row['status'] != 'pending':
@@ -244,6 +252,9 @@ class MailMixin:
             application_id = payload.get('application_id') if decision == 'link' else None
             if decision == 'link' and not application_id:
                 raise ContractError('link decision requires application_id')
+            if decision == 'link_job':
+                application_id = self.store._start_application(con, review_job_snapshot,
+                    RecommendationProvenance(), context, stamp)['application']['application_id']
             if decision == 'create':
                 employer = _text(payload.get('employer', row['employer']), 'employer', required=True)
                 title = _text(payload.get('title', row['title']), 'title', required=True)
@@ -255,7 +266,7 @@ class MailMixin:
                 self.store._project(con, application_id)
             if application_id:
                 self._link_mail(con, row['observation_id'], application_id, 1.0, 'reviewed_discovery', context, stamp)
-            con.execute('UPDATE lifecycle_discoveries SET status=?,application_id=?,reviewed_by=?,updated_at=? WHERE discovery_id=?', ({'link':'linked','create':'created','dismiss':'dismissed'}[decision], application_id, context.actor_kind, stamp, row['discovery_id']))
+            con.execute('UPDATE lifecycle_discoveries SET status=?,application_id=?,reviewed_by=?,updated_at=? WHERE discovery_id=?', ({'link':'linked','link_job':'linked','create':'created','dismiss':'dismissed'}[decision], application_id, context.actor_kind, stamp, row['discovery_id']))
             return {'discovery': dict(con.execute('SELECT * FROM lifecycle_discoveries WHERE discovery_id=?', (row['discovery_id'],)).fetchone()), 'application_id': application_id}
         return self.store._idempotent('decide_discovery', context, payload, operation)
 

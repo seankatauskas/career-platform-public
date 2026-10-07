@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
@@ -81,7 +82,7 @@ def _attempt_progress(progress, work, now):
             "policies": policies}
 
 
-def ranking_progress(config) -> dict:
+def ranking_progress(config, *, policy_status=None) -> dict:
     with _read(config.application_db) as con:
         con.row_factory = sqlite3.Row
         paused = "opportunity.preference_refresh" in disabled_tasks(con)
@@ -102,32 +103,39 @@ def ranking_progress(config) -> dict:
             state, retry_at = "waiting_provider", work["due_at"]
     result = {"state": state, "retry_at": retry_at, "available": False, "current_pass": None, "last_pass": None}
     try:
-        with _read(config.jobs_db) as jobs:
-            jobs.execute("BEGIN")
-            postings = jobs.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            families = {r[0] for r in jobs.execute(
-                "SELECT f.family_id FROM job_families f JOIN jobs j "
-                "ON j.ats=f.canonical_ats AND j.id=f.canonical_job_id"
-            )}
         runs = policy_runs(config.proxy_db)
         with _read(config.preference_db) as scores:
+            # Aggregate inside SQLite rather than transferring every family ID
+            # and every policy's score IDs into several large Python sets.
+            scores.execute('ATTACH DATABASE ? AS catalog',
+                           (config.jobs_db.resolve().as_uri() + '?mode=ro',))
+            scores.execute('PRAGMA query_only=ON')
             scores.execute("BEGIN")
-            policies = {}
-            for policy in POLICIES:
-                ranked = {r[0] for r in scores.execute(
-                    "SELECT family_id FROM preference_scores WHERE run_id=?", (runs.get(policy),)
-                )} & families
-                policies[policy] = {"ranked_families": len(ranked), "unranked_families": len(families - ranked)}
+            postings = scores.execute('SELECT COUNT(*) FROM catalog.jobs').fetchone()[0]
+            counts = scores.execute(
+                'SELECT COUNT(*),' + ','.join(
+                    'COALESCE(SUM(EXISTS(SELECT 1 FROM preference_scores s '
+                    'WHERE s.run_id=? AND s.family_id=f.family_id)),0)' for _ in POLICIES
+                ) + ' FROM (SELECT DISTINCT f.family_id FROM catalog.job_families f '
+                'JOIN catalog.jobs j ON j.ats=f.canonical_ats AND j.id=f.canonical_job_id) f',
+                tuple(runs.get(policy) for policy in POLICIES),
+            ).fetchone()
+            total_families = counts[0]
+            policies = {policy: {"ranked_families": ranked, "unranked_families": total_families - ranked}
+                        for policy, ranked in zip(POLICIES, counts[1:])}
             row = scores.execute("SELECT value FROM preference_state WHERE key='policy_refresh_progress'").fetchone()
             try:
                 progress = json.loads(row[0]) if row else {}
             except (ValueError, TypeError):
                 progress = None  # A damaged journal does not invalidate saved coverage.
-        freshness = inspect_policies(config.preference_db, config.proxy_db, config.jobs_db)
+        reusable = isinstance(policy_status, Mapping) and all(
+            isinstance(policy_status.get(policy), Mapping) and isinstance(policy_status[policy].get('status'), str)
+            for policy in POLICIES)
+        freshness = policy_status if reusable else inspect_policies(config.preference_db, config.proxy_db, config.jobs_db)
         for policy, counts in policies.items():
             counts["freshness"] = freshness[policy]["status"]
         matched = _attempt_progress(progress, work, datetime.now(timezone.utc))
-        result.update(available=True, postings=postings, total_families=len(families), policies=policies)
+        result.update(available=True, postings=postings, total_families=total_families, policies=policies)
         if state == "running":
             result["current_pass"] = matched
         elif state == "idle":

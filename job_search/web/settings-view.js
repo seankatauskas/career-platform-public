@@ -835,6 +835,22 @@ async function scanNow() {
   }
 }
 
+// The header needs application health, not a full catalog-wide ranking report.
+// Leave detailed diagnostics for Operations and do not overwrite a newer report.
+let headerHealthTask = null;
+function loadHeaderHealth() {
+  if (headerHealthTask) return headerHealthTask;
+  const epoch = opsLoadEpoch;
+  headerHealthTask = api("/api/v1/health").then(health => {
+    if (epoch !== opsLoadEpoch) return;
+    const attention = health.status !== "healthy";
+    renderHeaderNotification(attention ? "Background work needs attention." : "No failed background work reported.", attention);
+  }).catch(error => {
+    if (epoch === opsLoadEpoch) throw error;
+  }).finally(() => { headerHealthTask = null; });
+  return headerHealthTask;
+}
+
 async function loadHealth() {
   const epoch = ++opsLoadEpoch;
   const refresh = $("#refresh-health");
