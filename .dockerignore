@@ -92,6 +92,7 @@ job_search/mail/*
 !job_search/mail/pipeline.py
 !job_search/mail/policy.py
 !job_search/mail/review.py
+!job_search/mail/recovery.py
 !job_search/mail/proposals.py
 !job_search/mail/remote.py
 !job_search/mail/rules.py

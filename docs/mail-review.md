@@ -34,6 +34,20 @@ application using its employer and title. Employer aliases and shortened titles
 require a reviewer decision; the app does not turn fuzzy matches into automatic
 approvals. Creating an application is tracking only, not an employer submission.
 
+When no tracked application matches, Review also suggests collected jobs from the
+company named in the email. A sentence such as "Thank you for applying to the
+Software Engineer role" identifies the role; the company can come from the subject.
+Exact title and posting-ID evidence take priority over partial role wording. For
+equally relevant jobs, the most recent posting comes first, using the publication
+date or first collection date when the posting date is unavailable. Closed postings
+remain eligible for delayed correspondence. Recency does not make an ambiguous
+match certain: similar alternatives remain available for review.
+
+Accepting a catalog suggestion creates or reuses the application with its original
+job link and records the email's update. Merely viewing suggestions creates no
+application, and recording a confirmation does not invent a browser submission
+observation.
+
 Choose a next step only if one is needed. Recording an interview invitation does
 not itself require an availability reply: the email might instead contain a booking
 link. Receipt emails normally need no new task. Next steps create internal tasks;

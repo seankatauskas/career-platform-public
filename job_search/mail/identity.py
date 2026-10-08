@@ -33,6 +33,10 @@ def _names(subject: str, text: str) -> tuple[str, ...]:
             role_employer = re.fullmatch(r"(?:the )?.+? (?:role|position) at (.+)", name, re.I)
             if role_employer:
                 name = role_employer[1].strip(" .,:;")
+            elif re.fullmatch(r"(?:the )?.+? (?:role|position)", name, re.I):
+                # "Applying to the Engineer role" names a role, not an employer.
+                # The company must come from separate evidence (often the subject).
+                continue
             if name:
                 names.append(name)
     return tuple(names)
@@ -50,7 +54,7 @@ def _contains(value: str, text: str) -> bool:
 
 def _roles(message: str) -> list[str]:
     # Generic future-opening encouragement is not a conflicting role identity.
-    roles = re.findall(r"\b(?:apply|applying|application) for (?:the )?([^\n.!?]{1,100}?) (?:role|position)\b", message, re.I)
+    roles = re.findall(r"\b(?:apply|applying|application) (?:to [^\n.!?]{1,100}? for|for|to) (?:the )?([^\n.!?]{1,100}?) (?:role|position)\b", message, re.I)
     return [role for role in roles if len(role.split()) <= 10
             and not re.match(r"(?:a|an|any|another|future|other|open|different|new)\b", role, re.I)
             and not re.search(r"\b(?:you|we|our|your|that|which)\b", role, re.I)]

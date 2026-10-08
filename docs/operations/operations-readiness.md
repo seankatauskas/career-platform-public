@@ -104,6 +104,27 @@ authorize this operator mutation. Notification bridge error code
 `delivery_reconciliation_required` is displayed as an uncertain external action;
 there is no generic resend button.
 
+An archived-mail review can leave a failed `mail.understanding` owner after the
+same email is successfully processed by mailbox sync. `work-list` reports
+`resolution_allowed: true` and `resolution_reason: mail_review_already_processed`
+only when the original message has a retained replacement proposal, its staged
+copies are processed/ignored, and every provider invocation has a known terminal
+outcome. An operator can then close that obsolete owner without another model call:
+
+```sh
+python -m job_search --config CONFIG work-resolve-mail WORK_ID \
+  --expected-revision CURRENT_REVISION --idempotency-key UNIQUE_DECISION_KEY
+```
+
+The command rechecks the evidence and revision in one transaction, marks only
+that owner `cancelled`, and appends an immutable user recovery audit. It retains
+the original failure, attempt count, provider usage, and proposal decision,
+including a rejected proposal. It does not claim the old model call succeeded,
+requeue mail, or send anything. Pending/failed messages, active owners, mismatched
+identities, and uncertain inference remain blocked. Resolve uncertain inference
+through `inference-reconcile` first after reviewing its outcome. Repeating the
+same decision key is safe; generic `work-retry` remains unavailable for this task.
+
 Workers persist failure classification and increment a recovery revision on each
 state transition. Repeated crashes still consume the maximum attempt count.
 Before a remotely side-effectful operation, its adapter must durably set

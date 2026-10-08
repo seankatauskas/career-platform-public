@@ -693,6 +693,24 @@ image rollback:
 sudo /opt/job-search/current/scripts/job-search-ops rollback --release PREVIOUS_RELEASE_ID
 ```
 
+After a successful deployment or rollback, local Docker image retention runs under
+the same operations lock. It keeps the current and previous release images,
+including their reviewer images, plus images referenced by any running or stopped
+container. Newer/staged release directories and custom-tagged or unknown images
+are also preserved. Only digest references named by older installed releases are
+eligible, and each must still be retrievable from ECR before its local copy is
+removed. Cleanup never deletes ECR images, volumes, backups, release directories,
+or application data, and never forces removal or restarts services.
+
+The deployment result includes `local_image_retention`, with the number of removed
+references and images preserved because ECR could not return them. Inventory,
+registry, or removal errors report `status: cleanup_failed` without changing a
+completed deployment into a failure; some earlier removals may already have
+succeeded. Investigate that warning if disk use keeps rising. Retention runs only
+after a newly installed release succeeds, not on a timer or an already-installed
+release retry. Custom test images require separate operator cleanup. Restoring an
+older release may require downloading its images from ECR again.
+
 Local directory recovery verifies the manifest digest, the exact directory/file
 sets, each file checksum, and SQLite integrity before replacing data. Symlinks,
 hard links and special files are rejected. It creates an independent restore

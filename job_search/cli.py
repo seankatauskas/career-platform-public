@@ -102,6 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("work_id")
     retry.add_argument("--expected-revision", type=int, required=True)
     retry.add_argument("--idempotency-key", required=True)
+    resolve_mail = commands.add_parser("work-resolve-mail", help="close obsolete archived-mail analysis work without retrying")
+    resolve_mail.add_argument("work_id")
+    resolve_mail.add_argument("--expected-revision", type=int, required=True)
+    resolve_mail.add_argument("--idempotency-key", required=True)
     commands.add_parser("inference-usage", help="inspect platform inference reservations and limits")
     commands.add_parser("inference-recovery", help="inspect unresolved provider invocations")
     inference = commands.add_parser("inference-reconcile", help="record a checked remote invocation outcome")
@@ -746,11 +750,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         from job_search.runtime_readiness import runtime_readiness
         _json(runtime_readiness(config))
         return 0
-    if args.command in {"work-list", "work-retry"}:
+    if args.command in {"work-list", "work-retry", "work-resolve-mail"}:
         from job_search.recovery import RecoveryService
         recovery = RecoveryService(db_path)
         try:
-            result = {"items": recovery.list_work()} if args.command == "work-list" else recovery.retry(
+            mutate = recovery.resolve_mail_review if args.command == 'work-resolve-mail' else recovery.retry
+            result = {"items": recovery.list_work()} if args.command == "work-list" else mutate(
                 args.work_id, expected_revision=args.expected_revision,
                 command_id=args.idempotency_key, actor_kind="user"
             )

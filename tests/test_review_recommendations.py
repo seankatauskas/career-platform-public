@@ -52,11 +52,12 @@ def discovery(ledger, archive, key, subject, body, **kwargs):
                 if item['id'] == saved['discovery_id'])
 
 
-def event(ledger, archive, key, subject, body, application_id=None, candidate_ids=None, payload=None, **kwargs):
+def event(ledger, archive, key, subject, body, application_id=None, candidate_ids=None, payload=None,
+          event_type=ApplicationEventType.REJECTION_RECEIVED, **kwargs):
     saved, _ = evidence(ledger, archive, key, subject, body, **kwargs)
     quote = saved['excerpt']
     proposal = ledger.create_event_proposal(EventProposalInput(
-        saved['evidence_id'], application_id, ApplicationEventType.REJECTION_RECEIVED,
+        saved['evidence_id'], application_id, event_type,
         ProducerKind.MODEL, 'test-v1', 0.8,
         candidate_ids if candidate_ids is not None else [application_id] if application_id else [],
         quote, 0, len(quote), payload or {}, 'review-' + key,
@@ -434,6 +435,45 @@ def test_catalog_discovery_creates_then_reuses_linked_record_without_submission(
         assert [row['event_type'] for row in timeline['events']] == ['application_started']
         with connect(path) as con:
             assert con.execute('SELECT COUNT(*) FROM lifecycle_mail_links').fetchone()[0] == 2
+
+
+def test_confirmation_without_browser_capture_suggests_exact_catalog_role_and_records_on_approval():
+    from tests.test_review_catalog import dated_catalog
+    with tempfile.TemporaryDirectory() as directory:
+        path, ledger, archive = archive_fixture(directory)
+        title = 'Software Engineer, Early Careers AI/UI'
+        jobs = dated_catalog(directory, [
+            ('greenhouse', 'exact-job', 'streambox', title, None),
+            ('greenhouse', 'similar-job', 'streambox', 'Software Engineer, Early Careers focused on AI and UI', None),
+        ], [('2026-09-30T00:00:00Z', None, None, 'exact-job'),
+            ('2026-09-15T00:00:00Z', None, None, 'similar-job')])
+        body = 'Thank you for applying to the ' + title + ' role!'
+        item = event(ledger, archive, 'missing-capture', 'Thank you for applying to Streambox', body,
+                     event_type=ApplicationEventType.SUBMISSION_CONFIRMED, excerpt=body)
+        source = EncryptedArchiveMailSource(ledger, archive)
+        result = enrich_review_items(ledger, source, [item], jobs=jobs)[0]
+        suggestion = result['suggested_resolution']
+        assert suggestion['job']['id'] == 'exact-job'
+        assert suggestion['confidence'] == 'high' and not suggestion['requires_selection']
+        assert [row['id'] for row in result['job_matches']] == ['exact-job', 'similar-job']
+        assert ledger.list_applications() == [] and ledger.list_mail_candidates() == []
+        content = review_message(ledger, source, item)
+        snapshot = review_job_snapshot(jobs, {'ats': 'greenhouse', 'id': 'exact-job'}, content)
+        decision_context = context('confirm-missing-capture', 'user')
+        accepted = ledger.decide_event_proposal(item['id'], 'accepted', None, 'Exact company and role match',
+            decision_context, review_mail_content=content, review_job_snapshot=snapshot)
+        application_id = accepted['event']['application_id']
+        timeline = ledger.get_application_timeline(application_id)
+        assert timeline['application']['job_id'] == 'exact-job'
+        assert timeline['application']['job_url_snapshot'] == 'https://example.test/exact-job'
+        assert timeline['application']['confirmed_at'] == STAMP
+        assert [row['event_type'] for row in timeline['events']] == ['application_started', 'submission_confirmed']
+        assert ledger.decide_event_proposal(item['id'], 'accepted', None, 'Exact company and role match',
+            decision_context, review_mail_content=content, review_job_snapshot=snapshot) == accepted
+        with connect(path) as con:
+            assert con.execute('SELECT count(*) FROM browser_attempts').fetchone()[0] == 0
+            assert con.execute('SELECT count(*) FROM lifecycle_mail_links WHERE application_id=?', (application_id,)).fetchone()[0] == 1
+        assert ledger.list_attention_items() == []
 
 
 if __name__ == '__main__':

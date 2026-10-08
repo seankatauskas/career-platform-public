@@ -74,13 +74,18 @@ def _superseded(con: sqlite3.Connection, item: Mapping[str, Any]) -> bool:
 def _summary(con: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     reason = _policy_reason(con, item)
-    return {
+    result = {
         "work_id": item["work_id"], "task_kind": item["task_kind"],
         "status": item["status"], "attempts": item["attempts"],
         "revision": item["recovery_revision"], "failure_kind": item["failure_kind"],
         "external_outcome": item["external_outcome"],
         "retry_allowed": reason == "retry_available", "reason_code": reason,
     }
+    if item['task_kind'] == 'mail.understanding':
+        from .mail.recovery import RESOLUTION, resolution_evidence
+        resolution, _ = resolution_evidence(con, item)
+        result.update(resolution_allowed=resolution == RESOLUTION, resolution_reason=resolution)
+    return result
 
 
 def _policy_reason(con: sqlite3.Connection, item: Mapping[str, Any]) -> str:
@@ -132,7 +137,8 @@ class RecoveryService:
                 "SELECT * FROM work_recovery_commands WHERE command_id=?", (command_id,),
             ).fetchone()
             if previous:
-                if previous["work_id"] != work_id or previous["expected_revision"] != expected_revision:
+                if (previous["work_id"] != work_id or previous["expected_revision"] != expected_revision
+                        or json.loads(previous['result_json']).get('status') != 'queued'):
                     raise ConflictError("recovery command was already used for a different decision")
                 return dict(json.loads(previous["result_json"]))
             row = con.execute("SELECT * FROM work_items WHERE work_id=?", (work_id,)).fetchone()
@@ -172,4 +178,55 @@ class RecoveryService:
                 (command_id, work_id, expected_revision, stamp, canonical_json(before), canonical_json(result)),
             )
             con.commit()
+            return result
+
+    def resolve_mail_review(
+        self, work_id: str, *, expected_revision: int, command_id: str,
+        actor_kind: str = 'user', now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Audit cancellation of a failed owner whose email was already processed."""
+        from .mail.recovery import RESOLUTION, resolution_evidence
+        if actor_kind != 'user':
+            raise ContractError('mail work resolution requires a user decision')
+        if not isinstance(work_id, str) or not ID_RE.fullmatch(work_id):
+            raise ContractError('work id is invalid')
+        if not isinstance(command_id, str) or not ID_RE.fullmatch(command_id):
+            raise ContractError('recovery command id is invalid')
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ContractError('recovery revision is invalid')
+        if not self.db_path.is_file():
+            raise ContractError('application state is not initialized')
+        stamp = utc_stamp(as_utc(now or datetime.now(timezone.utc)))
+        with connect(self.db_path) as con:
+            con.execute('BEGIN IMMEDIATE')
+            prior = con.execute('SELECT * FROM work_recovery_commands WHERE command_id=?', (command_id,)).fetchone()
+            if prior:
+                result = json.loads(prior['result_json'])
+                if (prior['work_id'] != work_id or prior['expected_revision'] != expected_revision
+                        or result.get('resolution') != RESOLUTION):
+                    raise ConflictError('recovery command was already used for a different decision')
+                return result
+            row = con.execute('SELECT * FROM work_items WHERE work_id=?', (work_id,)).fetchone()
+            if row is None:
+                raise ContractError('work item does not exist')
+            item = dict(row)
+            if item['recovery_revision'] != expected_revision:
+                raise ConflictError('work changed; refresh its recovery state')
+            reason, evidence = resolution_evidence(con, item)
+            if reason != RESOLUTION:
+                raise ConflictError(reason)
+            result = dict(schema_version=1, command_id=command_id, work_id=work_id,
+                          status='cancelled', resolution=RESOLUTION, revision=expected_revision + 1,
+                          requested_at=stamp, evidence=evidence)
+            before = {key: item[key] for key in (
+                'status', 'attempts', 'max_attempts', 'failure_kind', 'failure_retryable',
+                'external_outcome', 'recovery_revision', 'completed_at', 'last_error')}
+            # Cancellation describes superseded work, not a successful model run.
+            # Preserve attempts, original completion/error and every provider receipt.
+            con.execute("UPDATE work_items SET status='cancelled',recovery_revision=recovery_revision+1 WHERE work_id=?", (work_id,))
+            con.execute(
+                'INSERT INTO work_recovery_commands '
+                '(command_id,work_id,expected_revision,actor_kind,requested_at,before_json,result_json) '
+                "VALUES (?,?,?,'user',?,?,?)",
+                (command_id, work_id, expected_revision, stamp, canonical_json(before), canonical_json(result)))
             return result

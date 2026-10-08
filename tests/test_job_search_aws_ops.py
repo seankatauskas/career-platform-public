@@ -657,6 +657,34 @@ class OperationsTests(unittest.TestCase):
         self.assertTrue(ops.read_operation(self.c)["complete"])
         pause.assert_not_called()
 
+    def test_image_retention_runs_after_deployment_commits_and_health_passes(self):
+        target = self.install_candidate()
+        previous = ops.release_path(self.c)
+        def retain(c, **kwargs):
+            self.assertTrue(ops.read_operation(c)["complete"])
+            self.assertEqual(ops.read_operation(c)["phase"], "deployed")
+            self.assertEqual(kwargs, {"current": target, "previous": previous})
+            return {"status": "retained", "removed_refs": 3}
+        with patch.object(ops, "running_services", return_value=["dashboard"]), patch.object(ops, "compose", return_value=""), patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "prune_local_images", side_effect=retain) as cleanup:
+            result = ops.deploy(self.c, target.name)
+        cleanup.assert_called_once()
+        self.assertEqual(result["local_image_retention"]["removed_refs"], 3)
+
+    def test_image_retention_failure_is_a_warning_on_completed_deployment(self):
+        target = self.install_candidate()
+        with patch.object(ops, "running_services", return_value=["dashboard"]), patch.object(ops, "compose", return_value=""), patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "prune_local_images", side_effect=ValueError("bad Docker response")), patch.object(ops, "pause") as pause:
+            result = ops.deploy(self.c, target.name)
+        self.assertEqual(result["status"], "deployed")
+        self.assertEqual(result["local_image_retention"], {"status": "cleanup_failed"})
+        pause.assert_not_called()
+
+    def test_image_retention_never_runs_after_failed_deployment(self):
+        target = self.install_candidate()
+        with patch.object(ops, "compose", return_value=""), patch.object(ops, "preflight", return_value={"issues": ["disk"]}), patch.object(ops, "prune_local_images") as cleanup:
+            with self.assertRaises(ops.OpsError):
+                ops.deploy(self.c, target.name)
+        cleanup.assert_not_called()
+
     def test_postresume_health_failure_stops_services_without_rewinding_data(self):
         self.install_candidate()
         (self.data / "activation.json").write_text('{"enabled": true}')

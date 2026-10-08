@@ -954,9 +954,26 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
         # Deployment is already complete. Keep old evidence rather than turn a
         # cleanup failure into an ambiguous failed deployment or stop writers.
         retention = "cleanup_failed_backups_preserved"
+    image_retention = {"status": "cleanup_failed"}
+    try: image_retention = prune_local_images(c, current=target, previous=previous)
+    except (OSError, OpsError, ValueError, KeyError, TypeError):
+        # Image cleanup is best effort after deployment commits. An inventory,
+        # registry or removal error must never pause or roll back healthy writers.
+        pass
     return {"status": op.value["phase"], "release_id": release_id, "operation_id": op.id,
             "previous_release": op.value["previous_release"], "phase_times": op.value["phase_times"],
-            "backup": op.value["backup"], "local_backup_retention": retention}
+            "backup": op.value["backup"], "local_backup_retention": retention,
+            "local_image_retention": image_retention}
+
+
+def prune_local_images(c: dict, *, current: Path, previous: Path | None) -> dict:
+    """Called only after successful deployment, with the operations lock held."""
+    from .image_retention import prune
+    require_idle(c)
+    if release_path(c) != current:
+        raise OpsError("current release changed before image retention")
+    return prune(c, current=current, previous=previous, read_manifest=manifest,
+                 run=run, aws=lambda *args: aws(c, *args))
 
 
 def prune_local_backups(c: dict, *, keep_backup: str) -> None:

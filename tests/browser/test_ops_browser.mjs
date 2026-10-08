@@ -71,6 +71,7 @@ const server = createServer(async (request, response) => {
       }
       return json({ error: 'Unexpected mutation' }, 404);
     }
+    if (pathname === '/api/v1/health') return json(ops.health);
     if (pathname === '/api/v1/ops') return opsFail ? json({ error: 'Status temporarily unavailable.' }, 503) : json(ops);
     if (pathname === '/api/v1/ops/pipeline') return json({collection:ops.collection,ranking:ops.ranking});
     const api = {
@@ -144,6 +145,7 @@ try {
   await page.locator('#header-health').click();
   await page.locator('#ops').waitFor({state:'visible'});
   report.checks.push('Career profile remains available inside Settings, including legacy links, refresh and back navigation.');
+  await page.waitForFunction(() => !document.querySelector('#ops').hasAttribute('aria-busy') && document.querySelector('#readiness-list .readiness-row'));
   assert.match(await page.locator('#notification-status').textContent(), /needs attention/);
   assert.match(await page.locator('#readiness-summary').innerText(), /does not contact Outlook, Telegram, or model providers/);
   for (const label of ['Working', 'Overdue', 'Needs attention', 'Awaiting verification', 'Paused', 'Not enabled']) {

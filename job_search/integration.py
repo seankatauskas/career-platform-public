@@ -181,6 +181,7 @@ class LocalJobCatalog:
 
         Only company identities and metadata for matching boards are read. Closed
         postings remain eligible because their recruiting emails can arrive later.
+        Posting recency breaks equal relevance ties, never establishes identity.
         This lookup never creates an application or infers a submission.
         """
         from .mail.context import CandidateApplication
@@ -219,6 +220,13 @@ class LocalJobCatalog:
                 return ()
             selected = [field for field in (*self._RESULT_FIELDS, "closed_at") if field in columns]
             projection = ",".join(selected)
+            # Parse timestamps in SQLite so offsets sort correctly and malformed
+            # dates can fall back to publication/collection time. Older catalogs
+            # without dates retain deterministic identity ordering.
+            dates = [f"julianday({field})" for field in ("posted_at", "publishedAt", "first_seen")
+                     if field in columns]
+            recency = "COALESCE(" + ",".join([*dates, "0"]) + ")" if dates else "0"
+            projection += f",{recency} AS review_recency"
             boards = [(row['ats'], row['company']) for row in con.execute(
                 "SELECT DISTINCT ats,company FROM jobs WHERE company IS NOT NULL")]
             # Match compact board slugs against whole words, without normalizing
@@ -244,7 +252,7 @@ class LocalJobCatalog:
             for ats, company in matches:
                 found = con.execute(
                     f"SELECT {projection} FROM jobs WHERE ats=? AND company=? "
-                    "ORDER BY review_role_score(title,id) DESC,id LIMIT ?",
+                    "ORDER BY review_role_score(title,id) DESC,review_recency DESC,id LIMIT ?",
                     (ats, company, candidate_cap + 1),
                 ).fetchall()
                 truncated = truncated or len(found) > candidate_cap
@@ -265,7 +273,7 @@ class LocalJobCatalog:
             {**row, "application_id": f"catalog:{row['ats']}:{row['id']}",
              "job_id": row['id'], "employer_snapshot": row['company'],
              "company_slug_snapshot": row['company'], "title_snapshot": row['title']}
-            for row in rows.values()
+            for row in sorted(rows.values(), key=lambda row: (-row['review_recency'], row['ats'], row['id']))
         ], message)
         candidates = [CandidateApplication(
             row['application_id'], row['ats'], row['id'], row['company'], row['title'], row['company'],
@@ -273,14 +281,18 @@ class LocalJobCatalog:
         supported = review_supported_candidates(candidates, subject, body)
         eligible = {candidate.application_id for candidate in supported}
         unique_id = unique_supported_application(supported, subject, body)
+        ranked = [row for row in ranked if row['application_id'] in eligible]
         result = []
         for row in ranked:
             identity = row['application_id']
-            if identity not in eligible:
-                continue
             unique = identity == unique_id
+            reason = row['mail_match_context']
+            if (row is ranked[0] and len(ranked) > 1
+                    and row['mail_match_score'] == ranked[1]['mail_match_score']
+                    and row['review_recency'] > ranked[1]['review_recency']):
+                reason += '; most recent posting among equally matching roles'
             result.append({**{field: row[field] for field in selected},
-                "match_reason": row['mail_match_context'], "match_score": row['mail_match_score'],
+                "match_reason": reason, "match_score": row['mail_match_score'],
                 "match_confidence": "high" if unique and not truncated else "medium",
                 "match_unique": unique and not truncated,
                 "candidates_truncated": truncated or len(supported) > limit})

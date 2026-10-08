@@ -98,6 +98,24 @@ def test_generic_recruiting_language_does_not_invent_conflicting_identity():
         'We cannot move forward with your application at this time.')
 
 
+def test_applying_to_a_role_is_not_a_second_employer():
+    item = candidate(employer='Streambox', title='Software Engineer, Early Careers AI/UI')
+    wrong_role = replace(item, application_id='wrong-role', title='Product Designer')
+    wrong_employer = replace(item, application_id='wrong-company', employer='Other Company', company_slug='othercompany')
+    for phrase in ('Thank you for applying to the', 'Thanks for applying to',
+                   'Your application to the', 'Thank you for applying for the'):
+        body = phrase + ' Software Engineer, Early Careers AI/UI role!'
+        assert supported_candidates([item, wrong_role, wrong_employer],
+                                    'Thank you for applying to Streambox', body) == (item,)
+        # A role alone still cannot identify an employer; explicit conflicts win.
+        assert supported_candidates([item], 'Application received', body) == ()
+        assert supported_candidates([item], 'Your application to Other Company', body) == ()
+        assert supported_candidates([item], 'Your application to Streambox',
+                                    body + '\nYour application to Other Company.') == ()
+    assert supported_candidates([item, wrong_role], '',
+        'Thanks for applying to Streambox for the Software Engineer, Early Careers AI/UI position!') == (item,)
+
+
 def test_keyword_free_reply_can_keep_a_reviewed_thread_but_not_a_shared_sender():
     item = candidate()
     assert not supported_candidates([replace(item, match_context='sender previously linked to application')], 'Re: Hello', 'Tuesday works.')

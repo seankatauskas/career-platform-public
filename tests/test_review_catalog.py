@@ -172,6 +172,69 @@ def test_missing_empty_and_invalid_catalog_inputs():
         assert source.review_candidates('Example Co', 'Engineer') == ()
 
 
+def dated_catalog(directory, jobs, dates):
+    source = catalog(directory, jobs)
+    with sqlite3.connect(source.jobs_db) as con:
+        for column in ('posted_at', 'publishedAt', 'first_seen'):
+            con.execute(f'ALTER TABLE jobs ADD COLUMN {column} TEXT')
+        con.executemany('UPDATE jobs SET posted_at=?,publishedAt=?,first_seen=? WHERE id=?', dates)
+    return source
+
+
+def test_confirmation_matches_catalog_without_application_and_keeps_close_role_variants():
+    with tempfile.TemporaryDirectory() as directory:
+        source = catalog(directory, [
+            ('greenhouse', 'exact-role', 'streambox', 'Software Engineer, Early Careers AI/UI', None),
+            ('greenhouse', 'similar-role', 'streambox', 'Software Engineer, Early Careers focused on AI and UI', None),
+            ('greenhouse', 'other-role', 'streambox', 'Product Designer', None),
+            ('greenhouse', 'wrong-company', 'othercompany', 'Software Engineer, Early Careers AI/UI', None),
+        ])
+        rows = source.review_candidates('Thank you for applying to Streambox',
+            'Thank you for applying to the Software Engineer, Early Careers AI/UI role!')
+        assert [row['id'] for row in rows] == ['exact-role', 'similar-role']
+        assert rows[0]['match_unique'] and rows[0]['match_confidence'] == 'high'
+
+
+def test_recency_orders_company_only_suggestions_without_claiming_unique_identity():
+    with tempfile.TemporaryDirectory() as directory:
+        source = dated_catalog(directory, [
+            ('ashby', 'aaa-older', 'Example Co', 'Engineer', None),
+            ('lever', 'zzz-newer', 'Example Co', 'Designer', None),
+            ('greenhouse', 'undated', 'Example Co', 'Accountant', None),
+        ], [('2026-10-05T23:00:00Z', None, None, 'aaa-older'),
+            ('invalid', '2026-10-05T20:00:00-04:00', None, 'zzz-newer')])
+        rows = source.review_candidates('Your application to Example Co', 'Application received.')
+        assert [row['id'] for row in rows] == ['zzz-newer', 'aaa-older', 'undated']
+        assert not any(row['match_unique'] for row in rows)
+        assert 'recent' in rows[0]['match_reason']
+
+
+def test_role_and_posting_identity_outrank_newer_catalog_roles():
+    with tempfile.TemporaryDirectory() as directory:
+        source = dated_catalog(directory, [
+            ('ashby', 'old-exact', 'Example Co', 'Platform Engineer', '2026-10-01'),
+            ('ashby', 'newer-partial', 'Example Co', 'Platform Software Engineer', None),
+            ('ashby', 'newest-other', 'Example Co', 'Designer', None),
+        ], [('2026-08-01T00:00:00Z', None, None, 'old-exact'),
+            ('2026-09-01T00:00:00Z', None, None, 'newer-partial'),
+            ('2026-10-01T00:00:00Z', None, None, 'newest-other')])
+        rows = source.review_candidates('Example Co', 'Platform Engineer application update')
+        assert rows[0]['id'] == 'old-exact' and rows[0]['match_unique']
+        rows = source.review_candidates('Example Co', 'Posting old-exact application update')
+        assert rows[0]['id'] == 'old-exact' and rows[0]['match_unique']
+
+
+def test_recency_is_applied_before_candidate_cap_and_duplicate_titles_stay_ambiguous():
+    with tempfile.TemporaryDirectory() as directory:
+        source = dated_catalog(directory, [
+            ('ashby', f'job-{i:04}', 'Example Co', 'Platform Engineer', None) for i in range(125)
+        ] + [('ashby', 'zzz-newest', 'Example Co', 'Platform Engineer', None)],
+            [(None, None, '2026-10-01T00:00:00Z', 'zzz-newest')])
+        rows = source.review_candidates('Example Co', 'Platform Engineer', limit=2)
+        assert rows[0]['id'] == 'zzz-newest'
+        assert all(row['candidates_truncated'] and not row['match_unique'] for row in rows)
+
+
 if __name__ == '__main__':
     tests = [value for name, value in globals().copy().items() if name.startswith('test_') and callable(value)]
     for test in tests:
