@@ -11,6 +11,12 @@ on:
         options: [plan, apply]
         default: plan
         required: true
+      scope:
+        description: 'Full infrastructure, or only existing health/domain alarms'
+        type: choice
+        options: [full, health-alarms]
+        default: full
+        required: true
 
 permissions:
   contents: read
@@ -33,6 +39,8 @@ jobs:
       STATE_BUCKET: ${{ vars.AWS_STATE_BUCKET }}
       TERRAFORM_VARS_JSON: ${{ vars.AWS_TERRAFORM_VARS_JSON }}
       TF_IN_AUTOMATION: 'true'
+      PLAN_SCOPE: ${{ inputs.scope || 'full' }}
+      INSTANCE_ID: ${{ vars.AWS_INSTANCE_ID }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -77,13 +85,38 @@ jobs:
             -backend-config='encrypt=true' -backend-config='use_lockfile=true'
       - run: terraform fmt -check -recursive infra/aws
       - run: terraform -chdir=infra/aws validate
+      - name: Preserve installed bootstrap data for the bounded alarm update
+        if: inputs.scope == 'health-alarms'
+        run: |
+          # This temporary override exists only for this targeted run. Full plans
+          # continue to report bootstrap drift for a deliberate host replacement.
+          cat > infra/aws/alarm_rollout_override.tf <<'HCL'
+          resource "aws_instance" "host" {
+            lifecycle {
+              ignore_changes = [user_data_base64]
+            }
+          }
+          HCL
       - name: Create saved plan from this exact commit and configuration
         run: |
+          set -euo pipefail
+          targets=()
+          if [[ "$PLAN_SCOPE" == health-alarms ]]; then
+            targets=('-target=aws_cloudwatch_metric_alarm.operations["health"]' '-target=aws_cloudwatch_metric_alarm.operations["domain"]')
+          elif [[ "$PLAN_SCOPE" != full ]]; then
+            echo 'Unsupported infrastructure scope'; exit 1
+          fi
           terraform -chdir=infra/aws plan -input=false -lock-timeout=5m \
-            -var-file="$RUNNER_TEMP/aws.tfvars.json" -out="$RUNNER_TEMP/aws.tfplan"
+            -var-file="$RUNNER_TEMP/aws.tfvars.json" "${targets[@]}" -out="$RUNNER_TEMP/aws.tfplan"
+      - name: Reject changes outside the two existing health alarms
+        if: inputs.scope == 'health-alarms'
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra/aws show -json "$RUNNER_TEMP/aws.tfplan" | \
+            python3 scripts/check-alarm-plan.py --instance-id "$INSTANCE_ID"
       - name: Apply the saved plan
         if: inputs.operation == 'apply'
         run: terraform -chdir=infra/aws apply -input=false -lock-timeout=5m "$RUNNER_TEMP/aws.tfplan"
       - name: Clear runner state artifacts
         if: always()
-        run: rm -f "$RUNNER_TEMP/aws.tfvars.json" "$RUNNER_TEMP/aws.tfplan"
+        run: rm -f "$RUNNER_TEMP/aws.tfvars.json" "$RUNNER_TEMP/aws.tfplan" infra/aws/alarm_rollout_override.tf

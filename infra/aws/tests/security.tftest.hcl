@@ -63,8 +63,14 @@ run "single_host_security" {
     error_message = "Monitoring must detect silence as well as explicit failures."
   }
   assert {
-    condition     = aws_cloudwatch_metric_alarm.operations["domain"].metric_name == "DomainReady" && aws_cloudwatch_metric_alarm.operations["domain_stale"].metric_name == "DomainStaleCapabilities" && aws_cloudwatch_metric_alarm.operations["domain_reconciliation"].metric_name == "DomainPendingReconciliation"
+    condition     = anytrue([for q in aws_cloudwatch_metric_alarm.operations["domain"].metric_query : anytrue([for m in q.metric : m.metric_name == "DomainReady"])]) && aws_cloudwatch_metric_alarm.operations["domain_stale"].metric_name == "DomainStaleCapabilities" && aws_cloudwatch_metric_alarm.operations["domain_reconciliation"].metric_name == "DomainPendingReconciliation"
     error_message = "Domain progress and uncertain external work need alarms separate from process health."
+  }
+  assert {
+    condition = alltrue([for name in ["health", "domain"] : anytrue([
+      for q in aws_cloudwatch_metric_alarm.operations[name].metric_query : q.expression == "IF(FILL(maintenance, 0) > 0, 1, health)"
+    ])]) && aws_cloudwatch_metric_alarm.operations["backup"].threshold == 86400
+    error_message = "Only bounded maintenance suppresses service health; backup age remains a real 24-hour alarm."
   }
   assert {
     condition     = aws_cloudwatch_log_group.operations.retention_in_days == 14

@@ -22,6 +22,7 @@ def runtime_usage(config: RuntimeConfigV1) -> dict[str, Any]:
 def runtime_readiness(
     config: RuntimeConfigV1, *, dependencies: Optional[Mapping[str, Any]] = None,
     automation_enabled: bool = True, use_snapshot: bool = False,
+    include_ranking_details: bool = True,
 ) -> dict[str, Any]:
     from .readiness import readiness_report, _report
 
@@ -60,7 +61,7 @@ def runtime_readiness(
             reason=reason, action=action,
         )], report["metrics"])
         report["inference_usage"] = usage
-    if config.shortlist_policy != "champion":
+    if include_ranking_details and config.shortlist_policy != "champion":
         from .ranking.refresh import inspect_policies
         from .readiness import _capability
         policies=inspect_policies(config.preference_db,config.proxy_db,config.jobs_db)

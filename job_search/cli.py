@@ -96,7 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "init", help="create/migrate the private ledger and seed schedules"
     )
-    commands.add_parser("readiness", help="inspect configuration and workflow progress without starting work")
+    readiness = commands.add_parser("readiness", help="inspect configuration and workflow progress without starting work")
+    readiness.add_argument("--monitor", action="store_true", help="use recorded dependency and workflow health without scanning ranking scores")
     commands.add_parser("work-list", help="show bounded failed-work recovery options")
     retry = commands.add_parser("work-retry", help="retry a classified safe failure")
     retry.add_argument("work_id")
@@ -748,7 +749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "readiness":
         from job_search.runtime_readiness import runtime_readiness
-        _json(runtime_readiness(config))
+        _json(runtime_readiness(config, use_snapshot=args.monitor, include_ranking_details=not args.monitor))
         return 0
     if args.command in {"work-list", "work-retry", "work-resolve-mail"}:
         from job_search.recovery import RecoveryService

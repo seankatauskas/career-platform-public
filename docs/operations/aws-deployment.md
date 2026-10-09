@@ -656,7 +656,7 @@ email drafts, or calendar proposals. Complete those through the existing UI.
 
 ## 7. Backup, rollback, and replacement-host recovery
 
-The timer checks every 30 minutes for the daily 08:00 UTC backup and retries a
+The timer checks every 30 minutes for backups due at 08:00 and 20:00 UTC and retries a
 failed attempt up to three times, 30 minutes apart. It pauses writers, snapshots
 SQLite consistently, captures
 model/resume/Hermes state, resumes the previous services, and uploads a checksummed
@@ -668,6 +668,27 @@ scheduled attempt sends an SNS alert and persists a failure metric. An unresolve
 maintenance operation blocks automatic retries until recovery. The backup-age
 alarm threshold is 24 hours, with normal CloudWatch evaluation latency. A sustained
 backup failure can exceed the 24-hour recovery-point target.
+
+The two daily windows leave time for upload and retry before the 24-hour threshold;
+they also produce approximately twice as many retained S3 backups as a daily
+schedule. An in-progress attempt is recorded separately from failure. A prior
+failure remains visible until a successful upload, including across windows. An
+interrupted attempt whose operations lock is gone or cannot be verified reports
+failure even if its snapshot operation already completed.
+
+`status --publish` bounds its diagnostic commands and reserves 30 seconds for
+metric publication inside the 240-second systemd timeout. Its in-container
+`readiness --monitor` process has a 40-second limit and reads workflow health and
+the worker's dependency snapshot without scanning ranking scores. A failed probe
+publishes blocked domain readiness while preserving the separate process-health
+and heartbeat metrics. Detailed ranking coverage remains in ordinary `readiness`.
+
+The Terraform health/domain alarms use `MaintenanceActive` to allow a live,
+locked backup less than one hour old. Raw `Healthy` and `DomainReady` still show
+actual observations. Missing maintenance telemetry grants no exception, and
+backup-age, backup-failure, stale-work, and reconciliation alarms are not suppressed.
+Deploy the application through the release workflow, then review/apply the alarm
+changes through the Terraform workflow. Existing hosts need no service-unit edit.
 
 A scheduled timer encountering an actively held deployment/backup lock reports
 `deferred` with `maintenance_active`, without starting a backup or changing its

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -35,6 +36,8 @@ REVIEW_SERVICES = ("tools", "dashboard", "mcp", "hermes")
 BACKUP_DIRS = ("state", "hermes", "toolchain")
 # Credential-bearing Hermes files are recovered from Secrets Manager, not the bundle.
 EXCLUDED = {".env", "config.yaml", ".operations.lock", "runtime", "logs", "__pycache__"}
+_STATUS_DEADLINE = ContextVar("status_deadline", default=None)
+MAINTENANCE_GRACE_SECONDS = 3600
 
 from .operation_journal import (
     OpsError, Operation, read as read_operation, require_idle, set_gate as _set_gate,
@@ -90,6 +93,11 @@ def load_config(path: Path) -> dict:
     return c
 
 def run(argv: list[str], *, timeout: int = 300, env: dict | None = None) -> str:
+    deadline = _STATUS_DEADLINE.get()
+    if deadline is not None:
+        timeout = min(timeout, 50, deadline - time.monotonic())
+        if timeout <= 0:
+            raise OpsError("status diagnostic deadline exceeded")
     try:
         result = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=timeout, env=env)
         return result.stdout
@@ -1079,8 +1087,11 @@ def review(c: dict) -> dict:
 
 def domain_readiness(c: dict) -> dict:
     """Query the active release's read-only report; never start an idle worker."""
-    raw = compose(c, "exec", "-T", "core", "python", "-m", "job_search",
-                  "--config", "/run/job-search/config.json", "readiness")
+    # Bound the process inside Docker too: killing the host docker client alone
+    # leaves its expensive readiness query running in the container.
+    runner = "import subprocess,sys; subprocess.run(sys.argv[1:],check=True,timeout=40)"
+    raw = compose(c, "exec", "-T", "core", "python", "-c", runner, "python", "-m", "job_search",
+                  "--config", "/run/job-search/config.json", "readiness", "--monitor")
     if len(raw.encode("utf-8")) > 128 * 1024:
         raise OpsError("domain readiness response is too large")
     value = json.loads(raw)
@@ -1100,6 +1111,16 @@ def domain_readiness(c: dict) -> dict:
 
 
 def status(c: dict, publish: bool = False) -> dict:
+    # Leave time inside systemd's 240s limit to publish failures even if Docker
+    # or a readiness query stalls. The deadline applies only to this diagnostic.
+    token = _STATUS_DEADLINE.set(time.monotonic() + 150)
+    try:
+        return _status(c, publish)
+    finally:
+        _STATUS_DEADLINE.reset(token)
+
+
+def _status(c: dict, publish: bool = False) -> dict:
     result = preflight(c)
     from .review_host import status as reviewer_status
     result["codex_reviews"] = reviewer_status(c)
@@ -1149,22 +1170,13 @@ def status(c: dict, publish: bool = False) -> dict:
     result["backup_overdue"] = age < 0 or age > 24
     attempt_path = Path(c["data_root"]) / "backup-attempt.json"
     try:
-        result["backup_attempt_failed"] = bool(json.loads(attempt_path.read_text()).get("failed"))
+        attempt = json.loads(attempt_path.read_text())
+        in_progress = bool(attempt.get("in_progress"))
+        result["backup_attempt_in_progress"] = in_progress and operation_lock_held(c) is True
+        result["backup_attempt_failed"] = bool(attempt.get("failed")) or (in_progress and not result["backup_attempt_in_progress"])
     except (OSError, ValueError):
         result["backup_attempt_failed"] = False
-    if publish:
-        dimensions = [{"Name": "InstanceId", "Value": c["instance_id"]}]
-        aws(c, "cloudwatch", "put-metric-data", "--namespace", c.get("cloudwatch_namespace", "CareerPlatform"),
-            "--metric-data", json.dumps([
-                {"MetricName": "Healthy", "Value": int(ok), "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "BackupAttemptFailed", "Value": int(result["backup_attempt_failed"]), "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "BackupAgeSeconds", "Value": age * 3600 if age >= 0 else 999999, "Unit": "Seconds", "Dimensions": dimensions},
-                {"MetricName": "MonitorHeartbeat", "Value": 1, "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "DomainReady", "Value": int(domain_ok), "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "DomainStaleCapabilities", "Value": domain["metrics"]["stale_capabilities"], "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "DomainUnresolvedWork", "Value": domain["metrics"]["unresolved_work"], "Unit": "Count", "Dimensions": dimensions},
-                {"MetricName": "DomainPendingReconciliation", "Value": domain["metrics"]["pending_reconciliation"], "Unit": "Count", "Dimensions": dimensions},
-            ]))
+        result["backup_attempt_in_progress"] = False
     operation = read_operation(c)
     result["operation"] = {key: operation.get(key) for key in ("operation_id", "kind", "phase", "complete", "writes_possible", "previous_release", "target_release", "started_at", "updated_at", "phase_times", "recovery_tool", "backup")} if operation else None
     incomplete = bool(operation and not operation["complete"])
@@ -1179,28 +1191,59 @@ def status(c: dict, publish: bool = False) -> dict:
         result["next_action"] = "recover --operation " + operation["operation_id"]
         result["recovery_tool"] = operation.get("recovery_tool")
         if held is None: result["operation_lock_unverified"] = True
+    grace = False
+    if result["maintenance_active"] and operation["kind"] == "backup":
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(operation["started_at"])).total_seconds()
+            grace = 0 <= elapsed < MAINTENANCE_GRACE_SECONDS
+        except (KeyError, TypeError, ValueError):
+            pass
+    result["maintenance_alarm_grace"] = grace
+    if publish:
+        # Diagnostic failures must not consume the publication budget.
+        _STATUS_DEADLINE.set(time.monotonic() + 30)
+        dimensions = [{"Name": "InstanceId", "Value": c["instance_id"]}]
+        values = {
+            "Healthy": int(ok), "MaintenanceActive": int(grace),
+            "BackupAttemptFailed": int(result["backup_attempt_failed"]),
+            "BackupAgeSeconds": age * 3600 if age >= 0 else 999999,
+            "MonitorHeartbeat": 1, "DomainReady": int(domain_ok),
+            "DomainStaleCapabilities": domain["metrics"]["stale_capabilities"],
+            "DomainUnresolvedWork": domain["metrics"]["unresolved_work"],
+            "DomainPendingReconciliation": domain["metrics"]["pending_reconciliation"],
+        }
+        aws(c, "cloudwatch", "put-metric-data", "--namespace", c.get("cloudwatch_namespace", "CareerPlatform"),
+            "--metric-data", json.dumps([
+                {"MetricName": name, "Value": value, "Unit": "Seconds" if name == "BackupAgeSeconds" else "Count", "Dimensions": dimensions}
+                for name, value in values.items()
+            ]))
     return result
 
 
 def scheduled_backup(c: dict, *, now: datetime | None = None) -> dict:
     stamp = now or datetime.now(timezone.utc)
-    window = stamp.replace(hour=8, minute=0, second=0, microsecond=0)
+    # Twice daily leaves room for copying/upload/retry before the 24-hour RPO.
+    window = stamp.replace(hour=20 if stamp.hour >= 20 else 8, minute=0, second=0, microsecond=0)
     if stamp < window:
-        window -= timedelta(days=1)
+        window -= timedelta(hours=12)
     path = Path(c["data_root"]) / "backup-attempt.json"
     attempt = json.loads(path.read_text()) if path.exists() else {}
     if attempt.get("window") != window.isoformat():
-        attempt = {"window": window.isoformat(), "attempts": 0, "succeeded": False}
+        attempt = {"window": window.isoformat(), "attempts": 0, "succeeded": False,
+                   "failed": bool(attempt.get("failed") or attempt.get("in_progress"))}
     if attempt["succeeded"] or attempt["attempts"] >= 4:
         return {"status": "scheduled_wait", "attempts": attempt["attempts"]}
     if attempt.get("retry_at") and stamp < datetime.fromisoformat(attempt["retry_at"]):
         return {"status": "scheduled_wait", "attempts": attempt["attempts"]}
     attempt.update(attempts=attempt["attempts"] + 1, attempted_at=stamp.isoformat(),
-                   retry_at=(stamp + timedelta(minutes=30)).isoformat(), failed=True)
+                   retry_at=(stamp + timedelta(minutes=30)).isoformat(),
+                   in_progress=True, failed=bool(attempt.get("failed")))
     write_json(path, attempt)
     try:
         result = backup_unlocked(c)
     except Exception:
+        attempt.update(in_progress=False, failed=True)
+        write_json(path, attempt)
         if attempt["attempts"] == 1 and c.get("notification_topic_arn"):
             try:
                 aws(c, "sns", "publish", "--topic-arn", c["notification_topic_arn"],
@@ -1209,7 +1252,7 @@ def scheduled_backup(c: dict, *, now: datetime | None = None) -> dict:
             except OpsError:
                 pass  # Persistent failure metric remains the independent fallback.
         raise
-    attempt.update(succeeded=True, failed=False)
+    attempt.update(succeeded=True, failed=False, in_progress=False)
     write_json(path, attempt)
     return result
 

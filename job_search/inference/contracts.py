@@ -36,6 +36,10 @@ class InferenceTransportError(RuntimeError):
         self.status_code = status_code
 
 
+class InferenceResponseRejected(InferenceTransportError):
+    """A received response failed validation; submission is not ambiguous."""
+
+
 @dataclass(frozen=True)
 class GenerationResult:
     text: str

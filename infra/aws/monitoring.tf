@@ -95,17 +95,45 @@ resource "aws_cloudwatch_metric_alarm" "operations" {
 
   for_each            = local.alarms
   alarm_name          = "${var.name}-${each.key}"
-  namespace           = each.value.namespace
-  metric_name         = each.value.metric
+  namespace           = contains(["health", "domain"], each.key) ? null : each.value.namespace
+  metric_name         = contains(["health", "domain"], each.key) ? null : each.value.metric
   comparison_operator = each.value.comparison
   threshold           = each.value.threshold
-  statistic           = each.value.statistic
-  period              = each.value.period
+  statistic           = contains(["health", "domain"], each.key) ? null : each.value.statistic
+  period              = contains(["health", "domain"], each.key) ? null : each.value.period
   evaluation_periods  = each.value.evaluations
-  dimensions          = each.value.dimensions
+  dimensions          = contains(["health", "domain"], each.key) ? null : each.value.dimensions
   treat_missing_data  = "breaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
+
+  # The host grants this only to a locked backup younger than one hour. Keep
+  # raw health metrics truthful and do not suppress age/failure/reconciliation.
+  dynamic "metric_query" {
+    for_each = contains(["health", "domain"], each.key) ? [1] : []
+    content {
+      id          = "effective"
+      expression  = "IF(FILL(maintenance, 0) > 0, 1, health)"
+      return_data = true
+    }
+  }
+  dynamic "metric_query" {
+    for_each = contains(["health", "domain"], each.key) ? {
+      health      = each.value.metric
+      maintenance = "MaintenanceActive"
+    } : {}
+    content {
+      id          = metric_query.key
+      return_data = false
+      metric {
+        namespace   = each.value.namespace
+        metric_name = metric_query.value
+        dimensions  = each.value.dimensions
+        period      = each.value.period
+        stat        = "Minimum"
+      }
+    }
+  }
 
 }
 # Agent disk metrics have path/fstype dimensions; query aggregates by path and

@@ -738,7 +738,8 @@ class OperationsTests(unittest.TestCase):
             result = ops.domain_readiness(self.c)
         self.assertEqual(result["status"], "ready")
         self.assertEqual(compose.call_args.args[1:4], ("exec", "-T", "core"))
-        self.assertEqual(compose.call_args.args[-1], "readiness")
+        self.assertEqual(compose.call_args.args[-2:], ("readiness", "--monitor"))
+        self.assertIn("timeout=40", compose.call_args.args[6])
 
     def test_domain_probe_rejects_untrusted_shapes(self):
         for report in ({}, {"schema_version": 1, "status": "healthy"}, self.domain(stale=-1), self.domain(reconcile=True)):
@@ -779,7 +780,7 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(result["host_memory"]["counters"],
                          {"host_available_bytes": 1024, "host_file_cache_bytes": 2048})
         metrics = json.loads(aws.call_args.args[-1])
-        self.assertEqual(len(metrics), 8)
+        self.assertEqual(len(metrics), 9)
         self.assertFalse(any("memory" in item["MetricName"].lower() for item in metrics))
         with patch.object(ops, "preflight", return_value={"issues": []}), \
              patch.object(ops, "running_services", return_value=[]), \

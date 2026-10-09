@@ -23,7 +23,7 @@ from .config import (
     RunpodQueuedGenerationConfig,
     load_credential,
 )
-from .contracts import GenerationResult, InferenceTransportError
+from .contracts import GenerationResult, InferenceTransportError, InferenceResponseRejected
 from .usage import begin_invocation, current_scope, InvocationPending, UsageDeferred, heartbeat_scope
 
 Transport = Callable[[str, Mapping[str, str], bytes, float, int], Mapping[str, Any]]
@@ -839,7 +839,7 @@ class OpenAICompatibleStructuredGenerator:
             raise
         choices = payload.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise InferenceTransportError(
+            raise InferenceResponseRejected(
                 "generation response must contain exactly one choice",
                 retryable=False,
             )
@@ -847,7 +847,7 @@ class OpenAICompatibleStructuredGenerator:
         message = choice.get("message") if isinstance(choice, Mapping) else None
         content = message.get("content") if isinstance(message, Mapping) else None
         if not isinstance(content, str) or not content.strip():
-            raise InferenceTransportError(
+            raise InferenceResponseRejected(
                 "generation response did not contain text",
                 retryable=False,
             )
@@ -858,7 +858,7 @@ class OpenAICompatibleStructuredGenerator:
             or len(response_model) > 255
             or response_model != self.config.model
         ):
-            raise InferenceTransportError(
+            raise InferenceResponseRejected(
                 "generation response must attest the exact configured model",
                 retryable=False,
             )

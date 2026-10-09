@@ -19,9 +19,11 @@ from .mail.context import CandidateApplication
 from .mail.identity import review_supported_candidates
 from .mail.matching import rank_mail_candidates
 from .mail.proposals import validate_model_output
+from .mail.model import ModelExecutionError
 from .mail.sanitizer import sanitize_mail
 from .mail.understanding_runtime import MailUnderstandingRuntime
 from .inference.usage import UsageDeferred, InvocationReconciliationRequired
+from .inference.contracts import InferenceResponseRejected
 from .review_messages import review_message
 
 
@@ -126,18 +128,26 @@ def recover_review(ledger, mail_source, query, classifier, model_version, *, usa
                 output = classifier.classify(mail.text, [item.model_context() for item in candidates])
             except (UsageDeferred, InvocationReconciliationRequired):
                 raise
+            except (ModelExecutionError, ContractError, InferenceResponseRejected):
+                failure = ContractError('archived email analysis output was rejected; the original review is unchanged')
+                attempt['output_rejected'] = failure
+                raise failure from None
             except Exception:
                 raise ContractError('archived email analysis failed; the original review is unchanged') from None
-            validated = validate_model_output(output,
-                evidence_id=existing_evidence['evidence_id'] if existing_evidence else 'review-recovery',
-                mail=mail, candidates=candidates, producer_version=model_version)
-            if existing_evidence:
-                # Retained evidence is immutable. Preserve the validated quote while
-                # relocating its offset into the exact excerpt already on record.
-                start = existing_evidence['excerpt'].find(validated.evidence_quote)
-                if start < 0:
-                    raise ContractError('analysis evidence is absent from the retained email excerpt')
-                validated = replace(validated, span_start=start, span_end=start + len(validated.evidence_quote))
+            try:
+                validated = validate_model_output(output,
+                    evidence_id=existing_evidence['evidence_id'] if existing_evidence else 'review-recovery',
+                    mail=mail, candidates=candidates, producer_version=model_version)
+                if existing_evidence:
+                    # Retained evidence is immutable. Preserve the validated quote while
+                    # relocating its offset into the exact excerpt already on record.
+                    start = existing_evidence['excerpt'].find(validated.evidence_quote)
+                    if start < 0:
+                        raise ContractError('analysis evidence is absent from the retained email excerpt')
+                    validated = replace(validated, span_start=start, span_end=start + len(validated.evidence_quote))
+            except ContractError as exc:
+                attempt['output_rejected'] = exc
+                raise
             def persist(con, stamp):
                 # Direction, status, evidence, proposal, and stage completion share
                 # one write transaction so a concurrent dismissal cannot be lost.

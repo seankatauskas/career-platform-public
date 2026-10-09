@@ -302,10 +302,11 @@ def test_uncheckpointed_model_result_requires_reconciliation_without_duplicate_p
     from job_search.inference.usage import InvocationReconciliationRequired
     with tempfile.TemporaryDirectory() as directory:
         path, ledger, _, source, query, _ = fixture(directory)
-        classifier = GovernedClassifier('invalid')
+        classifier = GovernedClassifier()
         for _ in range(2):
             try:
-                recover_review(ledger, source, query, classifier, 'fixture-model-v1')
+                with patch.object(ledger.store, '_idempotent', side_effect=RuntimeError('lost valid result before persistence')):
+                    recover_review(ledger, source, query, classifier, 'fixture-model-v1')
             except InvocationReconciliationRequired:
                 pass
             else:

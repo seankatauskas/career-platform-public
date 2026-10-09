@@ -59,6 +59,16 @@ including its own role. Its `iam:PassRole` is restricted to the host role and EC
 Routine non-IAM changes use the infrastructure workflow; releases use the separate
 deploy role. Neither requires long-lived GitHub AWS access keys.
 
+For the existing health/domain alarm rollout, choose `scope=health-alarms` in
+`aws-terraform.yml`, first with `operation=plan`, then `operation=apply` after
+reviewing the plan. This targets only the two alarms and temporarily preserves
+the installed EC2 bootstrap data. The saved-plan check rejects changes to any
+dependency, alarm replacement, changed notification/threshold settings, or a
+different instance. It uses the same locked remote state and production workflow
+concurrency. The temporary override is removed afterward; full plans still show
+pending bootstrap drift and require a separate replacement decision. This mode
+does not repair unrelated full-plan IAM read permissions or claim drift is gone.
+
 Pin the resolved `ami_id` output before later plans so a Canonical AMI refresh does
 not unexpectedly replace the host. Changing user data also replaces the host;
 review the plan and perform replacements in a maintenance window after a backup.
@@ -180,13 +190,16 @@ those against the downloaded release before activating it.
 The operations configuration names the backup/release buckets, instance and
 volume IDs, secret ARNs, and the SNS topic. The status timer calls
 `job-search-ops --config /etc/job-search/operations.json status --publish` every
-five minutes. The backup timer runs daily at approximately 08:00 UTC. Both skip
+five minutes. The backup timer checks every 30 minutes for the 08:00 and 20:00 UTC
+backup windows. Both skip
 cleanly until the release executable exists. Alarms will still report missing
 health/backup metrics during enrollment, so complete setup before relying on them.
 
 CloudWatch retains redacted operations logs for 14 days. Alarm inputs are instance
-status, memory, disk, CPU credits, `Healthy`, and `BackupAgeSeconds`; absent metrics
-are failures. Confirm the SNS subscription email. Budget notifications at $80 and
+status, memory, disk, CPU credits, process/domain health, and `BackupAgeSeconds`;
+absent metrics are failures. Only process/domain health receives the host's
+bounded, lock-verified backup maintenance exception. Backup age remains limited
+to 24 hours. Confirm the SNS subscription email. Budget notifications at $80 and
 $100 are account-wide alerts, not a spending cap; inference-provider spend is
 separate. S3 backup retention expires current backups after 14 days and noncurrent
 versions after a further 14 days. Versioned release bundles and tagged images stay

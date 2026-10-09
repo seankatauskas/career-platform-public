@@ -316,7 +316,7 @@ ops.restore_unlocked(p['c'],Path(p['snapshot']),p['sha'],replace=True)
                 self.assertEqual(ops.scheduled_backup(self.c,now=now+timedelta(minutes=30*attempt+1))['status'],'scheduled_wait')
             self.assertEqual(backup.call_count,4)
             self.assertEqual(aws.call_count,1)
-            self.assertEqual(ops.scheduled_backup(self.c,now=now+timedelta(hours=12))['status'],'scheduled_wait')
+            self.assertEqual(ops.scheduled_backup(self.c,now=now+timedelta(hours=11))['status'],'scheduled_wait')
         with patch.object(ops,'backup_unlocked',return_value={'status':'backed_up'}) as backup:
             ops.scheduled_backup(self.c,now=now+timedelta(days=1))
             ops.scheduled_backup(self.c,now=now+timedelta(days=1,hours=1))

@@ -8,6 +8,8 @@ from typing import Any
 from ..contracts import ContractError, ConflictError, MutationContext, canonical_json, parse_utc, payload_sha256, utc_now
 from ..db import connect
 from ..inference.usage import InvocationReconciliationRequired, UsagePolicy, current_scope, invocation_scope
+from ..inference.contracts import InferenceResponseRejected
+from .model import ModelExecutionError
 from .understanding_evaluation import load_report
 
 
@@ -120,7 +122,13 @@ class MailUnderstandingRuntime:
                         self._ctx('bind',analysis_id + ':' + claimed['claim_token']),
                     )
                     try:
-                        raw = self.analyzer.analyze(request)
+                        try:
+                            raw = self.analyzer.analyze(request)
+                        except (ModelExecutionError, ContractError, InferenceResponseRejected) as exc:
+                            # Validation rejected a received answer. This is a known
+                            # local failure, unlike losing a valid answer before save.
+                            attempt['output_rejected'] = exc
+                            raise
                         if heartbeat is not None and not heartbeat():
                             raise RuntimeError('mail understanding worker lease lost')
                         self.service.save(analysis_id,claimed['claim_token'],raw,self._ctx('save',analysis_id + ':' + claimed['claim_token']))
@@ -198,25 +206,35 @@ class MailUnderstandingRuntime:
             now = utc_now()
             with connect(path) as con:
                 return con.execute("UPDATE work_items SET lease_expires_at=? WHERE work_id=? AND status='running' AND lease_token=? AND lease_expires_at>?",(expiry(now),work_id,claim_token,now)).rowcount == 1
-        attempt = {'before':before, 'checkpointed':False}
+        attempt = {'before':before, 'checkpointed':False, 'output_rejected':False}
         try:
             policy = self.policy if standalone else inherited.policy
             clock = None if standalone else inherited.clock
             with invocation_scope(path,work_id,revision,policy=policy,clock=clock,heartbeat=owned_heartbeat):
+                scope = current_scope()
                 yield attempt
         except Exception as exc:
             uncertain = bool(getattr(exc,'outcome_unknown',False))
             with connect(path) as con:
                 con.execute('BEGIN IMMEDIATE')
+                from ..inference.usage import _assert_owned, _update_work_outcome
+                # A stale analyzer must not release another worker's reservation.
+                _assert_owned(con, scope)
+                if standalone and con.execute('SELECT lease_token FROM work_items WHERE work_id=?', (work_id,)).fetchone()[0] != claim_token:
+                    raise ConflictError('mail understanding work lease changed')
                 # A successful synchronous response whose analysis was not saved
                 # has no retrievable result. Preserve the usage ledger's existing
                 # reconciliation boundary rather than issuing the same POST again.
                 for row in con.execute('SELECT * FROM inference_invocations WHERE work_id=?',(work_id,)).fetchall():
                     if row['state']=='completed' and not row['provider_job_id'] and before.get(row['invocation_id'])!='completed' and not attempt['checkpointed']:
-                        con.execute("UPDATE inference_invocations SET state='unknown',reconciliation_reason='inference_result_not_checkpointed',updated_at=? WHERE invocation_id=?",(utc_now(),row['invocation_id']))
-                        uncertain = True
+                        if attempt['output_rejected'] is exc:
+                            con.execute("UPDATE inference_invocations SET state='failed',reconciliation_reason='inference_output_rejected',updated_at=? WHERE invocation_id=?",(utc_now(),row['invocation_id']))
+                        else:
+                            con.execute("UPDATE inference_invocations SET state='unknown',reconciliation_reason='inference_result_not_checkpointed',updated_at=? WHERE invocation_id=?",(utc_now(),row['invocation_id']))
+                            uncertain = True
                     elif row['state'] in {'submitting','unknown'}:
                         uncertain = True
+                _update_work_outcome(con, work_id)
                 if uncertain:
                     con.execute("UPDATE work_items SET external_outcome='unknown' WHERE work_id=?",(work_id,))
                 if standalone:

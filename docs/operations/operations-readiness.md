@@ -51,6 +51,11 @@ preflight metric. The domain probe never starts a stopped worker. Paused hosts d
 not accumulate domain freshness alarms. Terraform defines domain alarms locally;
 actual CloudWatch/SNS delivery still requires deployment and account configuration.
 
+Host probes use `readiness --monitor`: the same durable workflow, work-queue,
+inference-usage, and dependency-snapshot observations without expensive ranking
+score/catalog scans or fresh dependency probes. Ordinary `readiness` retains the
+detailed per-policy coverage. Stale dependency snapshots remain visible failures.
+
 ## Scan now and ranking progress
 
 Open **Settings → Connections and background work**, or follow **Scan jobs and
@@ -124,6 +129,38 @@ requeue mail, or send anything. Pending/failed messages, active owners, mismatch
 identities, and uncertain inference remain blocked. Resolve uncertain inference
 through `inference-reconcile` first after reviewing its outcome. Repeating the
 same decision key is safe; generic `work-retry` remains unavailable for this task.
+
+### Rejected model answers and existing mail reconciliation
+
+Mail output validation can reject a received answer (for example malformed JSON,
+invalid evidence, or missing response text). New attempts record that known local
+failure as `inference_output_rejected`, release its in-flight slot, and retain its
+request/token allowance. No proposal is saved. Shared analysis keeps its bounded
+attempt count; archived review requires another explicit analysis request.
+Unknown submissions, lost valid answers, persistence failures, and stale workers
+retain their reconciliation boundary. The fix does not reinterpret old unknown
+invocations automatically.
+
+For a previously blocked installation, inspect `inference-recovery` and
+`work-list` in the installed core container. Review the provider outcome and the
+associated mail review. A synchronous result has no supported retrieval ID; an
+explicit reviewed `failed` reconciliation authorizes future work without asserting
+that the provider was never charged:
+
+```sh
+python -m job_search --config CONFIG inference-reconcile INVOCATION_ID \
+  --expected-updated-at CURRENT_TIMESTAMP --resolution failed \
+  --idempotency-key UNIQUE_DECISION_KEY
+```
+
+Use a fresh timestamp from inspection. Never infer failure just from elapsed
+time. After reconciliation, allow queued mailbox work to run and inspect the
+original mail review. Reanalyze it through its existing review action if still
+pending; if a later mailbox proposal has already replaced it, `work-list` may
+permit `work-resolve-mail` as documented above. Confirm zero uncertain/in-flight
+reservations, current Outlook success, and normal domain metrics. Do not delete
+reservations, directly edit work tables, or raise the inference limit to conceal
+the unresolved request.
 
 Workers persist failure classification and increment a recovery revision on each
 state transition. Repeated crashes still consume the maximum attempt count.
