@@ -1,0 +1,949 @@
+{
+  "schema_version": 1,
+  "scope": "fictional benchmark and acceptance only; no production downtime measured",
+  "baseline_source_sha": "6702737599e71f969ee22e0ada9a85b5e23eaa2f",
+  "candidate_initial_capture_sha": "13af3d26df5c7744e26f76445cc3c7ac9e0a8b11",
+  "candidate_final_capture_sha": "dfe69e8f19b8c7fd12ab37b0c629ef1727436a5f",
+  "limitations": [
+    "Shared Mac host; some disk runs overlap offline tests, Docker builds or acceptance.",
+    "Caches not evicted; Linux is a Docker Desktop volume, not AWS EBS.",
+    "Snapshot timings exclude service downtime before/after capture; do not sum independent fixtures as end-to-end downtime."
+  ],
+  "benchmarks": {
+    "snapshot-before": {
+      "scope": "fictional local snapshot; no measured service downtime",
+      "platform": "macOS-26.6.1-arm64-arm-64bit",
+      "sqlite": "3.51.0",
+      "cache": "not evicted; same seeded source",
+      "measurements": [
+        {
+          "mode": "paused",
+          "trial": 0,
+          "preparation_seconds": 0.00028591699999935827,
+          "paused_snapshot_seconds": 32.081651166,
+          "total_snapshot_seconds": 32.081937083,
+          "restore_verification_seconds": 6.027274125000005,
+          "profile_seconds": {
+            "file_copy": 1.3490504599999866,
+            "sqlite_backup": 6.600961124000001,
+            "hash": 4.876573874999998,
+            "sqlite_check": 19.21921683200003,
+            "sync_tree": 0.0030509999999992488
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030539-272da5bc",
+            "sha256": "e602272d5a608f27fd5acc594625f28008d414374911af9aca9f02b2e1a42c1a",
+            "snapshot_at": "2026-10-10T03:05:39.664995+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "timings_seconds": {
+              "capture": 27.82,
+              "manifest": 4.259,
+              "durable_publish": 0.003,
+              "total": 32.082
+            }
+          }
+        },
+        {
+          "mode": "paused",
+          "trial": 1,
+          "preparation_seconds": 0.00016629099999931896,
+          "paused_snapshot_seconds": 31.099893666,
+          "total_snapshot_seconds": 31.100059957,
+          "restore_verification_seconds": 5.744234249999991,
+          "profile_seconds": {
+            "file_copy": 1.349603624000025,
+            "sqlite_backup": 5.681499751000004,
+            "hash": 4.726954959999929,
+            "sqlite_check": 19.28972937799999,
+            "sync_tree": 0.0027968750000013642
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030617-08494ed6",
+            "sha256": "1fc3d583d9dc76164ee6da1e090c9a3e159c2b4491c0d1dbba8665475ab3ae52",
+            "snapshot_at": "2026-10-10T03:06:17.975697+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "timings_seconds": {
+              "capture": 27.024,
+              "manifest": 4.073,
+              "durable_publish": 0.003,
+              "total": 31.1
+            }
+          }
+        },
+        {
+          "mode": "paused",
+          "trial": 2,
+          "preparation_seconds": 0.00017104200000517267,
+          "paused_snapshot_seconds": 30.85225570899999,
+          "total_snapshot_seconds": 30.852426750999996,
+          "restore_verification_seconds": 5.804715458000004,
+          "profile_seconds": {
+            "file_copy": 1.393226206000108,
+            "sqlite_backup": 5.690671583000011,
+            "hash": 4.761495334999992,
+            "sqlite_check": 18.9521959529999,
+            "sync_tree": 0.003135999999997807
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030654-35447b14",
+            "sha256": "4786bec93e5779989c815ac45a7009120a65c6c26a0894b3597684d6ac1efd3c",
+            "snapshot_at": "2026-10-10T03:06:54.922931+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "timings_seconds": {
+              "capture": 26.74,
+              "manifest": 4.109,
+              "durable_publish": 0.003,
+              "total": 30.852
+            }
+          }
+        }
+      ],
+      "payload_bytes": 11831380318
+    },
+    "snapshot-after": {
+      "scope": "fictional local snapshot; no measured service downtime",
+      "platform": "macOS-26.6.1-arm64-arm-64bit",
+      "sqlite": "3.51.0",
+      "cache": "not evicted; same seeded source",
+      "measurements": [
+        {
+          "mode": "paused",
+          "trial": 0,
+          "preparation_seconds": 0.0002585419999991956,
+          "paused_snapshot_seconds": 14.428471834,
+          "total_snapshot_seconds": 14.428730375999999,
+          "restore_verification_seconds": 6.1341542910000015,
+          "profile_seconds": {
+            "file_copy": 1.6436882979999972,
+            "sqlite_check": 1.7469062059999914,
+            "hash": 4.751969127999992,
+            "sqlite_backup": 6.256071751,
+            "sync_tree": 0.0029926670000008926
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030802-7b325671",
+            "sha256": "baa5c083a4c3d4ed046ee7db8f8e90242f93293634787abaad137672d3f8eca6",
+            "snapshot_at": "2026-10-10T03:08:02.649713+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 11831380315,
+              "copied_files": 108
+            },
+            "preparation_timings_seconds": {},
+            "timings_seconds": {
+              "file_copy": 1.644,
+              "sqlite_check": 1.747,
+              "destination_hash": 4.101,
+              "sqlite_backup": 6.258,
+              "source_hash": 0.652,
+              "capture": 14.424,
+              "manifest": 0.002,
+              "durable_publish": 0.003,
+              "total": 14.428
+            }
+          }
+        },
+        {
+          "mode": "prepared",
+          "trial": 0,
+          "preparation_seconds": 9.502343875000005,
+          "paused_snapshot_seconds": 5.074095666999995,
+          "total_snapshot_seconds": 14.576439542,
+          "restore_verification_seconds": 7.191231667000004,
+          "profile_seconds": {
+            "sqlite_check": 1.7570402900000346,
+            "hash": 9.152789083000023,
+            "sync_tree": 0.004240041999999278,
+            "file_copy": 0.018545623000022715
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030832-0128d1bd",
+            "sha256": "36a62c728c25bfd8a8892b9d2826570cf823e516875a81e222546c5b8764ac67",
+            "snapshot_at": "2026-10-10T03:08:32.907931+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.613,
+              "sqlite_check": 1.755,
+              "hash": 4.13,
+              "sync": 0.001,
+              "total": 9.501
+            },
+            "timings_seconds": {
+              "file_copy": 0.019,
+              "sqlite_check": 0.002,
+              "destination_hash": 0.003,
+              "source_hash": 5.021,
+              "capture": 5.069,
+              "manifest": 0.002,
+              "durable_publish": 0.004,
+              "total": 5.074
+            }
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 12.393659667000001,
+          "paused_snapshot_seconds": 6.716970583999995,
+          "total_snapshot_seconds": 19.110630250999996,
+          "restore_verification_seconds": 7.243488124999999,
+          "profile_seconds": {
+            "sqlite_check": 2.405890001000131,
+            "hash": 9.854008580000055,
+            "sync_tree": 0.006188665999999898,
+            "file_copy": 0.027562994999968282,
+            "sqlite_backup": 1.3205049999999972
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030857-88ad142a",
+            "sha256": "42eab5b7e3dea812d8617b4ee933f03a8986822dcce5fe323fa918312d199eaf",
+            "snapshot_at": "2026-10-10T03:08:57.958271+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 1184037211,
+              "copied_files": 102,
+              "reused_bytes": 10647355392,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 5.434,
+              "sqlite_check": 2.117,
+              "hash": 4.838,
+              "sync": 0.001,
+              "total": 12.392
+            },
+            "timings_seconds": {
+              "file_copy": 0.028,
+              "sqlite_check": 0.289,
+              "destination_hash": 0.487,
+              "source_hash": 4.529,
+              "sqlite_backup": 1.336,
+              "capture": 6.71,
+              "manifest": 0.002,
+              "durable_publish": 0.005,
+              "total": 6.717
+            }
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 1,
+          "preparation_seconds": 13.875044874999986,
+          "paused_snapshot_seconds": 7.619252583000005,
+          "total_snapshot_seconds": 21.49429745799999,
+          "restore_verification_seconds": 7.362087791999997,
+          "profile_seconds": {
+            "sqlite_check": 3.7541337109999944,
+            "hash": 10.472033209000017,
+            "sync_tree": 0.006756540999987237,
+            "file_copy": 0.022654747999993674,
+            "sqlite_backup": 1.4850885419999997
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030926-04aac096",
+            "sha256": "1c97973c866f4b6160a0329a7d2aa26160fcd6354c7a9210492e2b6d75766a0d",
+            "snapshot_at": "2026-10-10T03:09:26.043321+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 1184037211,
+              "copied_files": 102,
+              "reused_bytes": 10647355392,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 5.639,
+              "sqlite_check": 3.467,
+              "hash": 4.764,
+              "sync": 0.001,
+              "total": 13.873
+            },
+            "timings_seconds": {
+              "file_copy": 0.023,
+              "sqlite_check": 0.287,
+              "destination_hash": 0.484,
+              "source_hash": 5.225,
+              "sqlite_backup": 1.528,
+              "capture": 7.611,
+              "manifest": 0.002,
+              "durable_publish": 0.006,
+              "total": 7.619
+            }
+          }
+        },
+        {
+          "mode": "prepared",
+          "trial": 1,
+          "preparation_seconds": 11.648877874999997,
+          "paused_snapshot_seconds": 5.294211583000006,
+          "total_snapshot_seconds": 16.943089458000003,
+          "restore_verification_seconds": 7.354384207999999,
+          "profile_seconds": {
+            "sqlite_check": 2.1658412100000106,
+            "hash": 10.230624792000015,
+            "sync_tree": 0.005785166999999092,
+            "file_copy": 0.022161243000013542
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030953-b813c270",
+            "sha256": "ff3df0e30a62f066021471c58a2ad6d819d7f041427fbd4f43642845fd1afb8f",
+            "snapshot_at": "2026-10-10T03:09:53.346283+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831283712,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 4.45,
+              "sqlite_check": 2.163,
+              "hash": 5.03,
+              "sync": 0.001,
+              "total": 11.647
+            },
+            "timings_seconds": {
+              "file_copy": 0.022,
+              "sqlite_check": 0.003,
+              "destination_hash": 0.003,
+              "source_hash": 5.198,
+              "capture": 5.287,
+              "manifest": 0.002,
+              "durable_publish": 0.005,
+              "total": 5.294
+            }
+          }
+        },
+        {
+          "mode": "paused",
+          "trial": 1,
+          "preparation_seconds": 0.00021854199999893353,
+          "paused_snapshot_seconds": 16.25100900000001,
+          "total_snapshot_seconds": 16.25122754200001,
+          "restore_verification_seconds": 7.545628875000006,
+          "profile_seconds": {
+            "file_copy": 1.4270954549999146,
+            "sqlite_check": 2.131531748999862,
+            "hash": 6.1790440399999795,
+            "sqlite_backup": 6.487433748999962,
+            "sync_tree": 0.004092416999981197
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031006-1d7bc121",
+            "sha256": "9952d36449ff8f753d81b0c550b7ba6ded167a21171a409f5147177d8dd4a91d",
+            "snapshot_at": "2026-10-10T03:10:06.197403+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 11831392603,
+              "copied_files": 108
+            },
+            "preparation_timings_seconds": {},
+            "timings_seconds": {
+              "file_copy": 1.427,
+              "sqlite_check": 2.132,
+              "destination_hash": 5.366,
+              "sqlite_backup": 6.49,
+              "source_hash": 0.813,
+              "capture": 16.245,
+              "manifest": 0.002,
+              "durable_publish": 0.004,
+              "total": 16.251
+            }
+          }
+        },
+        {
+          "mode": "paused",
+          "trial": 2,
+          "preparation_seconds": 0.00019962499999337524,
+          "paused_snapshot_seconds": 15.697621874999982,
+          "total_snapshot_seconds": 15.697821499999975,
+          "restore_verification_seconds": 7.480529666999985,
+          "profile_seconds": {
+            "file_copy": 1.4690580049999369,
+            "sqlite_check": 2.0259803370000498,
+            "hash": 6.098899046999918,
+            "sqlite_backup": 6.075950375000019,
+            "sync_tree": 0.004339249999986805
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031030-f9b6e19c",
+            "sha256": "b048bf4614a6185d5816c7d168662138ab1cd08a32f2e07437c6be5a9d3e5965",
+            "snapshot_at": "2026-10-10T03:10:30.115642+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 11831392603,
+              "copied_files": 108
+            },
+            "preparation_timings_seconds": {},
+            "timings_seconds": {
+              "file_copy": 1.469,
+              "sqlite_check": 2.026,
+              "destination_hash": 5.318,
+              "sqlite_backup": 6.078,
+              "source_hash": 0.781,
+              "capture": 15.691,
+              "manifest": 0.002,
+              "durable_publish": 0.004,
+              "total": 15.698
+            }
+          }
+        },
+        {
+          "mode": "prepared",
+          "trial": 2,
+          "preparation_seconds": 12.192284,
+          "paused_snapshot_seconds": 5.478335541999996,
+          "total_snapshot_seconds": 17.670619541999997,
+          "restore_verification_seconds": 8.237015082999989,
+          "profile_seconds": {
+            "sqlite_check": 2.084524324999819,
+            "hash": 10.706243675000081,
+            "sync_tree": 0.00843762599998854,
+            "file_copy": 0.029558038999937253
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031105-785a6adf",
+            "sha256": "fe9f8b61833685ef76e148cb7a3e9ab7ea2be85d18d2450f2cc4fd32c22f7749",
+            "snapshot_at": "2026-10-10T03:11:05.626594+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831283712,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 4.812,
+              "sqlite_check": 2.082,
+              "hash": 5.292,
+              "sync": 0.001,
+              "total": 12.19
+            },
+            "timings_seconds": {
+              "file_copy": 0.03,
+              "sqlite_check": 0.003,
+              "destination_hash": 0.003,
+              "source_hash": 5.411,
+              "capture": 5.468,
+              "manifest": 0.002,
+              "durable_publish": 0.008,
+              "total": 5.478
+            }
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 2,
+          "preparation_seconds": 28.311381959000016,
+          "paused_snapshot_seconds": 7.952418875000006,
+          "total_snapshot_seconds": 36.26380083400002,
+          "restore_verification_seconds": 7.57810683400001,
+          "profile_seconds": {
+            "sqlite_check": 17.622191206000082,
+            "hash": 10.69742695499994,
+            "sync_tree": 0.0055981250000058935,
+            "file_copy": 0.023192166999962183,
+            "sqlite_backup": 1.4548425000000123
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031148-b7a889c1",
+            "sha256": "f1d95e6659a876b142d3bf4f7e1b1c08c645e5cf8dd8b23ba3ba25a1955a80b1",
+            "snapshot_at": "2026-10-10T03:11:48.130383+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 1184037211,
+              "copied_files": 102,
+              "reused_bytes": 10647355392,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 6.184,
+              "sqlite_check": 17.331,
+              "hash": 4.79,
+              "sync": 0.001,
+              "total": 28.309
+            },
+            "timings_seconds": {
+              "file_copy": 0.023,
+              "sqlite_check": 0.291,
+              "destination_hash": 0.523,
+              "source_hash": 5.385,
+              "sqlite_backup": 1.672,
+              "capture": 7.945,
+              "manifest": 0.002,
+              "durable_publish": 0.005,
+              "total": 7.952
+            }
+          }
+        }
+      ],
+      "payload_bytes": 11831380318
+    },
+    "snapshot-linux-before": {
+      "scope": "fictional local snapshot; no measured service downtime",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "cache": "not evicted; same seeded source",
+      "measurements": [
+        {
+          "mode": "paused",
+          "trial": 0,
+          "preparation_seconds": 0.0003351250197738409,
+          "paused_snapshot_seconds": 128.58866855909582,
+          "total_snapshot_seconds": 128.5890036841156,
+          "restore_verification_seconds": 75.06677532498725,
+          "profile_seconds": {
+            "file_copy": 2.8988117973785847,
+            "hash": 10.427781786187552,
+            "sqlite_backup": 9.08892637793906,
+            "sqlite_check": 105.97246771038044,
+            "sync_tree": 0.15531850093975663
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T030915-231ffee4",
+            "sha256": "304233c88534cda826e43c231e3615ca9cfc5ccf76b3e25a68a16d801744068c",
+            "snapshot_at": "2026-10-10T03:09:15.498453+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "timings_seconds": {
+              "capture": 118.97,
+              "manifest": 9.462,
+              "durable_publish": 0.156,
+              "total": 128.588
+            }
+          }
+        }
+      ],
+      "payload_bytes": 11831380318
+    },
+    "snapshot-linux-after": {
+      "scope": "fictional local snapshot; no measured service downtime",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "cache": "not evicted; same seeded source",
+      "measurements": [
+        {
+          "mode": "paused",
+          "trial": 0,
+          "preparation_seconds": 0.0001852919813245535,
+          "paused_snapshot_seconds": 58.73317427595612,
+          "total_snapshot_seconds": 58.73335956793744,
+          "restore_verification_seconds": 22.690824926947244,
+          "profile_seconds": {
+            "file_copy": 1.831058915820904,
+            "sqlite_check": 42.368019851855934,
+            "hash": 7.010132586117834,
+            "sqlite_backup": 7.063009668840095,
+            "sync_tree": 0.15971554210409522
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031322-e1e98eef",
+            "sha256": "82493cb817add2358b61f7657c1decb459e2a2304c46e8ca08e6613cc521a000",
+            "snapshot_at": "2026-10-10T03:13:22.956977+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 11831380315,
+              "copied_files": 108
+            },
+            "preparation_timings_seconds": {},
+            "timings_seconds": {
+              "file_copy": 1.831,
+              "sqlite_check": 42.368,
+              "destination_hash": 6.189,
+              "source_hash": 0.821,
+              "sqlite_backup": 7.064,
+              "capture": 58.299,
+              "manifest": 0.273,
+              "durable_publish": 0.161,
+              "total": 58.733
+            }
+          }
+        },
+        {
+          "mode": "prepared",
+          "trial": 0,
+          "preparation_seconds": 55.82979102607351,
+          "paused_snapshot_seconds": 7.082278794958256,
+          "total_snapshot_seconds": 62.912069821031764,
+          "restore_verification_seconds": 34.99238139006775,
+          "profile_seconds": {
+            "sqlite_check": 40.07757814635988,
+            "hash": 12.767691337852739,
+            "sync_tree": 0.27087979204952717,
+            "file_copy": 0.004782998119480908
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031540-c2ab407a",
+            "sha256": "384d28e7701fad622aad20b251c5bbe4c9b242aaeef467530d4e5ab1d74693a8",
+            "snapshot_at": "2026-10-10T03:15:40.389461+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 9.75,
+              "sqlite_check": 40.077,
+              "hash": 5.771,
+              "sync": 0.227,
+              "total": 55.829
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 6.996,
+              "capture": 7.035,
+              "manifest": 0.003,
+              "durable_publish": 0.044,
+              "total": 7.082
+            }
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 50.24845593899954,
+          "paused_snapshot_seconds": 7.802380337030627,
+          "total_snapshot_seconds": 58.05083627603017,
+          "restore_verification_seconds": 29.759863720973954,
+          "profile_seconds": {
+            "sqlite_check": 37.89836347557139,
+            "hash": 12.111512846429832,
+            "sync_tree": 0.9709276679204777,
+            "file_copy": 0.006620956351980567,
+            "sqlite_backup": 1.0566890840418637
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031712-85c3475f",
+            "sha256": "107a21568f897c5c042ea63d0c123cc99c885b95b3f2c3106ae9d2ee140b6aa7",
+            "snapshot_at": "2026-10-10T03:17:12.862365+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 1184037211,
+              "copied_files": 102,
+              "reused_bytes": 10647355392,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 5.965,
+              "sqlite_check": 37.637,
+              "hash": 5.697,
+              "sync": 0.944,
+              "total": 50.247
+            },
+            "timings_seconds": {
+              "file_copy": 0.007,
+              "sqlite_check": 0.261,
+              "destination_hash": 0.504,
+              "source_hash": 5.911,
+              "sqlite_backup": 1.057,
+              "capture": 7.77,
+              "manifest": 0.003,
+              "durable_publish": 0.029,
+              "total": 7.802
+            }
+          }
+        }
+      ],
+      "payload_bytes": 11831380318
+    },
+    "snapshot-final": {
+      "scope": "fictional local snapshot; no measured service downtime",
+      "platform": "macOS-26.6.1-arm64-arm-64bit",
+      "sqlite": "3.51.0",
+      "cache": "not evicted; same seeded source",
+      "measurements": [
+        {
+          "mode": "paused",
+          "trial": 0,
+          "preparation_seconds": 0.00036350000000240357,
+          "paused_snapshot_seconds": 28.015815458,
+          "total_snapshot_seconds": 28.016178958,
+          "restore_verification_seconds": 6.5884247500000015,
+          "profile_seconds": {
+            "file_copy": 1.6865714220000285,
+            "sqlite_check": 12.520756208999963,
+            "hash": 5.1658538059999515,
+            "sqlite_backup": 8.478426209000006,
+            "sync_tree": 0.005404290999997841
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031736-2e1883c1",
+            "sha256": "11e04b35865edc61132b5ba83faeb093a9c0c98ea0f39bfbab68ac541bf4e8cd",
+            "snapshot_at": "2026-10-10T03:17:36.490457+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 11831380315,
+              "copied_files": 108
+            },
+            "preparation_timings_seconds": {},
+            "timings_seconds": {
+              "file_copy": 1.687,
+              "sqlite_check": 12.521,
+              "destination_hash": 4.444,
+              "sqlite_backup": 8.481,
+              "source_hash": 0.722,
+              "capture": 28.008,
+              "manifest": 0.002,
+              "durable_publish": 0.006,
+              "total": 28.016
+            }
+          }
+        },
+        {
+          "mode": "prepared",
+          "trial": 0,
+          "preparation_seconds": 10.057778332999995,
+          "paused_snapshot_seconds": 4.8536197920000035,
+          "total_snapshot_seconds": 14.911398124999998,
+          "restore_verification_seconds": 7.003971707999995,
+          "profile_seconds": {
+            "sqlite_check": 1.903384955000007,
+            "hash": 9.14726225200019,
+            "sync_tree": 0.005458792000013091,
+            "file_copy": 0.019396251000088682
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031821-2bf9c015",
+            "sha256": "ecdaec7a4985ad33b8142cc17f74caa3aa1561a1d2b53d0c8814516868205a00",
+            "snapshot_at": "2026-10-10T03:18:21.295749+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.792,
+              "sqlite_check": 1.901,
+              "hash": 4.36,
+              "sync": 0.001,
+              "total": 10.056
+            },
+            "timings_seconds": {
+              "file_copy": 0.019,
+              "sqlite_check": 0.003,
+              "destination_hash": 0.003,
+              "source_hash": 4.785,
+              "reuse_publish": 0.002,
+              "capture": 4.847,
+              "manifest": 0.002,
+              "durable_publish": 0.005,
+              "total": 4.854
+            }
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 9.942300374999988,
+          "paused_snapshot_seconds": 6.893343083999994,
+          "total_snapshot_seconds": 16.835643458999982,
+          "restore_verification_seconds": 6.906238458999994,
+          "profile_seconds": {
+            "sqlite_check": 2.3602768710000817,
+            "hash": 9.240923080000044,
+            "sync_tree": 0.005674374999998122,
+            "file_copy": 0.018284373999932768,
+            "sqlite_backup": 1.616189083000009
+          },
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T031843-747e49f2",
+            "sha256": "8b7bcbcaa3f8f445f1552406fc73c5f9d37d455bf649f9c87ca1b598b2a79cc5",
+            "snapshot_at": "2026-10-10T03:18:43.570689+00:00",
+            "file_count": 108,
+            "size_bytes": 11831392603,
+            "reuse": {
+              "copied_bytes": 1184037211,
+              "copied_files": 102,
+              "reused_bytes": 10647355392,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.388,
+              "sqlite_check": 2.083,
+              "hash": 4.465,
+              "sync": 0.001,
+              "total": 9.941
+            },
+            "timings_seconds": {
+              "file_copy": 0.018,
+              "sqlite_check": 0.277,
+              "destination_hash": 0.463,
+              "source_hash": 4.312,
+              "reuse_publish": 0.001,
+              "sqlite_backup": 1.767,
+              "capture": 6.887,
+              "manifest": 0.002,
+              "durable_publish": 0.005,
+              "total": 6.893
+            }
+          }
+        }
+      ],
+      "payload_bytes": 11831380318
+    }
+  },
+  "offline_suites": {
+    "system-before": {
+      "schema_version": 1,
+      "source_sha": "6702737599e71f969ee22e0ada9a85b5e23eaa2f",
+      "working_tree_dirty": true,
+      "scope": "local fixtures; no live provider verification",
+      "passed": true,
+      "suite_count": 185
+    },
+    "system-final": {
+      "schema_version": 1,
+      "source_sha": "dfe69e8f19b8c7fd12ab37b0c629ef1727436a5f",
+      "working_tree_dirty": true,
+      "scope": "local fixtures; no live provider verification",
+      "passed": true,
+      "suite_count": 186
+    }
+  },
+  "compose_acceptance": {
+    "passed": true,
+    "source_sha": "e4bfe3a7f69bc5b6f0ffdaf052dee48fd83e671e",
+    "image_id": "sha256:5d7f83dfdb3004f698d66afce27a11b0472ba82afd89bae0cb41ab382af7c259",
+    "working_tree_dirty": false,
+    "host": "Darwin",
+    "docker_os": "Docker Desktop",
+    "linux_host_verified": false,
+    "checks": [
+      "Hermes production tmpfs permits supervisor executables under /run while /tmp remains non-executable; neither mount permits devices or setuid.",
+      "All six application Compose services, including the interactions broker, are healthy with generated fixture configuration.",
+      "Only core and dashboard receive the dedicated mail profile and OpenRouter key for mail processing and archived review analysis.",
+      "Interactions require their separate bearer; only model receives briefing profile/key, and application services cannot read the interaction bearer except its broker.",
+      "Every dashboard static route serves the packaged asset bytes from the running image.",
+      "Real dashboard HTTP and authenticated MCP health probes succeed inside their containers.",
+      "A real PDF compiles and extracts through the networkless production Unix-socket tool service.",
+      "After SIGKILL and restart, the core worker recovers an expired local-work lease exactly once; both worker lanes recover health.",
+      "Production backup/restore functions reject a bad checksum and restore a quiesced snapshot into a fresh paused fixture directory.",
+      "Restored dashboard reads the same application event and PDF bytes; core/model remain stopped pending activation."
+    ],
+    "timings_seconds": {
+      "initialization_and_service_health": 33.501,
+      "paused_snapshot_helper": 1.153,
+      "restore_helper": 1.374,
+      "restored_service_health": 13.089
+    },
+    "limitations": [
+      "No live ATS, Outlook, Telegram, inference, Tailscale, AWS IAM, alarms, or cloud disk recovery is exercised.",
+      "Restore uses generated fixture secrets; live secret-manager recovery remains external acceptance.",
+      "Docker Desktop verifies container behavior but does not establish native Linux host networking or AWS behavior.",
+      "Docker Desktop uses VM-native named volumes for the tool socket and SQLite state, substitutes fixture ownership during restore, and copies quiescent restored state into a separate empty VM volume; native Linux acceptance uses the production binds and ownership implementation unchanged."
+    ]
+  },
+  "container_transition": {
+    "schema_version": 1,
+    "source_sha": "e4bfe3a7f69bc5b6f0ffdaf052dee48fd83e671e",
+    "baseline_sha": "f1c1f91e7d98aece8727da8692ec9536af363c14",
+    "runtime": "docker",
+    "passed": true,
+    "rollback_passed": true,
+    "working_tree_dirty": false,
+    "scope": "fictional data; no live providers",
+    "checks": [
+      {
+        "passed": true,
+        "action": "seed",
+        "state_sha256": "50d7cd54e8f9f499d0bb23096566d117c985f9b82dd266832af627d514e5170e",
+        "elapsed_seconds": 3.596
+      },
+      {
+        "passed": true,
+        "action": "upgrade",
+        "state_sha256": "0559c82a44668c6e83b70fe61038a531e401978b328075ab3144d400f1952e97",
+        "elapsed_seconds": 2.18
+      },
+      {
+        "passed": true,
+        "action": "rollback",
+        "state_sha256": "43330830a4019a6ccbdb03c9f7169c18edee166faa239106a47e7a0c82242f2b",
+        "elapsed_seconds": 1.967
+      },
+      {
+        "action": "application_owners",
+        "passed": true,
+        "legacy_writes_fenced": true,
+        "conversion_blockers": 0,
+        "restore_paused": true,
+        "restore_review_required": true,
+        "source_archive_preserved": true,
+        "elapsed_seconds": 2.684
+      }
+    ],
+    "candidate_image_id": "sha256:5d7f83dfdb3004f698d66afce27a11b0472ba82afd89bae0cb41ab382af7c259",
+    "phase": "complete",
+    "predecessor_build_args": [
+      "SOURCE_REVISION=f1c1f91e7d98aece8727da8692ec9536af363c14"
+    ],
+    "predecessor_bundled_frontend": false,
+    "total_seconds": 41.631
+  }
+}

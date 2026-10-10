@@ -130,6 +130,13 @@ class MsalTokenProvider:
             raise OutlookAuthRequired("multiple cached Microsoft accounts require selection")
         return accounts[0]
 
+    def selected_home_account_id(self) -> str:
+        """Selected identity metadata only; never returns cached credentials."""
+        account = self._account()
+        if not account or not account.get("home_account_id"):
+            raise OutlookAuthRequired("selected Microsoft account is unavailable")
+        return str(account["home_account_id"])
+
     def get_token(
         self,
         scopes: FrozenSet[str],

@@ -844,7 +844,7 @@ function loadHeaderHealth() {
   headerHealthTask = api("/api/v1/health").then(health => {
     if (epoch !== opsLoadEpoch) return;
     const attention = health.status !== "healthy";
-    renderHeaderNotification(attention ? "Background work needs attention." : "No failed background work reported.", attention);
+    renderHeaderNotification(health.status === "incomplete" ? "Application health exceeds this summary; open the workspace for details." : attention ? "Background work needs attention." : "No failed background work reported.", attention);
   }).catch(error => {
     if (epoch === opsLoadEpoch) throw error;
   }).finally(() => { headerHealthTask = null; });
@@ -888,7 +888,17 @@ async function loadHealth() {
   renderRecovery(ops.recovery);
   const detail = $("#health-detail");
   clear(detail);
-  const metrics = [
+  const metrics = health.application_backend === "owners" ? [
+    ["Applications", Object.values(health.applications).reduce((a, b) => a + b, 0)],
+    ["Pending reviews", health.pending_reviews],
+    ["Pending application work", health.work.counts.pending || 0],
+    ["Pending reminders", health.reminders.counts.pending || 0],
+    ["Scheduled operations", health.schedules.pending],
+    ["Unresolved external outcomes", health.actions.readiness.uncertain],
+    ["Failed external actions", health.actions.readiness.execution_counts.failed || 0],
+    ...(health.reminders.recovery.restore_quarantined_reminders ? [["Quarantined reminders", health.reminders.recovery.restore_quarantined_reminders]] : []),
+    ...(health.application_restore.required ? [["Restore review required", "Yes"]] : []),
+  ] : [
     ["Applications", Object.values(health.applications).reduce((a, b) => a + b, 0)],
     ["Pending reviews", health.pending_reviews],
     ["Pending outbox", health.outbox.counts.pending || 0],
@@ -903,6 +913,10 @@ async function loadHealth() {
     detail.append(metric);
   });
 
+  if (health.application_backend === "owners" && Object.values(health.application_coverage || {}).some(Boolean)) {
+    detail.append(node("p", "meta", "Some totals show a bounded page. Open the application workspace for the remaining records."));
+  }
+
   const reminders = $("#reminder-list");
   clear(reminders);
   if (!ops.reminders.items.length) {
@@ -915,7 +929,11 @@ async function loadHealth() {
       description.append(node("h3", "", reminder.note));
       description.append(meta([reminder.status, reminder.due_at]));
       const actions = node("div", "actions");
-      if (reminder.status === "scheduled") {
+      if (health.application_backend === "owners") {
+        const view = node("a", "quiet", "Open application");
+        view.href = applicationHref(reminder.application_id);
+        actions.append(view);
+      } else if (reminder.status === "scheduled") {
         const cancel = node("button", "danger", "Cancel");
         cancel.type = "button";
         cancel.addEventListener("click", async () => {
@@ -994,6 +1012,15 @@ const SETTINGS_LABELS = {
 };
 let settingsLoadEpoch = 0;
 async function loadSettings() {
+  if (state.applicationBackend === "owners") {
+    $('#settings a[href="#settings/chief"]').hidden = true;
+    const records = $('#settings a[href="#settings/stored-records"]');
+    if (records) {
+      records.href = "#applications";
+      records.querySelector("strong").textContent = "Tracked applications";
+      records.querySelector(".meta").textContent = "Open notes, tasks, evidence, and application reviews.";
+    }
+  }
   const epoch = ++settingsLoadEpoch;
   const results = await Promise.allSettled([api("/api/v1/settings"), api("/api/v1/browser/devices")]);
   if (epoch !== settingsLoadEpoch) return;
@@ -1053,8 +1080,8 @@ function renderStoredRecords() {
   drafts.forEach((application) => {
     const row = node("article", "settings-stored-record");
     const link = node("a", "", application.title_snapshot || application.role_title || application.title || "Application record");
-    link.href = `#applications/${encodeURIComponent(application.application_id)}/overview`;
-    row.append(link, node("p", "meta", [application.employer_snapshot || application.employer_name || application.company, "Read-only draft"].filter(Boolean).join(" · ")));
+    link.href = applicationHref(application.application_id);
+    row.append(link, node("p", "meta", [application.employer_snapshot || application.employer_name || application.company, state.applicationBackend === "owners" ? "Tracking" : "Read-only draft"].filter(Boolean).join(" · ")));
     list.append(row);
   });
 }
@@ -1160,6 +1187,10 @@ async function saveReviewBrief(event) {
 }
 
 async function loadSettingsPage(subpage = "") {
+  if (state.applicationBackend === "owners" && ["chief", "stored-records"].includes(subpage.split('?')[0])) {
+    location.hash = "#applications";
+    return;
+  }
   const [pageName, queryString] = subpage.split('?');
   const briefingId = new URLSearchParams(queryString || '').get('briefing');
   subpage = pageName;

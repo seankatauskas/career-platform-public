@@ -11,6 +11,7 @@ def review_message(ledger, mail_source, query):
     """Resolve through the review record, retaining mailbox scope for failures."""
     kind, identity = query.get('kind'), query.get('id')
     sources = {
+        'mail_classification_review': ('mail_classification_reviews', 'review_id'),
         'event_proposal': ('event_proposals', 'proposal_id'),
         'mail_analysis': ('mail_understanding_analyses', 'analysis_id'),
         'temporal_proposal': ('temporal_proposals', 'temporal_proposal_id'),
@@ -18,6 +19,7 @@ def review_message(ledger, mail_source, query):
         'interview_revision': ('interview_revisions', 'revision_id'),
         'mail_discovery': ('lifecycle_discoveries', 'discovery_id'),
         'browser_submission': ('browser_attempts', 'attempt_id'),
+        'reply_request': ('lifecycle_tasks', 'task_id'),
     }
     with connect(ledger.store.db_path) as con:
         if kind == 'mail_processing_failure':

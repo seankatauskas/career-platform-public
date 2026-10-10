@@ -84,7 +84,7 @@ const server = createServer(async (request, response) => {
     };
     if (Object.hasOwn(api, pathname)) return json(api[pathname]);
     const assets = { '/': ['index.html', 'text/html'], '/assets/app.js': ['app.js', 'text/javascript'], '/assets/console.js': ['console.js', 'text/javascript'], '/assets/styles.css': ['styles.css', 'text/css'] };
-    for (const file of ['chief-view.js', 'lifecycle-view.js', 'job-preview.js', 'applications-view.js', 'shortlist-view.js', 'review-view.js', 'settings-view.js', 'applications-view.css', 'shortlist-view.css', 'review-view.css', 'settings-view.css']) assets['/assets/' + file] = [file, file.endsWith('.js') ? 'text/javascript' : 'text/css'];
+    for (const file of ['chief-view.js', 'lifecycle-view.js', 'job-preview.js', 'applications-view.js', 'owner-application-view.js', 'owner-review-view.js', 'shortlist-view.js', 'review-view.js', 'settings-view.js', 'applications-view.css', 'shortlist-view.css', 'review-view.css', 'settings-view.css']) assets['/assets/' + file] = [file, file.endsWith('.js') ? 'text/javascript' : 'text/css'];
     if (!assets[pathname]) { response.writeHead(404); return response.end(); }
     const [file, mime] = assets[pathname];
     response.writeHead(200, { 'Content-Type': mime });
@@ -400,6 +400,49 @@ try {
   assert.match(await page.locator('#costs-status').innerText(),/has not published/);
   assert.equal(await page.locator('#costs-alerts').innerText(),'');
   report.checks.push('Cost cards distinguish AWS signed adjustments, prepaid balances and key usage; stale figures and threshold warnings remain explicit, refresh is read-only, and missing snapshots never show zero.');
+  ops.health = {application_backend:'owners',status:'healthy',applications:{preparing:1},pending_reviews:2,
+    reminders:{counts:{pending:1},recovery:{restore_quarantined_reminders:1}},schedules:{pending:1},
+    actions:{counts:{},readiness:{uncertain:2,execution_counts:{failed:1}}},work:{counts:{pending:3}},application_restore:{required:true},
+    application_coverage:{work_truncated:true}};
+  ops.reminders = {counts:{pending:1},items:[{reminder_id:'reminder:one',application_id:'app:one',note:'Reviewed reminder',due_at:now,status:'pending'}]};
+  await refresh(page);
+  assert.match(await page.locator('#health-detail').textContent(), /Pending application work/);
+  assert.match(await page.locator('#health-detail').textContent(), /Some totals show a bounded page/);
+  const metric = name => page.locator('#health-detail .metric').filter({has:page.locator('.meta',{hasText:name})}).locator('strong');
+  assert.equal(await metric('Unresolved external outcomes').textContent(),'2');
+  assert.equal(await metric('Failed external actions').textContent(),'1');
+  assert.equal(await metric('Quarantined reminders').textContent(),'1');
+  assert.equal(await metric('Restore review required').textContent(),'Yes');
+  assert.doesNotMatch(await page.locator('#health-detail').textContent(), /Projection errors|Pending outbox/);
+  const ownerReminder = page.locator('#reminder-list');
+  assert.match(await ownerReminder.textContent(), /Reviewed reminder/);
+  assert.equal(await ownerReminder.getByRole('link',{name:'Open application',exact:true,includeHidden:true}).getAttribute('href'),'#applications/app%3Aone/overview');
+  assert.equal(await ownerReminder.getByRole('button',{name:'Cancel',exact:true}).count(),0);
+  ops.health.application_restore.required=false;
+  ops.health.reminders.recovery.restore_quarantined_reminders=0;
+  await refresh(page);
+  assert.doesNotMatch(await page.locator('#health-detail').textContent(),/Quarantined reminders|Restore review required/);
+  report.checks.push('Owner health renders its own bounded work and action counts without retired projections, and reminders link to owner review.');
+  await page.evaluate(() => {
+    state.applicationBackend = 'owners';
+    state.applications = [{application_id:'app:tracking',current_phase:'preparing',ats:'ashby',title_snapshot:'Tracked role',employer_snapshot:'Fictional company'}];
+    consoleState.applicationId = 'app:tracking';
+    consoleState.workspace = {application:state.applications[0], review:{items:[{id:'proposal:tracking',operation:'add_note',blockers:[]}]}};
+    renderStoredRecords();
+    renderApplicationReviewNotices();
+  });
+  assert.equal(await page.evaluate(() => stageLabel('preparing')), 'Tracking');
+  assert.equal(await page.evaluate(() => applicationScopeRows().length),1);
+  assert.doesNotMatch(await page.locator('#stored-records-list').textContent(), /Read-only draft/);
+  assert.equal(await page.locator('#stored-records-list a').getAttribute('href'),'#applications/app%3Atracking/overview');
+  assert.doesNotMatch(await page.locator('#workspace-review-notices').textContent(), /historical record|read-only/);
+  assert.equal(await page.locator('#workspace-review-notices a').getAttribute('href'),'#review/proposal/proposal%3Atracking?application=app%3Atracking');
+  await page.evaluate(() => loadSettings());
+  assert.equal(await page.locator('#settings a[href="#settings/chief"]').evaluate(link => link.hidden),true);
+  assert.equal(await page.locator('#settings-home a[href="#applications"]').textContent(),'Tracked applicationsOpen notes, tasks, evidence, and application reviews.→');
+  assert.doesNotMatch(await page.evaluate(() => readableResumeReason('application_not_preparing')),/left preparation/);
+  report.checks.push('Owner tracking records remain active applications in legacy document entry points and link to current state and review.');
+
   assert.deepEqual(errors, []);
   report.passed = true;
 } catch (error) {

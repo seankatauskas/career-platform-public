@@ -81,6 +81,8 @@ class RuntimeConfigV1:
     jobs_db: Path
     preference_db: Path
     proxy_db: Path
+    application_backend: str = "legacy"
+    application_owner_db: Optional[Path] = None
     resume_lab_db: Optional[Path] = None
     resume_artifact_root: Optional[Path] = None
     resume_mode: str = "tailored"
@@ -111,6 +113,7 @@ class RuntimeConfigV1:
     mail_recruiting_only: bool = False
     outlook_client_id: str = ""
     outlook_account_id: str = "outlook-personal"
+    outlook_home_account_id: str = ""
     outlook_mail_folders: tuple[str, ...] = ("inbox",)
     outlook_poll_interval_minutes: int = 5
     scraper_contact: str = ""
@@ -256,6 +259,8 @@ class RuntimeConfigV1:
             proxy_db=_path(
                 value.get("proxy_db", "job-boards-proxy.db"), "proxy_db", root
             ),
+            application_backend=value.get("application_backend", "legacy"),
+            application_owner_db=_path(value.get("application_owner_db"), "application_owner_db", root, optional=True),
             resume_lab_db=_path(
                 value.get("resume_lab_db"), "resume_lab_db", root, optional=True
             ),
@@ -329,6 +334,7 @@ class RuntimeConfigV1:
                 "outlook_client_id",
                 128,
             ),
+            outlook_home_account_id=_text(value.get("outlook_home_account_id", ""), "outlook_home_account_id", 256),
             outlook_account_id=_text(
                 value.get("outlook_account_id", default.outlook_account_id),
                 "outlook_account_id",
@@ -455,6 +461,10 @@ class RuntimeConfigV1:
         return result
 
     def validate(self) -> None:
+        if self.application_backend not in {"legacy", "owners"}:
+            raise ValueError("application_backend must be legacy or owners")
+        if self.application_backend == "owners" and self.application_owner_db is None:
+            raise ValueError("owners backend requires application_owner_db")
         if not isinstance(self.briefing_ai_enabled, bool):
             raise ValueError("briefing_ai_enabled must be a boolean")
         _port(self.interaction_port, "interaction_port")
@@ -479,7 +489,7 @@ class RuntimeConfigV1:
             raise ValueError("invalid mail_understanding_mode")
         if self.mail_understanding_source_scope not in {None, "current", "thread", "thread_attachments"}:
             raise ValueError("invalid mail_understanding_source_scope")
-        if self.mail_understanding_mode in {"shadow", "shared"} and self.mail_understanding_source_scope is None:
+        if self.application_backend != "owners" and self.mail_understanding_mode in {"shadow", "shared"} and self.mail_understanding_source_scope is None:
             raise ValueError("shared mail requires explicit mail_understanding_source_scope")
         if not isinstance(self.remote_mail_temporal_enabled, bool):
             raise ValueError("remote_mail_temporal_enabled must be a boolean")
@@ -522,6 +532,9 @@ class RuntimeConfigV1:
         if self.resume_lab_db is not None:
             databases.add(self.resume_lab_db)
         expected_databases = 5 if self.resume_lab_db is not None else 4
+        if self.application_owner_db is not None:
+            databases.add(self.application_owner_db)
+            expected_databases += 1
         if len(databases) != expected_databases:
             raise ValueError("all runtime database paths must be distinct")
         if (self.resume_lab_db is None) != (self.resume_artifact_root is None):
@@ -583,6 +596,7 @@ class RuntimeConfigV1:
             "JOB_SCRAPER_CONTACT": self.scraper_contact,
             "OUTLOOK_CLIENT_ID": self.outlook_client_id,
             "OUTLOOK_ACCOUNT_ID": self.outlook_account_id,
+            "OUTLOOK_HOME_ACCOUNT_ID": self.outlook_home_account_id,
             "JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES": str(self.outlook_poll_interval_minutes),
             "JOB_SEARCH_MAIL_CLASSIFIER_CONFIG": (
                 str(self.mail_classifier_config) if self.mail_classifier_config else ""
@@ -597,6 +611,7 @@ class RuntimeConfigV1:
                 if name in {
                     "JOB_BOARDS_CACHE",
                     "JOB_SEARCH_MAIL_CLASSIFIER_CONFIG",
+                    "OUTLOOK_HOME_ACCOUNT_ID",
                     "JOB_SEARCH_INFERENCE_CONFIG",
                     "JOB_SEARCH_OUTLOOK_POLL_INTERVAL_MINUTES",
                 }:
@@ -1038,6 +1053,8 @@ def build_runtime(
     clock = now_provider or (lambda: datetime.now(timezone.utc))
     now = clock()
     prepare_database(config.application_db, utc_stamp(now))
+    from .application_installation import require_backend
+    require_backend(config)
     environment = config.environment(base_environment)
     target = str(environment.get("JOB_SEARCH_NOTIFICATION_TARGET") or "").strip()
     if target and not (
@@ -1046,7 +1063,9 @@ def build_runtime(
         raise ValueError(
             "hermes_executable is required unless hermes_notification_socket is configured when delivery is enabled"
         )
-    schedules = seed_default_schedules(config.application_db, now, environment)
+    from .application_installation import LEGACY_TASKS
+    schedules = seed_default_schedules(config.application_db, now, environment,
+        excluded_tasks=LEGACY_TASKS if config.application_backend == "owners" else ())
 
     def environment_provider() -> Mapping[str, str]:
         return environment
@@ -1091,7 +1110,7 @@ def build_runtime(
         ),
         **opportunity_handlers,
     }
-    if lane == "core":
+    if lane == "core" and config.application_backend == "legacy":
         reminder_handler = build_local_reminder_handler(
             config, notification_target=target, now_provider=clock
         )
@@ -1127,36 +1146,39 @@ def build_runtime(
     from .chief_runtime import configure_services, build_generation_provider, AttentionTick
     generation_provider = None
     generation_error = ""
-    if lane == "model":
+    if lane == "model" and config.application_backend == "legacy":
         try:
             generation_provider = build_generation_provider(config)
         except Exception as exc:
             generation_error = _safe_error(exc)
-    configure_services(ledger, config, generation_provider=generation_provider, now_provider=clock)
+    if config.application_backend == "legacy":
+        configure_services(ledger, config, generation_provider=generation_provider, now_provider=clock)
     default_policy = NotificationPolicy()
     policy = NotificationPolicy(
-        policy_id="chief-of-staff-v1",
+        policy_id="chief-of-staff-v1" if config.application_backend == "legacy" else default_policy.policy_id,
         enabled_topics=default_policy.enabled_topics if target else frozenset(),
         max_attempts=default_policy.max_attempts,
     )
     publisher = DurableNotificationPublisher(ledger, policy, now=clock)
+    from .application_gateway import build_application_gateway
+    application_gateway=build_application_gateway(config,ledger)
     if lane == "core":
         from .interactions.notifications import InteractionNotificationSender
         transport = (RemoteHermesSendClient(config.hermes_notification_socket, target=target)
                      if config.hermes_notification_socket is not None
                      else HermesSendClient(executable=config.hermes_executable, target=target)) if target else None
         notification_sender = (InteractionNotificationSender(ledger, transport, now_provider=clock)
-                               if transport and ledger.interactions.identity else transport)
+                               if transport and config.application_backend == "legacy" and ledger.interactions.identity else transport)
 
         handlers.update(
             {
-                "attention.tick": AttentionTick(ledger, config),
                 NOTIFICATION_TASK: ShortlistNotificationEvaluator(
                     gateway,
                     ledger,
                     publisher,
                     options=config.shortlist_defaults(),
                     enabled=config.shortlist_notifications_enabled and bool(target),
+                    application_gateway=application_gateway,
                     minimum_jobs=config.shortlist_notification_min_new_jobs,
                     cooldown_minutes=config.shortlist_notification_cooldown_minutes,
                     first_seen_since=config.shortlist_notification_start_at,
@@ -1174,12 +1196,12 @@ def build_runtime(
                         "reason": "notification target is not configured",
                     }
                 ),
-                "notification.reminders_due": ReminderNotificationHandler(
-                    ledger, publisher, now=clock
-                ),
             }
         )
-    if lane == "model":
+        if config.application_backend == "legacy":
+            handlers["attention.tick"] = AttentionTick(ledger, config)
+            handlers["notification.reminders_due"] = ReminderNotificationHandler(ledger, publisher, now=clock)
+    if lane == "model" and config.application_backend == "legacy":
         def compose_briefing(payload, context):
             if generation_provider is None:
                 return {"composed": False, "reason": generation_error or "briefing model is not configured"}
@@ -1213,14 +1235,19 @@ def build_runtime(
         # language model. Each task checks its own document/model dependencies.
         if resume_lab is not None:
             handlers[RESUME_OPTIMIZE_TASK] = resume_lab.handle_work
+    if config.application_backend == "owners":
+        from .application_production import build_owner_handlers
+        handlers = {kind: handler for kind,handler in handlers.items() if kind not in LEGACY_TASKS}
+        handlers.update(build_owner_handlers(config, environment, lane=lane, clock=clock))
     handlers.update(task_overrides or {})
     outbox_handlers = {
         "recommendation.applied": preference_outbox_handler(gateway),
-        "notification.application_event": ApplicationEventNotificationHandler(
-            ledger, publisher
-        ),
         **dict(outbox_overrides or {}),
     }
+    if config.application_backend == "legacy":
+        outbox_handlers.setdefault("notification.application_event", ApplicationEventNotificationHandler(ledger, publisher))
+    if config.application_backend == "owners":
+        outbox_handlers.pop("notification.application_event", None)
     deferred = () if NOTIFICATION_TASK in handlers else (NOTIFICATION_TASK,)
     worker = Worker(
         config.application_db,

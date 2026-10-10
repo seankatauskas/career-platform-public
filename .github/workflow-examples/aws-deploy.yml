@@ -22,7 +22,7 @@ concurrency:
 jobs:
   deploy:
     if: github.repository == 'seankatauskas/career-platform' && github.ref == vars.AWS_WORKFLOW_REF && github.event_name == 'workflow_dispatch' && github.actor == 'seankatauskas' && github.triggering_actor == 'seankatauskas'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64, career-platform-linux]
     environment: production
     timeout-minutes: 240
     permissions:
@@ -40,14 +40,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.12'
+      - name: Prepare isolated production tools
+        run: bash scripts/prepare-aws-runner.sh
       - name: Validate the selected release before accessing AWS
         run: |
           python3 scripts/prepared-release.py selection --release-id "$RELEASE_ID" --sha256 "$MANIFEST_SHA"
       - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-verify-${{ github.run_id }}
@@ -62,6 +62,7 @@ jobs:
       - name: Refresh deployment credentials
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-install-${{ github.run_id }}
@@ -101,6 +102,7 @@ jobs:
         if: env.DEPLOY_COMPLETE != 'true'
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-poll-2-${{ github.run_id }}
@@ -111,6 +113,7 @@ jobs:
         if: env.DEPLOY_COMPLETE != 'true'
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-poll-3-${{ github.run_id }}
@@ -121,6 +124,7 @@ jobs:
         if: env.DEPLOY_COMPLETE != 'true'
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-poll-4-${{ github.run_id }}
@@ -131,6 +135,7 @@ jobs:
         if: env.DEPLOY_COMPLETE != 'true'
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-poll-5-${{ github.run_id }}
@@ -159,3 +164,6 @@ jobs:
             .cache/prepared-release.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Remove this job's tools and registry credentials
+        if: always() && env.CAREER_RUNNER_ROOT != ''
+        run: rm -rf -- "${CAREER_RUNNER_ROOT:?}"

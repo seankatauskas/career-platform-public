@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 ARG HERMES_BASE_IMAGE
 FROM ${HERMES_BASE_IMAGE}
 

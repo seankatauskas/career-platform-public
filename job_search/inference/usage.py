@@ -31,6 +31,83 @@ _INFLIGHT = ("reserved", "submitting", "accepted", "unknown")
 _SCOPE: ContextVar["InvocationScope | None"] = ContextVar("inference_scope", default=None)
 
 
+def install_allowance_schema(con: sqlite3.Connection) -> None:
+    """Add an independent audit table; predecessor governors still use base limits."""
+    if not con.in_transaction:
+        raise RuntimeError("Inference allowance schema requires a transaction")
+    con.execute("""CREATE TABLE IF NOT EXISTS inference_allowance_grants (
+        command_id TEXT PRIMARY KEY, budget_day TEXT NOT NULL,
+        tokens INTEGER NOT NULL CHECK(tokens BETWEEN 1 AND 1000000000000),
+        actor_kind TEXT NOT NULL CHECK(actor_kind='user'), reason TEXT NOT NULL,
+        requested_at TEXT NOT NULL, result_json TEXT NOT NULL
+    )""")
+    for action in ("UPDATE", "DELETE"):
+        con.execute(f"""CREATE TRIGGER IF NOT EXISTS inference_allowance_no_{action.lower()}
+            BEFORE {action} ON inference_allowance_grants
+            BEGIN SELECT RAISE(ABORT,'inference allowance audit is immutable'); END""")
+
+
+def _additional_tokens(con: sqlite3.Connection, day: str) -> int:
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='inference_allowance_grants'").fetchone():
+        return 0
+    return int(con.execute("SELECT COALESCE(SUM(tokens),0) FROM inference_allowance_grants WHERE budget_day=?", (day,)).fetchone()[0])
+
+
+class AllowanceService:
+    """User-authorized, UTC-day top-ups without modifying invocation history."""
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+
+    def grant(self, *, budget_day: str, tokens: int, command_id: str, reason: str,
+              actor_kind: str = "user", now: datetime | None = None) -> dict[str, Any]:
+        if actor_kind != "user":
+            raise ContractError("inference allowance grants require a user decision")
+        if not isinstance(command_id, str) or not ID_RE.fullmatch(command_id):
+            raise ContractError("inference allowance command id is invalid")
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 1 <= tokens <= 10**12:
+            raise ContractError("inference allowance tokens must be a positive bounded integer")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+            raise ContractError("inference allowance reason must contain 1 to 500 characters")
+        if not self.db_path.is_file():
+            raise ContractError("application state is not initialized")
+        current = as_utc(now or datetime.now(timezone.utc))
+        stamp = utc_stamp(current)
+        with closing(connect(self.db_path)) as con:
+            con.execute("BEGIN IMMEDIATE")
+            install_allowance_schema(con)
+            previous = con.execute("SELECT * FROM inference_allowance_grants WHERE command_id=?", (command_id,)).fetchone()
+            if previous:
+                if (previous["budget_day"], previous["tokens"], previous["reason"]) != (budget_day, tokens, reason):
+                    raise ConflictError("inference allowance command already describes a different grant")
+                return dict(json.loads(previous["result_json"]))
+            if budget_day != current.date().isoformat():
+                raise ContractError("inference allowance can only be granted for the current UTC day")
+            if _additional_tokens(con, budget_day) + tokens > 10**12:
+                raise ContractError("inference allowance daily grants exceed the supported maximum")
+            # Only bring forward unleased allowance waits. Workers recheck every
+            # limit; a top-up cannot waive request/concurrency limits or resume
+            # an uncertain provider outcome. Domain state stays with its owner.
+            rows = con.execute("""SELECT work_id FROM work_items w
+                WHERE status='queued' AND failure_kind='usage_deferred'
+                AND due_at>?
+                AND lease_token IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL
+                AND external_outcome IN ('none','terminal')
+                AND NOT EXISTS (SELECT 1 FROM inference_invocations i WHERE i.work_id=w.work_id
+                    AND i.state IN ('reserved','submitting','accepted','unknown'))
+                ORDER BY work_id""", (stamp,)).fetchall()
+            work_ids = [row[0] for row in rows]
+            con.executemany("UPDATE work_items SET due_at=? WHERE work_id=?",
+                            [(stamp, identity) for identity in work_ids])
+            result = {"schema_version": 1, "command_id": command_id, "budget_day": budget_day,
+                      "additional_tokens": tokens, "requested_at": stamp,
+                      "expires_at": utc_stamp(datetime.combine(current.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)),
+                      "woken_work_ids": work_ids, "invocation_history_retained": True}
+            con.execute("INSERT INTO inference_allowance_grants VALUES (?,?,?,'user',?,?,?)",
+                        (command_id, budget_day, tokens, reason, stamp, canonical_json(result)))
+            con.commit()
+            return result
+
+
 @dataclass(frozen=True)
 class UsagePolicy:
     daily_requests: int | None = None
@@ -337,16 +414,17 @@ def _check_limits(con: sqlite3.Connection, policy: UsagePolicy, now: datetime, t
     ).fetchone()
     inflight = con.execute("SELECT COUNT(*) FROM inference_invocations WHERE state IN ('reserved','submitting','accepted','unknown') AND invocation_id!=?", (exclude,)).fetchone()[0]
     tomorrow = utc_stamp(datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc))
+    token_limit = None if policy.daily_tokens is None else policy.daily_tokens + _additional_tokens(con, now.date().isoformat())
     for reason, denied, retry in (
         ("inference_daily_request_limit", policy.daily_requests is not None and count + 1 > policy.daily_requests, tomorrow),
-        ("inference_daily_token_limit", policy.daily_tokens is not None and total + tokens > policy.daily_tokens, tomorrow),
+        ("inference_daily_token_limit", token_limit is not None and total + tokens > token_limit, tomorrow),
         ("inference_inflight_limit", policy.max_inflight is not None and inflight + 1 > policy.max_inflight, utc_stamp(now + timedelta(minutes=5))),
     ):
         if denied:
             raise UsageDeferred(reason, retry)
 
 
-def usage_report(db_path: Path, *, now: datetime | None = None) -> dict[str, Any]:
+def usage_report(db_path: Path, *, now: datetime | None = None, policy: UsagePolicy | None = None) -> dict[str, Any]:
     current = as_utc(now or datetime.now(timezone.utc))
     with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+"?mode=ro", uri=True)) as con:
         day = current.date().isoformat()
@@ -354,9 +432,14 @@ def usage_report(db_path: Path, *, now: datetime | None = None) -> dict[str, Any
         states = dict(con.execute("SELECT state,COUNT(*) FROM inference_invocations GROUP BY state"))
         row = con.execute("SELECT policy_json FROM inference_usage_policy WHERE singleton=1").fetchone()
         deferred = con.execute("SELECT COUNT(*),MIN(due_at) FROM work_items WHERE status='queued' AND failure_kind='usage_deferred'").fetchone()
-    policy = json.loads(row[0]) if row else UsagePolicy().mapping()
-    return {"schema_version": 1, "budget_day": day, "limits": policy,
-            "configured": any(value is not None for value in policy.values()),
+        additional = _additional_tokens(con, day)
+    base = policy.mapping() if policy is not None else json.loads(row[0]) if row else UsagePolicy().mapping()
+    limits = dict(base)
+    if limits["daily_tokens"] is not None:
+        limits["daily_tokens"] += additional
+    return {"schema_version": 1, "budget_day": day, "limits": limits,
+            "base_limits": base, "additional_tokens": additional,
+            "configured": any(value is not None for value in limits.values()),
             "reserved_requests": count, "reserved_tokens": tokens,
             "inflight": sum(states.get(key, 0) for key in _INFLIGHT),
             "uncertain": states.get("unknown", 0) + states.get("submitting", 0),

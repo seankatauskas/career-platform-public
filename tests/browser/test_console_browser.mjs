@@ -166,6 +166,8 @@ try {
   const refreshedList = page.waitForResponse(response => response.url().endsWith('/api/v1/applications'));
   await page.locator('#refresh-applications').click();
   await (await refreshedList).finished();
+  // Network completion precedes the async list render under CI load.
+  await page.locator('#application-list .application-link').first().waitFor();
   assert.equal(new URL(page.url()).hash, '#applications');
   assert.equal(await page.locator('#application-workspace').isVisible(), false);
   assert.equal(await page.locator('#application-scope').count(), 0);
@@ -443,34 +445,41 @@ with sqlite3.connect(sys.argv[1]) as con:
   await snapshot('review-mobile');
   await page.setViewportSize(viewport);
   await page.locator('#attention-list').getByRole('button',{name:'Record interview request',exact:true}).click();
-  await page.waitForFunction(()=>consoleState.reviews.length===0);
-  await page.locator('#review-count').filter({hasText:/^$/}).waitFor({state:'attached'});
-  await applicationRole.locator('.pending-note').waitFor({state:'detached'});
-  assert.equal(await page.locator('#review-count').innerText(), '');
-  assert.equal(await applicationRole.locator('.pending-note').count(), 0);
+  await page.waitForFunction(()=>consoleState.reviews.length===1 && consoleState.reviews[0].kind==='reply_request'
+    && document.querySelector('#review-count').textContent==='1');
+  assert.equal(await page.locator('#review-count').innerText(), '1');
+  assert.match(await applicationRole.locator('.pending-note').textContent(), /Availability requested · Needs your response/);
+  await page.locator('#attention-list').getByRole('button',{name:'Prepare reply',exact:true}).waitFor();
   await page.goto(url+`/#applications/${applicationId}/messages`);
   await page.locator('.message-body').filter({hasText:'schedule a conversation'}).waitFor();
   await snapshot('messages'); await pace(page);
   await advance('reply');
   await page.reload();
   await page.goto(url+`/#applications/${applicationId}/actions`);
-  await page.locator('#attention-list .review-message > summary').click();
+  await page.locator('#attention-list [data-review-key^="outlook_reply_draft:"] .review-message > summary').click();
   await page.locator('#attention-list .message-body').filter({hasText:'Hi Morgan'}).waitFor();
-  assert.equal(await page.locator('#review-count').innerText(), '1');
-  assert.match(await applicationRole.locator('.pending-note').textContent(), /Reply draft · Needs (approval|review)/);
+  assert.equal(await page.locator('#review-count').innerText(), '2');
+  assert.equal(await applicationRole.locator('.pending-note').filter({hasText:/Reply draft · Needs (approval|review)/}).count(), 1);
   await snapshot('reply'); await pace(page);
   await page.locator('#attention-list').getByRole('button',{name:'Create Outlook draft'}).click();
   await page.waitForFunction(()=>consoleState.actions.some(action=>action.status==='approved'));
-  await page.locator('#review-count').filter({hasText:/^$/}).waitFor({state:'attached'});
-  await applicationRole.locator('.pending-note').waitFor({state:'detached'});
-  assert.equal(await page.locator('#review-count').innerText(), '');
-  assert.equal(await applicationRole.locator('.pending-note').count(), 0);
+  // The action response updates state before the attention response lets the
+  // combined refresh render. Wait for the visible result as well as the data.
+  await page.waitForFunction(()=>getReviewItems().length===1 && getReviewItems()[0].kind==='reply_request'
+    && document.querySelector('#review-count').textContent==='1');
+  assert.equal(await page.locator('#review-count').innerText(), '1');
+  assert.match(await applicationRole.locator('.pending-note').textContent(), /Availability requested · Needs your response/);
   const executed=await advance('execute'); assert.equal(executed.drafts_created,1);
   await advance('execute');
   const replay=JSON.parse(await readFile(path.join(stateDir,'demo-status.json'),'utf8')); assert.equal(replay.drafts_created,1);
-  await page.reload(); await page.locator('#review-history > summary').click(); await page.locator('#action-list .phase').filter({hasText:'executed'}).waitFor();
+  await page.reload();
+  await page.locator('#attention-list').getByRole('button',{name:'No reply needed',exact:true}).click();
+  await page.waitForFunction(()=>getReviewItems().length===0 && document.querySelector('#review-count').textContent==='');
+  assert.equal(await page.locator('#review-count').innerText(), '');
+  assert.equal(await applicationRole.locator('.pending-note').count(), 0);
+  await page.locator('#review-history > summary').click(); await page.locator('#action-list .phase').filter({hasText:'executed'}).waitFor();
   report.checks.push('Recruiter evidence review, MCP reply proposal, exact approval and one draft despite replay.');
-  report.checks.push('Only Review has an action count; application cards link pending interview reviews and reply approvals to Review, and clear resolved notices.');
+  report.checks.push('Review and application notices retain reply tasks before drafting and after draft approval; an explicit dismissal clears the request.');
   await snapshot('action-completed'); await pace(page);
   await page.goto(url+`/#applications/${applicationId}/overview`);
   await page.locator('#timeline').filter({hasText:'interview requested'}).waitFor();

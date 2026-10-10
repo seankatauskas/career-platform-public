@@ -42,6 +42,14 @@ link; it does not append a technical count of “additional facts.”
 
 ## Reply review
 
+Open applicant reply and availability tasks appear in **Review**, with the linked
+email, application, and deadline, even before a draft exists. **Prepare reply**
+queues the existing preparation workflow; it does not send mail or complete the
+task. Prepared replies remain under **Settings → Chief of staff** for exact review.
+**No reply needed** cancels the task with an audited reason. It disappears from
+Review and future briefing snapshots, while earlier sent briefings remain historical.
+Both actions check the task revision so a stale card cannot override a newer state.
+
 The [shared email-understanding implementation](mail-understanding-design.md)
 provides a versioned analyzer for events, actions, and temporal facts. Select it with
 `mail_understanding_mode: "shared"`; existing installations default to `legacy`.

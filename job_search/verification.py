@@ -20,7 +20,17 @@ CAPABILITIES = {
 
 def fingerprint(config, capability: str) -> str:
     values = {key: str(getattr(config, key)) for key in CAPABILITIES[capability]}
-    if capability == "mail_inference" and config.inference_config:
+    if config.application_backend == 'owners':
+        values['application_backend'] = 'owners'
+        if capability.startswith('outlook_'):
+            values['home_account_id'] = config.outlook_home_account_id
+        if capability == 'mail_inference':
+            # An old classifier receipt cannot verify the new Understanding engine.
+            values['understanding_contract'] = 'applications-v1'
+            values['mail_inference_config'] = str(config.mail_inference_config)
+            if config.mail_inference_config:
+                values['profile_digest'] = hashlib.sha256(config.mail_inference_config.read_bytes()).hexdigest()
+    elif capability == "mail_inference" and config.inference_config:
         values["profile_digest"] = hashlib.sha256(config.inference_config.read_bytes()).hexdigest()
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 

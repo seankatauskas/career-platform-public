@@ -199,6 +199,10 @@ def compose(c: dict, *args: str, release: Path | None = None) -> str:
             if runtime["mail_inference_config"] != "/run/job-search/mail-inference.json":
                 raise OpsError("cloud mail inference requires the dedicated mounted profile")
             files += ["-f", str(r / "compose.mail.yaml")]
+        if runtime.get("application_backend") == "owners" and runtime.get("mail_inference_config"):
+            overlay = r / "compose.applications.yaml"
+            if not overlay.is_file(): raise OpsError("release lacks application-owner composition")
+            files += ["-f", str(overlay)]
         if runtime.get("briefing_inference_config") and (r / "compose.briefing.yaml").is_file():
             if runtime["briefing_inference_config"] != "/run/job-search/briefing-inference.json":
                 raise OpsError("cloud briefings require the dedicated mounted profile")
@@ -335,7 +339,176 @@ def runtime_entries(source: Path, *, hermes: bool = False, snapshot: bool = Fals
     yield from visit(source)
 
 
-def copy_snapshot(source: Path, target: Path, *, hermes: bool = False) -> None:
+@contextmanager
+def measured(timings: dict, name: str):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[name] = timings.get(name, 0.0) + time.monotonic() - started
+
+
+def sqlite_sidecars_empty(path: Path) -> bool:
+    # A main-file hash alone says nothing about committed WAL records or a hot
+    # rollback journal. Defer both to SQLite even if a sidecar looks stale.
+    for suffix in ("-wal", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.is_symlink(): raise OpsError("database sidecar is a symlink")
+        if sidecar.exists() and (not sidecar.is_file() or sidecar.stat().st_size):
+            return False
+    return True
+
+
+def sqlite_verification_contract() -> dict:
+    # Bump the method when validation semantics change. An engine upgrade must
+    # also earn fresh results rather than inheriting checks by an older SQLite.
+    return {"method": "sqlite-quick-check-v1", "sqlite_version": sqlite3.sqlite_version}
+
+
+def preparation_reference(c: dict) -> tuple[dict, str, str | None]:
+    """Optional content proofs from the last completed deployment's snapshot.
+
+    Read metadata only. The private operation journal commits to the manifest
+    digest, whose verification contract certifies checks of its recorded bytes.
+    Never read/reuse old payload bytes or trust an unanchored snapshot directory.
+    Missing, old, untrusted or damaged evidence is just a cold-cache preparation.
+    """
+    def private_directory(path):
+        info = path.lstat()
+        return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+    def private_bytes(path, limit):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                    info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > limit):
+                raise ValueError("untrusted preparation metadata")
+            value = stream.read(limit + 1)
+            if len(value) > limit: raise ValueError("oversized preparation metadata")
+            return value
+
+    root = Path(c["data_root"])
+    try:
+        if not private_directory(root / "operations") or not private_directory(root / "backups"):
+            return {}, "untrusted", None
+        operation = json.loads(private_bytes(root / "operations/current.json", 1024**2))
+        if (operation.get("version") != 1 or operation.get("complete") is not True or
+                operation.get("kind") not in {"deploy", "rollback"}):
+            return {}, "unavailable", None
+        receipt = operation.get("backup") or {}
+        if receipt.get("format") != "directory-v1": return {}, "unavailable", None
+        snapshot = root / "backups" / (valid_id(receipt["backup_id"]) + ".snapshot")
+        if not private_directory(snapshot): return {}, "untrusted", None
+        raw = private_bytes(snapshot / "backup.json", 64 * 1024**2)
+        if hashlib.sha256(raw).hexdigest() != receipt.get("sha256"):
+            return {}, "invalid", None
+        manifest = json.loads(raw)
+        if (manifest.get("version") != 1 or manifest.get("format") != "directory-v1" or
+                manifest.get("backup_id") != receipt["backup_id"] or
+                manifest.get("sqlite_verification") != sqlite_verification_contract() or
+                not isinstance(manifest.get("files"), dict)):
+            return {}, "incompatible", None
+        return manifest["files"], "available", receipt["backup_id"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OpsError):
+        return {}, "invalid_or_missing", None
+
+
+@contextmanager
+def prepare_snapshot(c: dict):
+    """Speculative private copies; never a recovery point or a source of truth.
+
+    Called under the operations lock while services are still available. Every
+    reused file must match a full hash of the quiesced source, and databases must
+    also have no pending journal/WAL. No timestamps are trusted for equality.
+    Only large files justify this extra pass. Changed or missing candidates use
+    ordinary paused capture. Crashes leave harmless, unpublished scratch data.
+    """
+    available_space(c)  # conservative room for preparation, capture and restore
+    root = Path(c["data_root"])
+    stage = Path(tempfile.mkdtemp(prefix="snapshot-preparing-", dir=backup_root(c)))
+    prepared = {"root": stage, "files": {}, "timings_seconds": {}, "file_profiles": {}}
+    started = time.monotonic()
+    reference, reference_status, reference_id = preparation_reference(c)
+    prepared["verification_reference"] = {"status": reference_status, "backup_id": reference_id}
+    try:
+        for name in BACKUP_DIRS:
+            source = root / name
+            if source.is_symlink(): raise OpsError("snapshot directory is a symlink")
+            if not source.exists(): continue
+            try:
+                for item, info in runtime_entries(source, hermes=name == "hermes", snapshot=True):
+                    if not stat.S_ISREG(info.st_mode) or info.st_size < 1024**2:
+                        continue
+                    if item.name.endswith(("-wal", "-shm", "-journal")): continue
+                    rel = str(item.relative_to(root)); dest = stage / rel
+                    dest.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    profile = {"source_size": info.st_size, "validation": "discarded",
+                               "cutover": "not_captured", "timings_seconds": {}}
+                    prepared["file_profiles"][rel] = profile
+                    timings = profile["timings_seconds"]; file_started = time.monotonic()
+                    try:
+                        # No SQLite connection to the live database: a candidate
+                        # may be torn, but it can never be adopted unless its
+                        # checked bytes equal the final stopped main file.
+                        with measured(timings, "copy_and_hash"):
+                            fd = os.open(item, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                            hasher = hashlib.sha256(); copied = 0; signature = b""
+                            with os.fdopen(fd, "rb") as stream, dest.open("xb") as out:
+                                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                                    raise OpsError("candidate is no longer a regular file")
+                                remaining = info.st_size
+                                while remaining:
+                                    block = stream.read(min(remaining, 1024 * 1024))
+                                    if not block: break
+                                    out.write(block)
+                                    if not copied: signature = block[:16]
+                                    with measured(timings, "hash_in_copy"):
+                                        hasher.update(block)
+                                    copied += len(block)
+                                    remaining -= len(block)
+                        dest.chmod(0o600)
+                        checksum = hasher.hexdigest()
+                        metadata = {"sha256": checksum, "size": copied}
+                        if signature == b"SQLite format 3\x00":
+                            # The hash covers every byte actually written, not
+                            # size/mtime or a hash of the live file at another time.
+                            if reference.get(rel) == metadata:
+                                profile["validation"] = "reused"
+                            else:
+                                with measured(timings, "sqlite_check"):
+                                    sqlite_check(dest)
+                                profile["validation"] = "checked"
+                        else:
+                            profile["validation"] = "not_sqlite"
+                        prepared["files"][rel] = metadata
+                    except (FileNotFoundError, sqlite3.Error, OpsError):
+                        # Live deletions and torn SQLite copies are cache misses.
+                        # Real I/O/space/permission failures abort before downtime.
+                        dest.unlink(missing_ok=True)
+                    finally:
+                        for phase, seconds in timings.items():
+                            prepared["timings_seconds"][phase] = prepared["timings_seconds"].get(phase, 0) + seconds
+                        timings["total"] = time.monotonic() - file_started
+            except FileNotFoundError:
+                # A directory disappeared during the live walk; final capture
+                # re-enumerates the stopped tree and never trusts this listing.
+                continue
+        with measured(prepared["timings_seconds"], "sync"):
+            sync_tree(stage)
+        prepared["timings_seconds"]["total"] = time.monotonic() - started
+        yield prepared
+    finally:
+        # Cleanup failure must not turn an already healthy installation into
+        # a failed deploy. Unknown scratch directories are never auto-pruned.
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
+                  prepared: dict | None = None, files: dict | None = None,
+                  timings: dict | None = None, counters: dict | None = None) -> None:
+    timings = timings if timings is not None else {}
+    counters = counters if counters is not None else {}
     target.mkdir(parents=True, mode=0o700, exist_ok=True)
     if source.is_symlink(): raise OpsError("snapshot directory is a symlink")
     if not source.exists(): return
@@ -349,18 +522,74 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False) -> None:
             (target / rel).mkdir(parents=True, mode=0o700, exist_ok=True)
         elif stat.S_ISREG(info.st_mode):
             if item.name.endswith(("-wal", "-shm")): continue
+            if item.name.endswith("-journal"):
+                database = item.with_name(item.name[:-len("-journal")])
+                if database.is_symlink(): raise OpsError("database is a symlink")
+                if database.is_file():
+                    with database.open("rb") as stream:
+                        if stream.read(16) == b"SQLite format 3\x00":
+                            # SQLite backup incorporates the committed state.
+                            # A source rollback journal must never be applied
+                            # to that independent destination, in either order.
+                            continue
             dest = target / rel; dest.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             with item.open("rb") as stream: is_database = stream.read(16) == b"SQLite format 3\x00"
-            if is_database:
-                source_db = sqlite3.connect(item.as_uri() + "?mode=ro", uri=True)
-                target_db = sqlite3.connect(dest)
-                try: source_db.backup(target_db)
-                finally: source_db.close(); target_db.close()
-            else: shutil.copy2(item, dest)
-            dest.chmod(0o600)
+            key = source.name + "/" + str(rel)
+            cached = prepared["files"].get(key) if prepared else None
+            source_hash = None
+            if cached and cached["size"] == info.st_size and (not is_database or sqlite_sidecars_empty(item)):
+                with measured(timings, "source_hash"):
+                    source_hash = digest(item)
+            exact_predecessor = False
+            if is_database and item.name == "predecessor.sqlite" and not info.st_mode & 0o200:
+                report_path=item.parent/"conversion-report.json"
+                if report_path.is_file() and not report_path.is_symlink():
+                    archived=json.loads(report_path.read_text())
+                    if source_hash is None:
+                        with measured(timings, "source_hash"):
+                            source_hash = digest(item)
+                    if source_hash != archived.get("archive_sha256") or not sqlite_sidecars_empty(item):
+                        raise OpsError("application predecessor is not an immutable snapshot")
+                    exact_predecessor=True
+            reused = cached is not None and source_hash == cached["sha256"]
+            if prepared and key in prepared["file_profiles"]:
+                prepared["file_profiles"][key]["cutover"] = "reused" if reused else "recaptured"
+            if reused:
+                # Independent bytes, never a link to writable live state. The
+                # prepared destination was already checked, hashed and fsynced.
+                with measured(timings, "reuse_publish"):
+                    candidate_path = prepared["root"] / key
+                    os.replace(candidate_path, dest)
+                    # Persist the removal as well as the destination tree. A
+                    # crash must not resurrect a second link to retained bytes.
+                    sync_directory(candidate_path.parent)
+                counters["reused_bytes"] = counters.get("reused_bytes", 0) + info.st_size
+                counters["reused_files"] = counters.get("reused_files", 0) + 1
+            else:
+                if cached:
+                    (prepared["root"] / key).unlink(missing_ok=True)
+                if is_database and not exact_predecessor:
+                    with measured(timings, "sqlite_backup"):
+                        source_db = sqlite3.connect(item.as_uri() + "?mode=ro", uri=True)
+                        target_db = sqlite3.connect(dest)
+                        try: source_db.backup(target_db)
+                        finally: source_db.close(); target_db.close()
+                else:
+                    with measured(timings, "file_copy"):
+                        shutil.copy2(item, dest)
+                with measured(timings, "sqlite_check"):
+                    sqlite_check(dest)
+                counters["copied_bytes"] = counters.get("copied_bytes", 0) + dest.stat().st_size
+                counters["copied_files"] = counters.get("copied_files", 0) + 1
+            dest.chmod(0o600 if info.st_mode & 0o200 else 0o400)
+            if files is not None:
+                if reused:
+                    files[key] = dict(cached)
+                else:
+                    with measured(timings, "destination_hash"):
+                        files[key] = {"sha256": digest(dest), "size": dest.stat().st_size}
         else: raise OpsError("snapshot contains a symlink or special file")
-    for item in target.rglob("*"):
-        if item.is_file() and not item.name.endswith(("-wal", "-shm")): sqlite_check(item)
+
 
 def secret_versions(c: dict) -> dict:
     # Record the versions actually used with this state, never mutable AWSCURRENT.
@@ -371,9 +600,10 @@ def secret_versions(c: dict) -> dict:
             raise OpsError("materialized secret version missing")
     return result
 
-def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, release_id: str | None = None) -> dict:
+def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, release_id: str | None = None,
+                    prepared: dict | None = None) -> dict:
     if paused and not upload:
-        return local_snapshot_unlocked(c, release_id=release_id)
+        return local_snapshot_unlocked(c, release_id=release_id, prepared=prepared)
     available_space(c)
     snapshot_at = operation_now()
     bid = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(4).hex()
@@ -425,7 +655,7 @@ def backup_root(c: dict) -> Path:
     return root
 
 
-def local_snapshot_unlocked(c: dict, *, release_id: str | None = None) -> dict:
+def local_snapshot_unlocked(c: dict, *, release_id: str | None = None, prepared: dict | None = None) -> dict:
     """Durable local rollback without compression or a second full archive copy.
 
     All writers must already be stopped and the operations lock held. Only a
@@ -442,15 +672,22 @@ def local_snapshot_unlocked(c: dict, *, release_id: str | None = None) -> dict:
     published = backups / (bid + ".snapshot")
     try:
         versions = secret_versions(c)
-        for name in BACKUP_DIRS: copy_snapshot(d / name, stage / name, hermes=name == "hermes")
+        files, timings, counters = {}, {}, {}
+        for name in BACKUP_DIRS:
+            copy_snapshot(d / name, stage / name, hermes=name == "hermes", prepared=prepared,
+                          files=files, timings=timings, counters=counters)
         captured = time.monotonic()
-        files = {str(p.relative_to(stage)): {"sha256": digest(p), "size": p.stat().st_size}
-                 for p in stage.rglob("*") if p.is_file()}
         directories = sorted(str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_dir())
         m = {"version": 1, "format": "directory-v1", "backup_id": bid,
              "created_at": snapshot_at, "snapshot_at": snapshot_at,
              "release_id": release_id or release_path(c).name, "secrets": versions,
-             "files": files, "directories": directories}
+             "files": files, "directories": directories,
+             "sqlite_verification": sqlite_verification_contract()}
+        if prepared:
+            # File names stay in the private manifest, never in public deployment
+            # receipts. The existing manifest digest also commits to these facts.
+            m["preparation"] = {"files": prepared["file_profiles"],
+                                "verification_reference": prepared["verification_reference"]}
         write_json(stage / "backup.json", m)
         manifest_hash = digest(stage / "backup.json")
         manifested = time.monotonic()
@@ -462,7 +699,13 @@ def local_snapshot_unlocked(c: dict, *, release_id: str | None = None) -> dict:
         return {"status": "backed_up", "format": "directory-v1", "backup_id": bid,
                 "sha256": manifest_hash, "snapshot_at": snapshot_at,
                 "file_count": len(files), "size_bytes": sum(f["size"] for f in files.values()),
-                "timings_seconds": {"capture": round(captured - started, 3),
+                "reuse": counters,
+                "preparation_validation": {status: sum(p["validation"] == status for p in
+                    (prepared["file_profiles"].values() if prepared else []))
+                    for status in ("checked", "reused", "not_sqlite", "discarded")},
+                "preparation_timings_seconds": {key: round(value, 3) for key, value in
+                                                (prepared["timings_seconds"] if prepared else {}).items()},
+                "timings_seconds": {**{key: round(value, 3) for key, value in timings.items()}, "capture": round(captured - started, 3),
                                     "manifest": round(manifested - captured, 3),
                                     "durable_publish": round(finished - manifested, 3),
                                     "total": round(finished - started, 3)}}
@@ -499,7 +742,7 @@ def safe_extract(bundle: Path, target: Path, *, max_bytes: int = 200 * 1024**3) 
                 stream = tar.extractfile(entry)
                 if stream is None: raise OpsError("archive member missing")
                 with dest.open("xb") as out: shutil.copyfileobj(stream, out)
-                dest.chmod(0o600)
+                dest.chmod(0o600 if entry.mode & 0o200 else 0o400)
 
 def verify_snapshot(stage: Path) -> dict:
     if stage.is_symlink() or not stage.is_dir(): raise OpsError("invalid snapshot directory")
@@ -728,6 +971,38 @@ def undo_restore(c: dict, op: Operation) -> None:
     op.update("restore_reverted", restore=None)
 
 
+def prepare_application_restore(stage: Path) -> None:
+    """Verify predecessor bytes and quarantine effects absent from the snapshot."""
+    from .commands.installation import record_restore
+    state = stage / "state"
+    if not state.exists(): return
+    for report_path in state.rglob("conversion-report.json"):
+        report = json.loads(report_path.read_text())
+        archive = report_path.parent / "predecessor.sqlite"
+        if archive.is_symlink() or not archive.is_file() or digest(archive) != report.get("archive_sha256"):
+            raise OpsError("application predecessor archive failed restore verification")
+        archive.chmod(0o400)
+    for path in state.rglob("*"):
+        if not path.is_file() or path.name.endswith(("-wal","-shm")): continue
+        with path.open("rb") as stream:
+            if stream.read(16) != b"SQLite format 3\x00": continue
+        con = sqlite3.connect(path)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE name='installation_control'").fetchone(): continue
+            con.execute("BEGIN IMMEDIATE")
+            tables={r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            records=[]
+            if 'action_revisions' in tables:
+                records.extend(('external_action',r[0]) for r in con.execute(
+                    "SELECT action_id FROM action_revisions WHERE execution NOT IN ('succeeded','failed','cancelled')"))
+            if 'app_reminders' in tables:
+                records.extend(('reminder',r[0]) for r in con.execute(
+                    "SELECT id FROM app_reminders WHERE status='pending'"))
+            record_restore(con,restored_at=datetime.now(timezone.utc).isoformat(),quarantined_records=records)
+            con.commit()
+        finally: con.close()
+
+
 def restore_unlocked(c: dict, bundle: Path, expected_sha256: str, *, replace: bool = False,
                      _operation: Operation | None = None) -> dict:
     if bundle.is_symlink(): raise OpsError("backup path is a symlink")
@@ -765,6 +1040,7 @@ def restore_unlocked(c: dict, bundle: Path, expected_sha256: str, *, replace: bo
     else: safe_extract(bundle, stage)
     m = verify_snapshot(stage)
     target_release = release_path(c, m["release_id"]); manifest(target_release)
+    prepare_application_restore(stage)
     sync_tree(stage); sync_directory(d)
     op = _operation or Operation.begin(c, "restore", previous_release=release_path(c).name if current.exists() else None,
                                         target_release=target_release.name, active_services=[], previous_activation=activation(c))
@@ -875,6 +1151,7 @@ def wait_healthy(c: dict, expected: list[str], timeout: int = 180) -> None:
 
 
 def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
+    started = time.monotonic()
     from .release_policy import check_transition
     require_idle(c)
     target = release_path(c, release_id); candidate = manifest(target)
@@ -896,6 +1173,17 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
     available_space(c, local_snapshot=True)
     active = running_services(c) if previous else []
     prior_activation = activation(c)
+    with prepare_snapshot(c) as prepared:
+        result = install_prepared(c, target, candidate, previous, active, prior_activation,
+                                  rollback=rollback, prepared=prepared, started=started)
+    result["timings_seconds"]["total_including_cleanup"] = round(time.monotonic() - started, 3)
+    return result
+
+
+def install_prepared(c: dict, target: Path, candidate: dict, previous: Path | None,
+                     active: list[str], prior_activation: dict, *, rollback: bool,
+                     prepared: dict, started: float) -> dict:
+    release_id = target.name
     op = Operation.begin(c, "rollback" if rollback else "deploy", previous_release=previous.name if previous else None,
                          target_release=release_id, active_services=active, previous_activation=prior_activation,
                          backup=None, state_mutation_started=False,
@@ -904,16 +1192,18 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
         stop_for_maintenance(c, op, active)
         # Fresh seed state also needs a recoverable snapshot before initialization.
         op.update("snapshotting")
-        snapshot = backup_unlocked(c, paused=True, upload=False, release_id=previous.name if previous else release_id)
+        snapshot = backup_unlocked(c, paused=True, upload=False, release_id=previous.name if previous else release_id, prepared=prepared)
         op.update("snapshotted", backup=snapshot)
-        op.update("initializing", state_mutation_started=True)
+        op.update("preparing_runtime", state_mutation_started=True)
         materialize_secrets(c); chown_runtime(c)
         from .review_host import prepare as prepare_reviewer
         prepare_reviewer(c, target, candidate, run)
         if preflight(c)["issues"]: raise OpsError("preflight is incomplete")
         point_current(c, target)
         set_gate(c, [], initialize=op.id)
+        op.update("initializing")
         compose(c, "run", "--rm", "--no-deps", "--env", "JOB_SEARCH_INITIALIZE_OPERATION=" + op.id, "initialize")
+        op.update("validating")
         set_gate(c, [], draining=True)
         compose(c, "up", "-d", "--no-deps", "--no-build", "tools")
         wait_healthy(c, ["tools"])
@@ -956,6 +1246,7 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
         pause(c, reason="release failed after validation; data retained for inspection")
         op.update("recovery_required")
         raise
+    deployment_seconds = time.monotonic() - started
     retention = "retained_two_newest"
     try: prune_local_backups(c, keep_backup=op.value["backup"]["backup_id"])
     except (OSError, OpsError):
@@ -971,7 +1262,9 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
     return {"status": op.value["phase"], "release_id": release_id, "operation_id": op.id,
             "previous_release": op.value["previous_release"], "phase_times": op.value["phase_times"],
             "backup": op.value["backup"], "local_backup_retention": retention,
-            "local_image_retention": image_retention}
+            "local_image_retention": image_retention,
+            "timings_seconds": {"through_service_health": round(deployment_seconds, 3),
+                                **op.durations()}}
 
 
 def prune_local_images(c: dict, *, current: Path, previous: Path | None) -> dict:
@@ -1178,7 +1471,7 @@ def _status(c: dict, publish: bool = False) -> dict:
         result["backup_attempt_failed"] = False
         result["backup_attempt_in_progress"] = False
     operation = read_operation(c)
-    result["operation"] = {key: operation.get(key) for key in ("operation_id", "kind", "phase", "complete", "writes_possible", "previous_release", "target_release", "started_at", "updated_at", "phase_times", "recovery_tool", "backup")} if operation else None
+    result["operation"] = {key: operation.get(key) for key in ("operation_id", "kind", "phase", "complete", "writes_possible", "previous_release", "target_release", "started_at", "updated_at", "phase_times", "recovery_tool", "backup", "downtime_started_at", "downtime_finished_at")} if operation else None
     incomplete = bool(operation and not operation["complete"])
     held = operation_lock_held(c) if incomplete else False
     result["maintenance_active"] = incomplete and held is True

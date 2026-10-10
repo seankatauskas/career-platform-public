@@ -53,6 +53,11 @@ def resolution_evidence(con: sqlite3.Connection, item: dict) -> tuple[str, dict]
             'ORDER BY created_at DESC,proposal_id DESC LIMIT 1',
             (evidence['evidence_id'], item['created_at'])).fetchone()
         if not proposal:
+            manual = con.execute('SELECT review_id,status FROM mail_classification_reviews WHERE evidence_id=? AND created_at>=?',
+                                 (evidence['evidence_id'], item['created_at'])).fetchone()
+            if manual:
+                return RESOLUTION, {'evidence_id': evidence['evidence_id'], 'review_id': manual['review_id'],
+                                    'review_status': manual['status'], 'invocations': invocations}
             return 'mail_review_proposal_missing', {}
         return RESOLUTION, {'evidence_id': evidence['evidence_id'],
                             'proposal_id': proposal['proposal_id'], 'proposal_status': proposal['status'],

@@ -11,3 +11,6 @@ python3 scripts/check-system.py --match release --output .cache/pre-commit-relea
 
 # Lifecycle authority and replay checks are dependency-free and also run in CI.
 python3 scripts/check-system.py --match lifecycle --output .cache/pre-commit-lifecycle.json
+
+# Replacement owner contracts and their deliberately broken boundary fixtures.
+python3 scripts/check-system.py --match redesign --output .cache/pre-commit-redesign.json

@@ -16,18 +16,22 @@ concurrency:
 jobs:
   publish:
     if: github.repository == 'seankatauskas/career-platform' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, macOS, ARM64, career-platform]
     timeout-minutes: 25
     steps:
+      - name: Isolate fixture Git configuration
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg-config"
+          : > "$RUNNER_TEMP/gitconfig"
+          printf '%s\n' "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" "GIT_CONFIG_NOSYSTEM=1" "XDG_CONFIG_HOME=$RUNNER_TEMP/xdg-config" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          version: '0.8.4'
+      - name: Verify the Mac's managed uv installation
+        run: uv --version
       - name: Export only the pinned source commit
         run: python3 scripts/prepare-public-showcase.py --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/public-export"
       - name: Validate the exported source without publishing credentials
@@ -38,7 +42,7 @@ jobs:
           git add --force --all
           git -c user.name=validation -c user.email=validation@example.test commit --quiet -m 'Validate exported source'
           npm ci --prefix extension
-          npx --prefix extension playwright-core install --with-deps chromium
+          npx --prefix extension playwright-core install chromium
           uv run --python 3.12 --with cryptography --with pypdf --with reportlab python scripts/check-system.py --browser
       - name: Create at most one snapshot commit for this Chicago date
         run: |

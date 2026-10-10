@@ -69,8 +69,9 @@ def _text(value, maximum=500):
 
 
 class BrowserTracking:
-    def __init__(self, ledger, catalog, autofill, resume_lab=None):
+    def __init__(self, ledger, catalog, autofill, resume_lab=None, *, application_gateway=None):
         self.ledger, self.catalog, self.autofill, self.resume_lab = ledger, catalog, autofill, resume_lab
+        self.application_gateway = application_gateway
         self.path = ledger.store.db_path
 
     def issue_pairing(self, audience):
@@ -116,8 +117,8 @@ class BrowserTracking:
     def resolve(self, page_url):
         identity = identify_job(page_url)
         with connect(self.path) as con:
-            app = con.execute('SELECT * FROM applications WHERE ats=? AND job_id=?',
-                              (identity['ats'], identity['job_id'])).fetchone()
+            app = (self.application_gateway.lookup_job(identity['ats'], identity['job_id']) if self.application_gateway is not None else
+                   con.execute('SELECT * FROM applications WHERE ats=? AND job_id=?', (identity['ats'], identity['job_id'])).fetchone())
             discovered = con.execute('SELECT snapshot_json FROM browser_jobs WHERE ats=? AND job_id=?',
                                     (identity['ats'], identity['job_id'])).fetchone()
         job = None
@@ -176,6 +177,8 @@ class BrowserTracking:
                            'content_base64': base64.b64encode(artifact.content).decode('ascii')}}
 
     def observe(self, device, body):
+        if self.application_gateway is not None:
+            raise ContractError('Owner observations require the paired extension adapter')
         allowed = {'device_token', 'observation_id', 'attempt_id', 'page_url', 'kind', 'occurred_at',
                    'title', 'employer', 'metadata', 'resume_sha256'}
         if set(body) - allowed:
@@ -292,6 +295,10 @@ class BrowserTracking:
         return {'decision': 'not_tracked', 'reason': 'unknown_upload', 'sha256': digest}
 
     def attempt_status(self, device, attempt):
+        if self.application_gateway is not None:
+            record = self.application_gateway.browser_attempt(device, attempt)
+            return {**(self.application_status(record['application_id']) or {}),
+                    'attempt_id': attempt, 'application_id': record['application_id']}
         with connect(self.path) as con:
             row = con.execute('SELECT * FROM browser_attempts WHERE attempt_id=? AND device_id=?', (attempt, device)).fetchone()
         if not row:
@@ -300,11 +307,19 @@ class BrowserTracking:
                 'attempt_id': attempt, 'application_id': row['application_id']}
 
     def evidence(self, app_id):
+        if self.application_gateway is not None:
+            return self.application_gateway.browser_observations(app_id)
         with connect(self.path) as con:
             return [dict(row) for row in con.execute(
                 "SELECT o.kind,o.occurred_at,o.metadata_json FROM browser_observations o JOIN browser_attempts a USING(attempt_id) WHERE a.application_id=? ORDER BY o.occurred_at DESC,o.rowid DESC LIMIT 100", (app_id,))]
 
     def application_status(self, app_id):
+        if self.application_gateway is not None:
+            observations = self.application_gateway.browser_observations(app_id)
+            if not observations:
+                return None
+            latest = max(observations, key=lambda item: (item.get('occurred_at') or item['created_at'], item['id']))
+            return {'status': 'needs_review', 'label': 'Browser activity recorded', 'attempt_id': latest['attempt_ref']}
         with connect(self.path) as con:
             app = con.execute('SELECT confirmed_at,submitted_at,current_phase FROM applications WHERE application_id=?', (app_id,)).fetchone()
             row = con.execute('SELECT * FROM browser_attempts WHERE application_id=? ORDER BY created_at DESC LIMIT 1', (app_id,)).fetchone()
@@ -319,7 +334,7 @@ class BrowserTracking:
         status = self.attempt_status(device, str(body.get('attempt_id') or ''))
         fields = validate_descriptors(body.get('fields') or [])
         answers = validate_captured_answers(body.get('answers') or [], {f['field_id']: f for f in fields})
-        app = self.ledger.get_application_timeline(status['application_id'])['application']
+        app = (self.application_gateway or self.ledger).get_application_timeline(status['application_id'])['application']
         vault = self.autofill._vault
         if not hasattr(vault, 'stage_browser_capture'):
             return {'staged': False}
@@ -328,6 +343,11 @@ class BrowserTracking:
         return {'staged': True}
 
     def maintain_captures(self):
+        if self.application_gateway is not None:
+            # An accepted submission is not approval of every capture on this
+            # application. Preserve staged profile facts; the owner keeps the
+            # browser evidence independently for explicit review.
+            return
         vault = self.autofill._vault
         if hasattr(vault, 'finish_browser_captures'):
             with connect(self.path) as con:

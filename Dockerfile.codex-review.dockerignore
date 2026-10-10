@@ -10,3 +10,13 @@
 !job_search/job_reviews/brief.py
 !job_search/job_reviews/contracts.py
 !job_search/job_reviews/reviewer_rubric.md
+!job_search/job_reviews/ordering.py
+!job_search/job_reviews/cards.py
+!job_search/job_reviews/native_client.py
+!job_search/job_reviews/old_method/
+!job_search/job_reviews/old_method/__init__.py
+!job_search/job_reviews/old_method/screen.py
+!job_search/job_reviews/old_method/workspace.py
+!job_search/job_reviews/old_method/entrypoint.py
+!job_search/collection/
+!job_search/collection/locations.py

@@ -1,7 +1,8 @@
 """Recover failed incoming mail analysis from its private sanitized archive.
 
-This explicit review command uses the configured classifier and creates a pending
-proposal only. It never retries Graph, applies an event, or links an application.
+This explicit review command tries receipt rules before the configured classifier
+and creates a pending proposal or an unclassified manual review. It never retries
+Graph, applies an event, or links an application.
 """
 from __future__ import annotations
 
@@ -18,12 +19,11 @@ from .db import connect
 from .mail.context import CandidateApplication
 from .mail.identity import review_supported_candidates
 from .mail.matching import rank_mail_candidates
-from .mail.proposals import validate_model_output
-from .mail.model import ModelExecutionError
+from .mail.pipeline import analyze_mail
+from .mail.classification_review import ClassificationRejected, record_review, assert_reviewable_outcome
 from .mail.sanitizer import sanitize_mail
 from .mail.understanding_runtime import MailUnderstandingRuntime
 from .inference.usage import UsageDeferred, InvocationReconciliationRequired
-from .inference.contracts import InferenceResponseRejected
 from .review_messages import review_message
 
 
@@ -96,14 +96,16 @@ def recover_review(ledger, mail_source, query, classifier, model_version, *, usa
     digest = payload_sha256({'account_id': account, 'message_id': message})
     with _recovery_lock(ledger.store.db_path, digest):
         stage, existing_evidence, existing_proposal = _records(ledger, identity)
+        with connect(ledger.store.db_path) as con:
+            manual = con.execute('SELECT review_id,status FROM mail_classification_reviews WHERE evidence_id=?',
+                                 (existing_evidence['evidence_id'],)).fetchone() if existing_evidence else None
+        existing_proposal = existing_proposal or (dict(manual) if manual else None)
         if existing_proposal and stage['processing_status'] in {'failed', 'processed'}:
             if stage['processing_status'] == 'failed':
                 _mark_processed(ledger, identity)
             return {**existing_proposal, 'created': False}
         if stage['processing_status'] != 'failed':
             raise ConflictError('email is no longer awaiting failure review')
-        if classifier is None:
-            raise ContractError('email analysis is not configured')
         validate_identifier(model_version, 'model_version')
         content = review_message(ledger, mail_source, dict(
             kind='mail_processing_failure', id=message, account_id=account,
@@ -124,30 +126,31 @@ def recover_review(ledger, mail_source, query, classifier, model_version, *, usa
         ) for row in rows], mail.subject, mail.body)[:20]
         owner = MailUnderstandingRuntime(ledger, None, classifier, mode='legacy', usage_limits=usage_limits)
         with owner._inference_scope('review-recovery:' + digest, uuid.uuid4().hex, None) as attempt:
+            assert_reviewable_outcome()
             try:
-                output = classifier.classify(mail.text, [item.model_context() for item in candidates])
+                validated = analyze_mail(
+                    evidence_id=existing_evidence['evidence_id'] if existing_evidence else 'review-recovery',
+                    sender_address=stage['sender'], mail=mail, candidates=candidates,
+                    classifier=classifier, model_version=model_version,
+                    received_at=stage['received_at'] or '',
+                )
+                if validated is None:
+                    raise ContractError('email analysis is not configured')
+            except ClassificationRejected:
+                # The received answer is unusable, but the email is still reviewable.
+                validated = None
             except (UsageDeferred, InvocationReconciliationRequired):
                 raise
-            except (ModelExecutionError, ContractError, InferenceResponseRejected):
-                failure = ContractError('archived email analysis output was rejected; the original review is unchanged')
-                attempt['output_rejected'] = failure
-                raise failure from None
             except Exception:
                 raise ContractError('archived email analysis failed; the original review is unchanged') from None
-            try:
-                validated = validate_model_output(output,
-                    evidence_id=existing_evidence['evidence_id'] if existing_evidence else 'review-recovery',
-                    mail=mail, candidates=candidates, producer_version=model_version)
-                if existing_evidence:
-                    # Retained evidence is immutable. Preserve the validated quote while
-                    # relocating its offset into the exact excerpt already on record.
-                    start = existing_evidence['excerpt'].find(validated.evidence_quote)
-                    if start < 0:
-                        raise ContractError('analysis evidence is absent from the retained email excerpt')
+            if validated is not None and existing_evidence:
+                start = existing_evidence['excerpt'].find(validated.evidence_quote)
+                if start < 0:
+                    # An archive quote absent from immutable retained evidence cannot
+                    # support a proposal. Let the user interpret the retained source.
+                    validated = None
+                else:
                     validated = replace(validated, span_start=start, span_end=start + len(validated.evidence_quote))
-            except ContractError as exc:
-                attempt['output_rejected'] = exc
-                raise
             def persist(con, stamp):
                 # Direction, status, evidence, proposal, and stage completion share
                 # one write transaction so a concurrent dismissal cannot be lost.
@@ -157,13 +160,7 @@ def recover_review(ledger, mail_source, query, classifier, model_version, *, usa
                 if competing:
                     result = {**competing, 'created': False}
                 else:
-                    reviewed = validated
-                    if evidence:
-                        start = evidence['excerpt'].find(reviewed.evidence_quote)
-                        if start < 0:
-                            raise ContractError('analysis evidence is absent from the retained email excerpt')
-                        reviewed = replace(reviewed, span_start=start, span_end=start + len(reviewed.evidence_quote))
-                    else:
+                    if not evidence:
                         evidence = ledger.store.record_mail_evidence(dict(
                             account_id=account, immutable_message_id=message,
                             conversation_id=stage['conversation_id'], sender=stage['sender'],
@@ -171,12 +168,19 @@ def recover_review(ledger, mail_source, query, classifier, model_version, *, usa
                             body_sha256=mail.content_sha256, excerpt=mail.text,
                         ), MutationContext('review-evidence:' + digest, 'system', 'review_recovery'),
                             _transaction=(con, stamp))['evidence']
-                    proposal = replace(reviewed, evidence_id=evidence['evidence_id'],
-                                       proposed_application_id=None, dedupe_key='review-recovery:' + digest)
-                    saved = ledger.store.create_event_proposal(proposal, MutationContext(
-                        'review-proposal:' + digest, 'model', 'review_recovery'), _transaction=(con, stamp))
-                    result = {'proposal_id': saved['proposal']['proposal_id'], 'status': saved['proposal']['status'],
-                              'created': saved['created']}
+                    if validated is None:
+                        result = record_review(con, stamp, evidence['evidence_id'], model_version)
+                    else:
+                        start = evidence['excerpt'].find(validated.evidence_quote)
+                        if start < 0:
+                            raise ContractError('analysis evidence is absent from the retained email excerpt')
+                        proposal = replace(validated, evidence_id=evidence['evidence_id'],
+                            span_start=start, span_end=start + len(validated.evidence_quote),
+                            proposed_application_id=None, dedupe_key='review-recovery:' + digest)
+                        saved = ledger.store.create_event_proposal(proposal, MutationContext(
+                            'review-proposal:' + digest, proposal.producer_kind.value, 'review_recovery'), _transaction=(con, stamp))
+                        result = {'proposal_id': saved['proposal']['proposal_id'], 'status': saved['proposal']['status'],
+                                  'created': saved['created']}
                 updated = con.execute("UPDATE outlook_message_stage SET processing_status='processed',last_error='',updated_at=? "
                                       "WHERE account_id=? AND folder_ref=? AND query_version=? AND immutable_message_id=? "
                                       "AND processing_status='failed'", (stamp, *identity)).rowcount

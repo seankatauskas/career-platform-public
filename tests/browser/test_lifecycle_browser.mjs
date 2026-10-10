@@ -57,7 +57,13 @@ try {
   await page.goto(demo.url+'/#applications');
   await page.locator('#application-list .application-link').first().click();
   await page.locator('#workspace-lifecycle .lifecycle-item').filter({hasText:'Technical screen'}).first().waitFor();
-  const briefing=await page.evaluate(()=>consoleState.workspace.briefing);
+  // Navigation can clear workspace state after the previous DOM was observed.
+  // Wait for the completed load and capture its briefing in the same callback.
+  const briefingHandle=await page.waitForFunction(()=>
+    !document.querySelector('#application-workspace').hasAttribute('aria-busy')
+      && consoleState.workspace?.briefing);
+  const briefing=await briefingHandle.jsonValue();
+  await briefingHandle.dispose();
   assert.equal(briefing.interviews.rounds[0].status,'confirmed');
   assert(briefing.reminders.some(x=>x.source==='interview'));
   assert.equal(briefing.coverage.complete,false);

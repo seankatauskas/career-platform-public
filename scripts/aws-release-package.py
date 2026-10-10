@@ -22,6 +22,7 @@ ROOT_FILES = frozenset({
     "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "compose.chief.yaml", "compose.briefing.yaml", "Dockerfile", "Dockerfile.hermes", "Dockerfile.codex-review", "Dockerfile.codex-review.dockerignore", ".dockerignore", "requirements/cloud.txt",
     "job_search/collection/boards.seed.json", "job_search/job_reviews/reviewer_rubric.md", "scripts/job-search-ops",
     "scripts/job-search-seed",
+    "compose.applications.yaml",
 })
 IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}")
 

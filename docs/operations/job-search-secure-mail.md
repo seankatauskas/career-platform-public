@@ -37,7 +37,7 @@ coordinator to archive recruiting and non-recruiting messages while preserving t
 review contract. Eligible PDF, DOCX, and ICS attachment text is encrypted for both;
 only recruiting content is sent to temporal extraction.
 
-## Mail evidence failures and retry
+## Mail classification and manual review
 
 Mail proposals must cite the exact retained subject or body text and its character
 offsets. The remote adapter resolves a unique verbatim quote locally instead of
@@ -47,15 +47,35 @@ and restore the original source slice and offsets. It does not repair changed wo
 case, punctuation, or ambiguous matches. Framing labels and quotes spanning the
 subject/body boundary still fail proposal validation.
 
-Trusted ATS receipt rules recognize both “thank you for applying” and “thanks for
-applying,” subject to the existing sender authentication, application identity, and
-recent-submission checks. Other messages continue through model classification.
+Trusted ATS receipt rules recognize “thank you for applying,” “thanks for applying,”
+and “we received,” “we have received,” “we've received,” and “we’ve received your
+application.” Sender authentication, application identity, rejection precedence,
+and recent-submission checks still apply. Other messages use model classification.
+Archived recovery uses these same rules before invoking the configured model.
 
-After installing a fix, use **Retry processing** on an existing failed Review item.
-The next mailbox sync reprocesses it through the corrected adapter. Deploying code
-does not automatically reset failed rows. A repeated failure remains visible and
-does not change application status; inspect its technical details before retrying
-again. Raw model responses and email bodies are not added to failure logs.
+A received answer with invalid JSON, unsupported fields, or unverifiable evidence
+creates **Classification needs review**. The email remains accessible in Review,
+but no model event, quote, confidence, or application assignment is accepted.
+Choose an interpretation and exact supporting words, keep the message without
+changing application status, or dismiss it. Preview and explicit user resolution
+are required. The CLI `mail-review list`, `message --proposal-id <review_id>`,
+`preview`, and `apply` support the same records; decisions may specify `review_id`
+instead of `proposal_id`. Shared mail mode retains a message-level uncertainty
+finding and discards all findings from the unusable answer.
+
+Saving that review completes mail processing. Pending human review does not itself
+block readiness or trigger repeated model requests. Provider usage is still counted.
+Network/authentication failures, unavailable model commands, failed persistence,
+lost leases, and unknown provider outcomes retain the operational failure or
+reconciliation path. Raw rejected answers are not stored in the review or logs.
+
+For an existing failed email, use **Find suggested action** to analyze its archive
+with the corrected rules and fallback, or **Retry processing** to requeue mailbox
+processing. Deploying code does not reset failed rows. Archived recovery completes
+its existing work owner only after the proposal or manual review is saved. If a
+separate retry has already processed the email, `work-resolve-mail` can resolve its
+obsolete owner using the saved proposal or manual review and terminal invocation
+evidence; uncertain provider calls still require reconciliation.
 
 ## Attachments
 

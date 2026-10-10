@@ -217,7 +217,11 @@ def test_cli_can_export_preview_and_apply_the_same_batch():
     import sys
     with fixture() as (ledger,review,app):
         p=pending(ledger)
-        command=[sys.executable,'-m','job_search','--db',str(ledger.store.db_path),'mail-review']
+        # A CLI subprocess must never load the logged-in user's runtime config.
+        config=ledger.store.db_path.parent/'config.json'
+        config.write_text(json.dumps({'project_root':str(ledger.store.db_path.parent)}))
+        config.chmod(0o600)
+        command=[sys.executable,'-m','job_search','--config',str(config),'--db',str(ledger.store.db_path),'mail-review']
         exported=subprocess.run(command+['list'],check=True,capture_output=True,text=True)
         assert json.loads(exported.stdout)['items'][0]['proposal_id'] == p['proposal_id']
         preview=subprocess.run(command+['preview'],input=json.dumps({'decisions':[choice(p,app)]}),check=True,capture_output=True,text=True)

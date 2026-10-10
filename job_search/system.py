@@ -117,13 +117,26 @@ def build_notification_recovery(config: RuntimeConfigV1, ledger: JobSearchLedger
 def build_dashboard_controller(
     config: RuntimeConfigV1, *, resume_lab: Optional[ResumeLabGateway] = None, mail_source: Any = None
 ) -> DashboardController:
+    from .application_installation import require_backend
+    require_backend(config)
     ledger = JobSearchLedger(config.application_db)
     from .chief_runtime import configure_services
-    configure_services(ledger, config)
+    if config.application_backend == "legacy":
+        configure_services(ledger, config)
     preferences = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )
     resume = _configured_resume_lab(config, resume_lab)
+    from .application_gateway import build_application_gateway
+    application_gateway = build_application_gateway(config,ledger)
+    if application_gateway is not None:
+        from .application_production import configured_provider_resolver
+        from .application_preparation import ReplyProviderContext
+        resolver = configured_provider_resolver(config,config.environment(os.environ))
+        application_gateway.runtime.reply_preparation.provider_resolver = lambda account: ReplyProviderContext(account,resolver(account))
+        from .application_production import LazyMailReader
+        application_gateway.runtime.mail_reader=LazyMailReader(config,application_gateway.runtime)
+        if resume is not None: resume.application_gateway = application_gateway
     vault = None
     if config.autofill_vault is not None:
         persistence = None
@@ -139,7 +152,7 @@ def build_dashboard_controller(
             config.autofill_vault, persistence=persistence
         )
     autofill = AutofillBroker(
-        ledger,
+        application_gateway or ledger,
         load_profile(config.autofill_profile),
         vault,
         submission_context=lambda application_id, decision: resume_submission_snapshot(
@@ -148,7 +161,7 @@ def build_dashboard_controller(
     )
     environment = config.environment(os.environ)
     jobs = LocalJobCatalog(config.jobs_db)
-    if has_outlook_config(environment):
+    if config.application_backend == "legacy" and has_outlook_config(environment):
         ledger.lifecycle.calendar = _DashboardCalendarSource(config)
     def review_classifier():
         from .runtime import _configured_mail_models
@@ -174,6 +187,7 @@ def build_dashboard_controller(
             and (config.mail_classifier_config or environment.get('JOB_SEARCH_MAIL_CLASSIFIER_CONFIG')
                  or config.remote_mail_inference_enabled) else None),
         automation_config=config,
+        application_gateway=application_gateway,
         cost_snapshot_path=(Path(environment["JOB_SEARCH_COST_SNAPSHOT"])
                             if environment.get("JOB_SEARCH_COST_SNAPSHOT") else None),
     )
@@ -254,12 +268,18 @@ def build_hermes_sources_from_config(
 ) -> Any:
     """Compose Hermes from bounded adapters, never from raw database/Graph clients."""
 
+    from .application_installation import require_backend
+    require_backend(config)
     ledger = JobSearchLedger(config.application_db)
     from .chief_runtime import configure_services
-    configure_services(ledger, config)
+    if config.application_backend == "legacy":
+        configure_services(ledger, config)
     gateway = PreferenceGateway(
         PreferencePaths(config.jobs_db, config.preference_db, config.proxy_db)
     )
+    if mail_source is None and config.application_backend == "owners":
+        from .application_agent_host import RetiredMailTools
+        mail_source=RetiredMailTools()
     if mail_source is None:
         from .mail import build_archive_mail_source
 
@@ -275,19 +295,22 @@ def build_hermes_sources_from_config(
         )
     environment = config.environment(os.environ)
     planner = availability
-    if planner is None:
+    if planner is None and config.application_backend == "legacy":
         planner = _availability_from_config(config, environment)
     resume = _configured_resume_lab(config, resume_lab, read_only=True)
+    from .application_gateway import build_application_gateway
+    application_gateway=build_application_gateway(config,ledger)
+    if application_gateway is not None and resume is not None: resume.application_gateway=application_gateway
     from .job_reviews.service import JobReviews
     from .job_reviews.context import profile_context
     from .scanning import scan_status
     return make_hermes_sources(
         reviews=JobReviews(config.application_db, LocalJobCatalog(config.jobs_db),
-                           lambda: profile_context(resume), collection_provider=lambda: scan_status(config)),
-        curated=CuratedShortlists(config.application_db, LocalJobCatalog(config.jobs_db)),
+                           lambda: profile_context(resume), collection_provider=lambda: scan_status(config),application_gateway=application_gateway),
+        curated=CuratedShortlists(config.application_db, LocalJobCatalog(config.jobs_db),application_gateway=application_gateway),
         jobs=LocalJobCatalog(config.jobs_db),
         shortlist=ConfiguredShortlistSource(
-            gateway, ledger, config.shortlist_defaults()
+            gateway, application_gateway or ledger, config.shortlist_defaults()
         ),
         ledger=ledger,
         mail=mail_source,
@@ -322,6 +345,12 @@ def make_mcp_host(
     sources = build_hermes_sources_from_config(
         config, mail_source=mail_source, resume_lab=resume_lab
     )
+    if config.application_backend == "owners":
+        from .application_agent_host import ProductionAgentTools
+        from .application_production import owner_runtime
+        from .hermes_mcp import make_mcp_server
+        return make_mcp_server(ProductionAgentTools(owner_runtime(config),sources),
+            read_mcp_token(config.mcp_token_file),config.mcp_port,bind_host=bind_host,allowed_hosts=allowed_hosts)
     return make_mcp_server_from_sources(
         sources,
         read_mcp_token(config.mcp_token_file),
@@ -337,9 +366,17 @@ def make_interaction_host(config: RuntimeConfigV1, *, bind_host="127.0.0.1", all
         raise ValueError("configure Telegram identity and interaction_token_file first")
     from .chief_runtime import configure_services
     from .interactions.server import make_interaction_server
-    ledger = configure_services(JobSearchLedger(config.application_db), config)
+    from .application_installation import require_backend
+    require_backend(config)
+    if config.application_backend == "owners":
+        from .application_agent_host import RetiredInteractionReviews
+        service=RetiredInteractionReviews({"bot_id":config.telegram_bot_id,
+            "user_id":config.telegram_user_id,"chat_id":config.telegram_chat_id})
+    else:
+        ledger = configure_services(JobSearchLedger(config.application_db), config)
+        service=ledger.interactions
     return make_interaction_server(
-        ledger.interactions, read_mcp_token(config.interaction_token_file),
+        service, read_mcp_token(config.interaction_token_file),
         host=bind_host, port=config.interaction_port, allowed_hosts=allowed_hosts,
     )
 

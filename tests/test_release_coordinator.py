@@ -281,6 +281,30 @@ class CoordinationTests(unittest.TestCase):
         self.assertNotIn('\nconcurrency:', status)
         self.assertIn("github.triggering_actor == 'seankatauskas'", status)
 
+    def test_private_production_workflows_have_no_hosted_fallback(self):
+        workflows = ROOT / '.github/workflows'
+        if not (workflows / 'aws-release.yml').exists():
+            workflows = ROOT / '.github/workflow-examples'
+        for name in ('aws-release', 'aws-deploy', 'aws-release-status', 'aws-terraform'):
+            with self.subTest(workflow=name):
+                source = (workflows / (name + '.yml')).read_text()
+                self.assertIn('runs-on: [self-hosted, Linux, ARM64, career-platform-linux]', source)
+                self.assertNotIn('runs-on: ubuntu-', source)
+                self.assertIn('environment: production', source)
+                self.assertIn('id-token: write', source)
+                self.assertIn("github.triggering_actor == 'seankatauskas'", source)
+                self.assertIn('bash scripts/prepare-aws-runner.sh', source)
+                self.assertEqual(source.count('uses: aws-actions/configure-aws-credentials@'),
+                                 source.count('unset-current-credentials: true'))
+                self.assertIn('if: always() && env.CAREER_RUNNER_ROOT', source)
+                self.assertNotIn('$HOME/.docker/config.json', source)
+        release = (workflows / 'aws-release.yml').read_text()
+        self.assertIn('docker build --platform linux/amd64 --file Dockerfile.codex-review', release)
+        self.assertIn('-B -m tests.probe_old_method_container', release)
+        snapshot = (workflows / 'public-snapshot.yml').read_text()
+        self.assertIn('runs-on: [self-hosted, macOS, ARM64, career-platform]', snapshot)
+        self.assertNotIn('runs-on: ubuntu-', snapshot)
+
 
 class HostStatusTests(unittest.TestCase):
     def setUp(self):

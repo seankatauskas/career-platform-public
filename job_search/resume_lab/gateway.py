@@ -17,6 +17,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -420,9 +421,11 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         enqueue: Optional[Callable[[str, str], Mapping[str, Any]]] = None,
         now: Optional[Callable[[], datetime]] = None,
         allow_unmanaged_remote_inference: bool = False,
+        application_gateway: Any = None,
     ) -> None:
         self.service = service
         self.artifacts = artifacts
+        self.application_gateway = application_gateway
         self.application_db = (
             Path(application_db) if application_db is not None else None
         )
@@ -585,6 +588,8 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         application_id: str,
         job: JobSnapshot,
     ) -> Mapping[str, Any]:
+        if self.application_gateway is not None:
+            return self._require_owner_preparing(application_id, job)
         row = connection.execute(
             "SELECT ats,job_id,current_phase,last_event_seq,projection_sha256 "
             "FROM applications WHERE application_id=?",
@@ -592,12 +597,38 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         ).fetchone()
         return self._validate_preparing_application_row(row, application_id, job)
 
+    def _require_owner_preparing(self, application_id, job):
+        from ..commands import DomainError
+        from ..contracts import ConflictError
+        try:
+            return self.application_gateway.require_document_editable(application_id, job)
+        except (DomainError, ConflictError) as exc:
+            raise _ApplicationStateConflict(str(exc)) from exc
+
+    @contextmanager
+    def _application_preparing_connection(self, application_id, job):
+        """Owner reservation precedes the operational queue transaction everywhere."""
+        from ..commands import DomainError
+        from ..contracts import ConflictError
+        authority = self.application_gateway.document_edit_lock(application_id, job) if self.application_gateway is not None else nullcontext()
+        try:
+            with authority:
+                with ledger_connect(self.application_db) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    if self.application_gateway is None:
+                        self._require_preparing_application_in(connection, application_id, job)
+                    yield connection
+        except (DomainError, ConflictError) as exc:
+            raise _ApplicationStateConflict(str(exc)) from exc
+
     def _require_preparing_application(
         self, application_id: str, job: JobSnapshot
     ) -> Mapping[str, Any]:
         """Bind resume work to the authoritative, still-editable application."""
 
         validate_identifier(application_id, "application_id")
+        if self.application_gateway is not None:
+            return self._require_owner_preparing(application_id, job)
         if self.application_db is None or not self.application_db.is_file():
             raise _ApplicationLedgerUnavailable("application ledger is unavailable")
         try:
@@ -611,9 +642,12 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
             ) from exc
 
     def _application_authority(self, application_id: str) -> Mapping[str, Any]:
-        """Expose only the phase-derived UI authority from the canonical ledger."""
+        """Expose authority from the active application owner, not a display stage."""
 
         validate_identifier(application_id, "application_id")
+        if self.application_gateway is not None:
+            app = self.application_gateway.get_application_timeline(application_id)["application"]
+            return {"application_phase": app["current_phase"], "selection_editable": app["disposition"] == "open"}
         if self.application_db is None or not self.application_db.is_file():
             raise _ApplicationLedgerUnavailable("application ledger is unavailable")
         try:
@@ -646,11 +680,7 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         if self.application_db is None or not self.application_db.is_file():
             raise _ApplicationLedgerUnavailable("application ledger is unavailable")
         try:
-            with ledger_connect(self.application_db) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                self._require_preparing_application_in(
-                    connection, application_id, job
-                )
+            with self._application_preparing_connection(application_id, job) as connection:
                 return operation(connection)
         except _ApplicationStateConflict:
             raise
@@ -1116,7 +1146,8 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         # Separate read/evaluation adapter ensures even a configured provider cannot
         # be called as a side effect of choosing the fixed standard.
         local=ResumeLabProductionGateway(self.service,self.artifacts,
-                                        application_db=self.application_db,model=None,toolchain=None)
+                                        application_db=self.application_db,model=None,toolchain=None,
+                                        application_gateway=self.application_gateway)
         ranked,_=local._rank_standards(snapshot)
         viable=[r for r in ranked if r.get('artifact_id') and r.get('evaluation_id')]
         if not viable:
@@ -1804,11 +1835,7 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         # commits.  Submission therefore either wins first (and approval is rejected)
         # or waits until this exact approval is durably recorded.
         try:
-            with ledger_connect(self.application_db) as application_connection:
-                application_connection.execute("BEGIN IMMEDIATE")
-                self._require_preparing_application_in(
-                    application_connection, str(run["application_id"]), job
-                )
+            with self._application_preparing_connection(str(run["application_id"]), job):
                 self.service.approve_run(
                     run_id,
                     str(item["artifact_id"]),
@@ -1878,11 +1905,7 @@ class ResumeLabProductionGateway(CareerGatewayMixin):
         # changes.  Submission either commits first (and selection is rejected) or
         # waits until this exact selection has committed in the sidecar.
         try:
-            with ledger_connect(self.application_db) as application_connection:
-                application_connection.execute("BEGIN IMMEDIATE")
-                self._require_preparing_application_in(
-                    application_connection, application_id, artifact_job
-                )
+            with self._application_preparing_connection(application_id, artifact_job):
                 # The database binds the expected digest, but selection is the last
                 # boundary before an artifact can be used in an application.  Verify
                 # the managed bytes while the phase lock is held so missing or altered
@@ -2873,6 +2896,7 @@ def build_resume_lab_gateway(
         model=model,
         toolchain=toolchain,
         allow_unmanaged_remote_inference=allow_unmanaged_remote_inference,
+        application_gateway=_configured_application_gateway(config),
     )
     if tool_socket:
         from job_search.tool_service import RemoteAttachmentExtractor
@@ -2898,7 +2922,16 @@ def build_resume_lab_read_gateway(
         application_db=config.application_db,
         model=None,
         toolchain=None,
+        application_gateway=_configured_application_gateway(config),
     )
+
+
+def _configured_application_gateway(config):
+    if getattr(config, "application_backend", "legacy") == "legacy":
+        return None
+    from ..application_gateway import build_application_gateway
+    from ..service import JobSearchLedger
+    return build_application_gateway(config, JobSearchLedger(config.application_db))
 
 
 __all__ = [

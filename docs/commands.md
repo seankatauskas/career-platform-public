@@ -5,6 +5,7 @@ Run commands from the repository root. Python imports and background workers use
 | Purpose | Command |
 | --- | --- |
 | Application ledger, dashboard, and operator tools | `python -m job_search --help` |
+| Grant a one-day inference top-up | `python -m job_search inference-allowance-grant --help` ([usage and safeguards](models/inference-providers.md#platform-usage-limits-and-restart-recovery)) |
 | Publish agent-selected jobs | `python -m job_search --config /path/to/config.json shortlist publish --input -` ([guide](curated-shortlists.md)) |
 | Collect postings and discover boards | `python -m job_search.collection.boards --help` |
 | Deduplicate job families | `python -m job_search.collection.dedupe --help` |
@@ -51,3 +52,8 @@ The isolated AWS reviewer is launched on the host with
 `python3 -m job_search.review_host login|readiness|run|status`; see the
 [isolated-review runbook](operations/isolated-reviews.md). Its timer remains disabled
 until a schedule is explicitly configured.
+
+The single-lead, input-only workflow uses `python3 -m job_search.review_host submit
+--workflow old-method-v1 --window-start START --window-end END`. See the
+[OLD METHOD runbook](operations/old-method-reviews.md) for status, resume, qualification,
+and the canonical local screening interface.

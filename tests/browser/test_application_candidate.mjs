@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {chromium} from '../../extension/node_modules/playwright-core/index.mjs';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
+const state=await mkdtemp(path.join(os.tmpdir(),'application-candidate-'));
+const executable=process.env.PYTHON || 'python3';
+const child=spawn(executable,['-m','tests.browser.application_candidate_fixture','--database',path.join(state,'candidate.db')],{cwd:root,stdio:['ignore','pipe','pipe']});
+let stderr='';child.stderr.on('data',data=>stderr+=data.toString());
+const fixture=await new Promise((resolve,reject)=>{
+  let stdout='';const timer=setTimeout(()=>reject(new Error('Candidate startup timed out: '+stderr)),20000);
+  child.once('exit',code=>{clearTimeout(timer);reject(new Error('Candidate exited '+code+': '+stderr));});
+  child.stdout.on('data',data=>{stdout+=data;const line=stdout.split('\n')[0];try {const value=JSON.parse(line);clearTimeout(timer);resolve(value);} catch {}});
+}).catch(error=>{child.kill('SIGTERM');throw error;});
+const browser=await chromium.launch({headless:true});
+const page=await browser.newPage({viewport:{width:1200,height:900}});
+await page.route('**/*',route=>route.request().url().startsWith(fixture.url)?route.continue():route.abort());
+const errors=[];page.on('pageerror',error=>errors.push(error.message));
+const output=path.join(root,'.cache/application-candidate-browser');await mkdir(output,{recursive:true});
+try {
+  await page.goto(fixture.url);
+  await page.locator('#applications button').first().click();
+  await page.getByRole('button',{name:'Accept change',exact:true}).click();
+  await page.locator('#tasks').getByText('Complete the design exercise',{exact:true}).waitFor();
+  await page.locator('#tasks').getByRole('button',{name:'Complete task',exact:true}).click();
+  await page.locator('#tasks').getByText('completed',{exact:true}).waitFor();
+  const text='Exact e\u0301\n  <script>unsafe()</script>';
+  await page.getByLabel('Add a note',{exact:true}).fill(text);
+  await page.getByRole('button',{name:'Save note',exact:true}).click();
+  await page.waitForFunction(expected=>document.querySelector('#notes').textContent.includes(expected),text);
+  assert.equal(await page.locator('#notes script').count(),0);
+  await page.getByRole('button',{name:'Stop pursuing',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm stop pursuing',exact:true}).click();
+  await page.getByRole('button',{name:'Reopen application',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Reopen application',exact:true}).click();
+  await page.locator('#stage').getByText('tracking',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Complete task',exact:true}).count(),0);
+  await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await page.screenshot({path:path.join(output,'mobile.png'),fullPage:true});
+  assert.deepEqual(errors,[]);
+  await writeFile(path.join(output,'results.json'),JSON.stringify({passed:true,checks:['review applies task','explicit completion','exact safe notes','previewed closure','reopen without resurrection','mobile layout'],errors},null,2));
+  console.log('ok (application candidate browser acceptance)');
+} finally {
+  await browser.close();child.kill('SIGTERM');await rm(state,{recursive:true,force:true});
+}

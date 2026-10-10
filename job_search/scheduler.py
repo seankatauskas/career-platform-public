@@ -222,6 +222,7 @@ def seed_default_schedules(
     db_path: Path,
     now: datetime,
     environment: Mapping[str, str],
+    *, excluded_tasks=(),
 ) -> dict[str, Any]:
     now_utc = as_utc(now)
     stamp = utc_stamp(now_utc)
@@ -233,7 +234,7 @@ def seed_default_schedules(
         raise ValueError("Outlook poll interval must be an integer from 1 to 1440")
     with connect(db_path) as con:
         from .activation import disabled_tasks
-        paused_tasks = set(disabled_tasks(con))
+        paused_tasks = set(disabled_tasks(con)) | set(excluded_tasks)
         # Retire the previous default without deleting its execution history.
         # Discovery and collection share the serialized core lane. Giving an
         # overdue discovery priority 50 puts it ahead of the 06:00/18:00 scans;

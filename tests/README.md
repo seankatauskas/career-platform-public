@@ -23,6 +23,9 @@ node tests/browser/test_ops_browser.mjs
 node tests/browser/test_review_queue.mjs
 node tests/browser/test_settings_views.mjs
 node tests/browser/test_review_quality.mjs
+node tests/browser/test_owner_dashboard.mjs
+node tests/browser/test_owner_application_view.mjs
+node tests/browser/test_owner_review_view.mjs
 ```
 
 `test_*.py` files are executable Python modules, discovered automatically by `scripts/check-system.py`. Add a new suite here and give it a `__main__` entry point that exits nonzero on failure. Import shared fixtures as `from tests.test_… import …`; use the repository root for source assets and `tests/fixtures/` for checked-in test data.
@@ -35,6 +38,9 @@ The runner writes a JSON receipt to `.cache/system-checks.json` by default. Scre
 
 ```bash
 python3 -m tests.test_job_search_aws_ops
+python3 -m tests.test_prepared_snapshots
+python3 -m tests.test_preparation_reference
+python3 -m tests.test_release_recovery
 python3 -m tests.test_release_coordinator
 python3 scripts/check-system.py --match release
 uv run --with cryptography --with pypdf python scripts/release-transition-acceptance.py --local
@@ -56,3 +62,20 @@ availability, and a temporary database. It exercises saved preferences, independ
 assessment slots, calibration, publication, grouped cards, and visible conditions.
 The corresponding browser check saves desktop/mobile screenshots under
 `.cache/review-quality/` and performs no external requests.
+
+For a bounded fictional SQLite/file snapshot profile, run
+`python3 -m tests.benchmark_deployment_phases --megabytes 128 --runs 1`.
+Use `--megabytes 11264 --runs 3 --output .cache/snapshot-profile.json` explicitly
+for the approximately 11 GiB fixture; allow at least 40 GiB of temporary space.
+This optional disk benchmark is not part of the fast suite and does not measure
+AWS downtime. The release-transition and Compose acceptance receipts also record
+fixture execution and service-health timings.
+
+`python3 -m tests.benchmark_host_preparation --megabytes 128 --output .cache/preparation.json`
+compares cold and reusable verification references, changed data, WAL and invalid
+metadata on fictional state. On a local Linux volume, `--evict` evicts only the
+fixture's file pages and records their residency with `mincore`. A reusable
+verification reference does not imply a warm OS page cache. The optional
+`--check-workers 2` is a benchmark-only hypothesis, not a production setting.
+See [host preparation evidence](../docs/operations/host-preparation-performance.md)
+for resource limits, measured cases and limitations. Never run it on production.

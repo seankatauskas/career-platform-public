@@ -22,7 +22,7 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
         inference_path = None
         inference_path_error = True
     issues: list[str] = []
-    local_mail_selected = bool(config.mail_classifier_config or os.environ.get("JOB_SEARCH_MAIL_CLASSIFIER_CONFIG"))
+    local_mail_selected = config.application_backend != "owners" and bool(config.mail_classifier_config or os.environ.get("JOB_SEARCH_MAIL_CLASSIFIER_CONFIG"))
     remote_mail_requested = (
         config.remote_mail_inference_enabled and not local_mail_selected
     )
@@ -102,10 +102,13 @@ def dependency_health(config: RuntimeConfigV1) -> dict[str, Any]:
 
     if remote_mail_requested:
         try:
-            from .runtime import _configured_remote_mail_profile
             from .inference.config import load_credential
-
-            mail_profile = _configured_remote_mail_profile(config, os.environ)
+            if config.application_backend == "owners":
+                from .application_production import configured_understanding_profile
+                mail_profile = configured_understanding_profile(config, os.environ)
+            else:
+                from .runtime import _configured_remote_mail_profile
+                mail_profile = _configured_remote_mail_profile(config, os.environ)
             load_credential(mail_profile.structured_generation.credential_file)
             remote_mail.update({"active": True, "status": "configuration_ready"})
         except (OSError, RuntimeError, ValueError):

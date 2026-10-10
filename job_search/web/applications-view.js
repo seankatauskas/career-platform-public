@@ -8,7 +8,7 @@ document.querySelector("#applications").innerHTML = `
       <div class="application-filters controls">
         <label>Search roles<input id="application-search" type="search" placeholder="Company or role"></label>
         <label id="application-phase-label">Stage<select id="application-phase"><option value="">All stages</option><option value="awaiting_confirmation">Awaiting confirmation</option><option value="active">Submitted</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="terminal">Closed</option></select></label>
-        <label class="application-review-filter"><input id="application-needs-review" type="checkbox">Needs review</label>
+        <label class="application-review-filter"><input id="application-needs-review" type="checkbox"><span id="application-review-filter-label">Needs review</span></label>
       </div>
       <div class="application-layout">
         <div id="application-list" class="empty">Loading applications…</div>
@@ -28,7 +28,7 @@ document.querySelector("#applications").innerHTML = `
 `;
 
 function applicationScopeRows() {
-  return state.applications.filter(app => app.current_phase !== "preparing" || app.ats === "external");
+  return state.applicationBackend === "owners" ? state.applications : state.applications.filter(app => app.current_phase !== "preparing" || app.ats === "external");
 }
 function applicationReviewNotice(item) {
   const link = node("a", "pending-note", `${item.title} · ${reviewStatus(item)}`);
@@ -40,6 +40,10 @@ function renderApplicationReviewNotices() {
   root.replaceChildren();
   const app = consoleState.workspace?.application;
   if (!app || app.application_id !== consoleState.applicationId) return;
+  if (state.applicationBackend === "owners") {
+    renderOwnerApplicationReviews(consoleState.workspace);
+    return;
+  }
   if (app.current_phase === "preparing") {
     root.append(node("p", "section-note", "Saved draft. This historical record is read-only; no submission has been recorded."));
     return;
@@ -60,11 +64,17 @@ function renderApplicationTable() {
   const query = document.querySelector("#application-search").value.trim().toLowerCase();
   const phase = document.querySelector("#application-phase").value;
   const needsReview = document.querySelector("#application-needs-review").checked;
+  const reviewIncomplete = state.applicationBackend === "owners" && ownerReviewHasMore();
+  document.querySelector("#application-review-filter-label").textContent = reviewIncomplete ? "Needs review (loaded items)" : "Needs review";
+  if (needsReview && reviewIncomplete) {
+    const coverage = node("p", "section-note", "This filter covers the review items loaded so far. More items are available in Review. ");
+    const link = node("a", "", "Open Review"); link.href = "#review"; coverage.append(link); root.append(coverage);
+  }
   const matches = scoped.filter(app => (!phase || app.current_phase === phase)
     && `${app.employer_snapshot} ${app.title_snapshot}`.toLowerCase().includes(query)
     && (!needsReview || reviewItemsForApplication(app.application_id).length));
   if (!matches.length) {
-    root.append(node("p", "empty", scoped.length ? "No applications match these filters." : "No submitted applications yet. Find your next role in Shortlist."));
+    root.append(node("p", "empty", scoped.length ? "No applications match these filters." : state.applicationBackend === 'owners' ? "No applications tracked yet. Find your next role in Shortlist." : "No submitted applications yet. Find your next role in Shortlist."));
     return;
   }
   const table = node("table", "data-table");
@@ -83,7 +93,7 @@ function renderApplicationTable() {
       applied.dateTime = app.submitted_at;
       applied.title = `Applied ${displayDate(app.submitted_at)}`;
       dates.append(applied);
-    } else if (app.current_phase !== "preparing") dates.append(node("span", "meta", "Applied date not recorded"));
+    } else dates.append(node("span", "applied-date", app.current_phase === "preparing" ? "Not applied yet" : "Applied date not recorded"));
     identity.append(dates);
     reviewItemsForApplication(app.application_id).forEach(item => identity.append(applicationReviewNotice(item)));
     const stage = node("td"); stage.append(node("span", `phase ${app.current_phase}`, applicationStatusLabel(app)));
@@ -109,9 +119,9 @@ async function refreshApplicationWorkspace() {
     const data = await api(`/api/v1/applications/${encodeURIComponent(id)}/workspace`);
     if (epoch !== consoleState.epoch || id !== consoleState.applicationId || consoleState.view !== "applications") return;
     consoleState.workspace = data;
-    renderLifecycleBriefing(data.briefing);
+    if (state.applicationBackend !== "owners") renderLifecycleBriefing(data.briefing);
     const app = data.application;
-    const savedDraft = app.current_phase === "preparing" && app.ats !== "external";
+    const savedDraft = state.applicationBackend !== "owners" && app.current_phase === "preparing" && app.ats !== "external";
     const back = document.querySelector(".workspace-back");
     back.href = savedDraft ? "#settings/stored-records" : "#applications";
     back.textContent = savedDraft ? "← Stored records" : "← All applications";
@@ -127,6 +137,7 @@ async function refreshApplicationWorkspace() {
       dates.append(document.createTextNode(" · "), applied);
     }
     document.querySelector("#workspace-posting-dates").replaceChildren(jobContext(app, false), dates);
+    for(const warning of app.submission_summary?.warnings || []) document.querySelector('#workspace-posting-dates').append(node('p','submission-warning',warning.message));
     const preview = jobPreviewButton(app, "Preview job description");
     preview.className = "quiet";
     const jobActions = document.querySelector("#workspace-job-preview");
@@ -150,7 +161,7 @@ async function refreshApplicationWorkspace() {
     [...data.events].sort((a, b) => Date.parse(timelineDate(b)) - Date.parse(timelineDate(a)) || b.event_seq - a.event_seq).forEach(event => {
       const entry = node("article", "timeline-event");
       const email = confirmationEmail(event);
-      const source = String(event.source_kind).replaceAll("_", " ");
+      const source = String(event.source_kind || "application record").replaceAll("_", " ");
       entry.append(node("strong", "", stageLabel(event.event_type)), node("p", "meta", `${displayDate(timelineDate(event))}${email ? " · Confirmation email" : ""}`));
       if (email) {
         const details = node("details");
@@ -172,10 +183,14 @@ async function refreshApplicationWorkspace() {
       const evidence=node("details", "timeline-event");
       evidence.append(node("summary", "", "Browser submission evidence"));
       const labels={attempted:"Submission attempted",request_sent:"Application request sent",request_completed:"Request completed; acceptance unconfirmed",site_acknowledged:"Website acknowledged submission",failed:"Submission failed"};
-      for(const item of data.browser_observations) evidence.append(node("p", "meta", `${displayDate(item.occurred_at)} · ${labels[item.kind] || item.kind}`));
+      for(const item of data.browser_observations) {
+        const kind = item.kind || item.source?.kind || item.activity;
+        evidence.append(node("p", "meta", `${displayDate(item.occurred_at)} · ${labels[kind] || stageLabel(kind)}`));
+      }
       history.append(evidence);
     }
-    renderLifecycleConversation(document.querySelector("#workspace-messages"), data);
+    if (state.applicationBackend === "owners") renderOwnerApplicationWorkspace(data);
+    else renderLifecycleConversation(document.querySelector("#workspace-messages"), data);
     renderApplicationDocuments(data.documents || []);
     renderApplicationAnswers(data.answer_snapshots || []);
   } catch (error) {
@@ -227,7 +242,13 @@ function renderApplicationAnswers(snapshots) {
   snapshots.forEach((saved,index)=>{
     const history=node('details','answer-snapshot'); history.open=index===0;
     const snapshot=saved.snapshot;
+    if (!snapshot || !Array.isArray(snapshot.fields)) {
+      history.append(node("summary", "", "Recorded answers"), node("pre", "answer-value", JSON.stringify(snapshot ?? saved, null, 2)));
+      if (saved.review_status === "unreviewed") history.append(node("p", "section-note", "Preserved browser capture; its link to a submitted application has not been reviewed."));
+      root.append(history); return;
+    }
     history.append(node('summary','',`${index===0?'Latest capture':'Earlier capture'} · ${displayDate(saved.captured_at)} · ${snapshot.fields.length} fields`));
+    if (saved.review_status === 'unreviewed') history.append(node('p', 'section-note', 'Preserved browser capture; its link to a submitted application has not been reviewed.'));
     if(snapshot.omitted_fields || snapshot.truncated_values) history.append(node('p','section-note',`Capture limits: ${snapshot.omitted_fields} fields omitted; ${snapshot.truncated_values} long values shortened.`));
     const priority=field=>['textarea','richtext'].includes(field.control)?0:field.control==='text'?1:2;
     for(const field of [...snapshot.fields].sort((a,b)=>priority(a)-priority(b))) {
@@ -235,7 +256,7 @@ function renderApplicationAnswers(snapshots) {
       if(field.section) answer.append(node('p','meta',field.section));
       answer.append(node('h5','',field.prompt));
       const value=typeof field.value==='boolean' ? (field.value?'Selected':'Not selected') : Array.isArray(field.value)?field.value.join('\n'):field.value;
-      answer.append(node('p','answer-value',value || 'Not answered'));
+      answer.append(node('p','answer-value',value === '' || value == null ? 'Not answered' : value));
       if(field.control==='file') answer.append(node('p','meta','File names recorded; file contents are not part of this snapshot.'));
       if(value && typeof field.value!=='boolean') {
         const copy=node('button','quiet','Copy answer'); copy.type='button';
@@ -248,9 +269,22 @@ function renderApplicationAnswers(snapshots) {
   });
 }
 
+let applicationListEpoch = 0;
 async function loadApplications() {
-  const result = await api("/api/v1/applications");
-  state.applications = result.applications || [];
+  if (state.applicationBackend === 'owners' && !document.querySelector('#application-phase option[value="preparing"]')) {
+    const option = node('option', '', 'Tracking'); option.value = 'preparing';
+    document.querySelector('#application-phase').append(option);
+  }
+  const epoch = ++applicationListEpoch;
+  const applications = [];
+  let cursor = null;
+  do {
+    const result = await api("/api/v1/applications" + (cursor ? "?cursor=" + encodeURIComponent(cursor) : ""));
+    if (epoch !== applicationListEpoch) return;
+    applications.push(...(result.applications || []));
+    cursor = result.next_cursor || null;
+  } while (cursor);
+  state.applications = applications;
   renderApplicationTable();
   await refreshApplicationWorkspace();
 }

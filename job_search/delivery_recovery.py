@@ -110,7 +110,14 @@ class NotificationRecoveryService:
             self.bridge.reconcile(notification_id, expected_attempts=expected_attempts,
                 expected_payload_sha256=fingerprint, outcome=outcome)
             status = {"delivered": "delivered", "not_delivered": "pending", "abandoned": "cancelled"}[outcome]
-            attempts = 0 if outcome == "not_delivered" else row["attempts"]
+            if status == "pending" and (row["application_id"] or row["topic"] in {"reminder.due", "attention.required", "mail.recruiter_update"}):
+                bound = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_owner_binding'").fetchone()
+                if bound and connection.execute("SELECT 1 FROM application_owner_binding WHERE singleton=1").fetchone():
+                    # Non-delivery proof resolves the old uncertainty, but does
+                    # not authorize a retired business workflow to send again.
+                    # A new owner reminder requires its own accepted record.
+                    status = "cancelled"
+            attempts = 0 if status == "pending" else row["attempts"]
             connection.execute(
                 "UPDATE notification_outbox SET status=?,attempts=?,available_at=?,lease_owner=NULL,"
                 "lease_token=NULL,lease_expires_at=NULL,last_error='',delivered_at=? WHERE notification_id=?",

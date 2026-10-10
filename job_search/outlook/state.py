@@ -251,12 +251,19 @@ class SQLiteOutlookState:
             )
 
     def pending_messages(
-        self, limit: int = 100, *, query_version: int = 1, received_since: str | None = None
+        self, limit: int = 100, *, query_version: int = 1, received_since: str | None = None,
+        account_id: str | None = None, folder_refs: Sequence[str] | None = None
     ) -> Sequence[Mapping[str, Any]]:
         if limit < 1 or limit > 500:
             raise ValueError("pending-message limit must be between 1 and 500")
         if not isinstance(query_version, int) or isinstance(query_version, bool) or query_version < 1:
             raise ValueError("query_version must be a positive integer")
+        if account_id is not None and (not isinstance(account_id, str) or not account_id):
+            raise ValueError("account_id must be nonempty")
+        if folder_refs is not None and (not folder_refs or len(folder_refs)>100 or any(not isinstance(f,str) or not f for f in folder_refs)):
+            raise ValueError("folders must be a bounded nonempty list")
+        folder_sql = " AND folder_ref IN ("+",".join("?" for _ in folder_refs)+")" if folder_refs is not None else ""
+        folder_params = tuple(folder_refs or ())
         if received_since:
             from ..contracts import parse_utc
             parse_utc(received_since)
@@ -266,16 +273,18 @@ class SQLiteOutlookState:
                 # delay new recruiting messages while the initial cursor catches up.
                 con.execute("UPDATE outlook_message_stage SET processing_status='ignored',updated_at=? "
                             "WHERE processing_status='pending' AND query_version=? "
-                            "AND (julianday(received_at) IS NULL OR julianday(received_at)<julianday(?))",
-                            (utc_now(),query_version,received_since))
+                            "AND (? IS NULL OR account_id=?) "
+                            "AND (julianday(received_at) IS NULL OR julianday(received_at)<julianday(?))"+folder_sql,
+                            (utc_now(),query_version,account_id,account_id,received_since,*folder_params))
             return [
                 dict(row)
                 for row in con.execute(
                     "SELECT * FROM outlook_message_stage WHERE removed=0 "
                     "AND processing_status='pending' AND query_version=? "
+                    "AND (? IS NULL OR account_id=?) "+folder_sql+" "
                     "ORDER BY received_at,immutable_message_id "
                     "LIMIT ?",
-                    (query_version, limit),
+                    (query_version, account_id, account_id, *folder_params,limit),
                 )
             ]
 
@@ -310,6 +319,16 @@ class SQLiteOutlookState:
             )
             if cursor.rowcount != 1:
                 raise ValueError("staged Outlook message was not found")
+
+    def mark_revision(self, account_id, folder_ref, immutable_message_id, *, query_version,
+                      modified_at, status="processed", error=""):
+        """Acknowledge exactly the staged version read before a network request."""
+        if status not in {"ignored", "processed", "failed"}:
+            raise ValueError("invalid message processing status")
+        with connect(self.db_path) as con:
+            changed = con.execute("UPDATE outlook_message_stage SET processing_status=?,last_error=?,updated_at=? WHERE account_id=? AND folder_ref=? AND query_version=? AND immutable_message_id=? AND modified_at IS ? AND processing_status='pending'",
+                (status, str(error)[:500], utc_now(), account_id, folder_ref, query_version, immutable_message_id, modified_at)).rowcount
+        return changed == 1
 
     def set_health(
         self,

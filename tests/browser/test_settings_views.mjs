@@ -17,6 +17,7 @@ const notice = text => {document.querySelector('#notice').textContent=text;};
 const key = () => crypto.randomUUID();
 const readableResumeReason = value => String(value||'Import unavailable').replaceAll('_',' ');
 const renderHeaderNotification = () => {};
+const applicationHref = id => "#applications/" + encodeURIComponent(id) + "/overview";
 const state = { careerProfile:null, careerContent:null, careerDirty:false, careerEpoch:0, applications:[{application_id:'earlier',current_phase:'preparing',title_snapshot:'Systems Engineer',employer_snapshot:'Example company'},{application_id:'submitted',current_phase:'submitted',title_snapshot:'Submitted job'}] };
 const calls=[];
 const content={identity:{name:'Example Candidate',email:'candidate@example.test'},summary:'Infrastructure engineer',education:[],experience:[{company:'Example company',role:'Engineer',bullets:[{text:'Built reliable systems'}]}],projects:[],skills:[{category:'Languages',items:[{text:'Python'}]}]};

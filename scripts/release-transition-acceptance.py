@@ -6,10 +6,12 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,6 +23,23 @@ def run(argv, **kwargs):
     if result.returncode:
         raise RuntimeError('command failed (exit ' + str(result.returncode) + '): ' + (result.stdout + result.stderr)[-6000:])
     return result.stdout.strip()
+
+
+def predecessor_build_args(dockerfile, revision):
+    # Keep the archived sources and base digest intact. Older Dockerfiles still
+    # name Docker Hub; use the same official-image mirror as current builds.
+    values = ['SOURCE_REVISION=' + revision]
+    base = re.search(r'^ARG PYTHON_BASE_IMAGE=(python:[A-Za-z0-9_.-]+@sha256:[a-f0-9]{64})$',
+                     dockerfile, re.MULTILINE)
+    if base:
+        values.append('PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/' + base[1])
+    return values
+
+
+def predecessor_dockerfile(source):
+    # Supplying a recipe on stdin also works on older BuildKit versions that
+    # cannot select the bundled frontend via BUILDKIT_SYNTAX=dockerfile.v0.
+    return source.removeprefix('# syntax=docker/dockerfile:1\n')
 
 
 def main():
@@ -40,6 +59,7 @@ def main():
     volume = 'career-transition-' + os.urandom(6).hex()
     previous_image = volume + ':previous'
     created_volume = False
+    started = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix='career-transition-') as directory:
             temp = Path(directory); previous = temp / 'previous'; previous.mkdir()
@@ -60,9 +80,16 @@ def main():
                 machine = run(['docker', 'image', 'inspect', '--format', '{{.Architecture}}', args.candidate_image])
                 report['candidate_image_id'] = run(['docker', 'image', 'inspect', '--format', '{{.Id}}', args.candidate_image])
                 report['phase'] = 'build_predecessor'
-                run(['docker', 'build', '--platform', 'linux/' + machine, '--build-arg', 'SOURCE_REVISION=' + policy['test_baseline_sha'], '--tag', previous_image, str(previous)])
+                old_dockerfile = (previous / 'Dockerfile').read_text()
+                build_args = predecessor_build_args(old_dockerfile, policy['test_baseline_sha'])
+                report['predecessor_build_args'] = build_args
+                report['predecessor_bundled_frontend'] = old_dockerfile != predecessor_dockerfile(old_dockerfile)
+                run(['docker', 'build', '--platform', 'linux/' + machine,
+                     *[part for value in build_args for part in ('--build-arg', value)],
+                     '--file', '-', '--tag', previous_image, str(previous)],
+                    input=predecessor_dockerfile(old_dockerfile))
                 run(['docker', 'volume', 'create', volume]); created_volume = True
-            def probe(action, old=False):
+            def run_probe(action, old=False):
                 if args.local:
                     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(previous if old else ROOT), str(ROOT)]))
                     argv = [sys.executable, str(ROOT / 'tests/fixtures/release_transition.py'), action, str(temp / 'state')]
@@ -72,6 +99,11 @@ def main():
                     '--env', 'PYTHONPATH=/opt/job-search:/fixtures', '--entrypoint', 'python',
                     previous_image if old else args.candidate_image,
                     '/fixtures/tests/fixtures/release_transition.py', action, '/state']))
+            def probe(action, old=False):
+                start = time.monotonic()
+                result = run_probe(action, old=old)
+                result['elapsed_seconds'] = round(time.monotonic() - start, 3)
+                return result
             report['phase'] = 'seed_predecessor'
             report['checks'].append(probe('seed', old=True))
             report['phase'] = 'upgrade_candidate'
@@ -82,6 +114,8 @@ def main():
                 report['rollback_passed'] = True
             else:
                 report['checks'].append({'action': 'rollback', 'status': 'unsupported', 'reason': 'predecessor lacks the same hardened compatibility policy'})
+            report['phase'] = 'application_owners'
+            report['checks'].append(probe('owners'))
             report['phase'] = 'complete'
             report['passed'] = True
     except Exception as error:
@@ -94,6 +128,7 @@ def main():
                 report.update(passed=False, cleanup_error=str(error))
         if not args.local:
             subprocess.run(['docker', 'image', 'rm', previous_image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        report['total_seconds'] = round(time.monotonic() - started, 3)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

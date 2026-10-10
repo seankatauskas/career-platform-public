@@ -12,7 +12,7 @@ from typing import Any
 
 from job_search.contracts import canonical_json, payload_sha256
 
-from .model import MAX_MODEL_OUTPUT_BYTES, LocalCommandClassifier, ModelExecutionError
+from .model import MAX_MODEL_OUTPUT_BYTES, LocalCommandClassifier, ModelExecutionError, ModelOutputError
 from .remote import _messages_fit
 from .understanding_contracts import SCHEMA_VERSION, analysis_schema, validate_analysis, validate_request
 
@@ -58,13 +58,13 @@ def _messages(request):
 
 def _parse(output: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(output, str) or not output or len(output.encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
-        raise ModelExecutionError("shared mail output is empty or exceeds its byte bound")
+        raise ModelOutputError("shared mail output is empty or exceeds its byte bound")
     try:
         result = json.loads(output)
     except (TypeError, ValueError) as exc:
-        raise ModelExecutionError("shared mail output is not JSON") from exc
+        raise ModelOutputError("shared mail output is not JSON") from exc
     if not isinstance(result, dict):
-        raise ModelExecutionError("shared mail output must be an object")
+        raise ModelOutputError("shared mail output must be an object")
     # Repair offset counting only when the exact quote occurs once in the named
     # source. The source text and quote are never changed or whitespace-normalized.
     sources = {item["source_id"]: item["text"] for item in request["sources"]}
@@ -144,7 +144,7 @@ class RemoteMailUnderstandingAnalyzer:
             raise ModelExecutionError("shared mail request was not prepared for this analyzer")
         result = self._provider.generate(_messages(supplied), json_schema=_schema(supplied), schema_name=SCHEMA_VERSION, max_output_tokens=MAX_OUTPUT_TOKENS, temperature=0.0)
         if result.usage.get('finish_reason') not in (None, 'stop', 'end_turn'):
-            raise ModelExecutionError('shared mail provider did not complete its analysis output')
+            raise ModelOutputError('shared mail provider did not complete its analysis output')
         return _parse(result.text, supplied)
 
 

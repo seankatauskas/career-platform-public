@@ -57,8 +57,9 @@ def validate_publication(value: Mapping[str, Any]) -> dict:
 
 
 class CuratedShortlists:
-    def __init__(self, db_path, catalog):
+    def __init__(self, db_path, catalog, *, application_gateway=None):
         self.db_path, self.catalog = db_path, catalog
+        self.application_gateway = application_gateway
 
     def publish(self, supplied: Mapping[str, Any]) -> dict:
         request = validate_publication(supplied)
@@ -110,7 +111,8 @@ class CuratedShortlists:
             for item in items:
                 job = json.loads(item['snapshot_json'])
                 job.update(rank=item['rank'], explanation=item['explanation'], curated_list_id=list_id, policy_id=POLICY)
-                application = con.execute("SELECT application_id,current_phase FROM applications WHERE ats=? AND job_id=?", (item['ats'], item['job_id'])).fetchone()
+                application = (self.application_gateway.lookup_job(item['ats'], item['job_id']) if self.application_gateway is not None else
+                    con.execute("SELECT application_id,current_phase FROM applications WHERE ats=? AND job_id=?", (item['ats'], item['job_id'])).fetchone())
                 job['application_id'] = application['application_id'] if application else None
                 job['application_phase'] = application['current_phase'] if application else None
                 jobs.append(job)

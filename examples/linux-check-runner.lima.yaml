@@ -1,0 +1,54 @@
+# Dedicated Linux acceptance runner on an Apple Silicon Mac (Lima 2.2+).
+# Source, fixture state and Docker storage stay on the guest's Linux disk.
+minimumLimaVersion: 2.2.0
+vmType: vz
+arch: aarch64
+cpus: 6
+memory: 16GiB
+disk: 100GiB
+images:
+  - location: https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc
+mounts: []
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
+containerd:
+  system: false
+  user: false
+portForwards:
+  - guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get -o Acquire::Retries=3 update
+      apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        ca-certificates curl git jq unzip build-essential \
+        python3 python3-venv python3-pip libicu74 libssl3 zlib1g \
+        docker.io docker-buildx docker-compose-v2
+      # Ubuntu's gh 2.45 lacks `gh api --slurp`, used by release status.
+      gh_package=$(mktemp /tmp/career-gh.XXXXXXXX.deb)
+      trap 'rm -f "$gh_package"' EXIT
+      curl --fail --silent --show-error --location --retry 3 \
+        https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_arm64.deb \
+        --output "$gh_package"
+      printf '%s  %s\n' 0ba7a76739c865d82ebde24667d875d9b8caa55db47c7597c24accdd4defd2bb "$gh_package" | sha256sum --check
+      dpkg -i "$gh_package"
+      usermod -aG docker '{{.User}}'
+      systemctl enable --now docker
+probes:
+  - script: |
+      #!/bin/bash
+      set -euo pipefail
+      sudo docker info >/dev/null
+      docker compose version
+      python3 -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+      test -r /proc/sys/fs/binfmt_misc/rosetta

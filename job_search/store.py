@@ -3013,6 +3013,24 @@ class LedgerStore:
     def list_attention_items(self) -> Sequence[Mapping[str, Any]]:
         with connect(self.db_path) as con:
             rows: List[Mapping[str, Any]] = []
+            for task in con.execute(
+                "SELECT t.*,a.employer_snapshot,a.title_snapshot,e.subject,e.sender "
+                "FROM lifecycle_tasks t JOIN applications a USING(application_id) "
+                "LEFT JOIN mail_evidence e USING(evidence_id) "
+                "WHERE t.status='open' AND t.owner='applicant' "
+                "AND t.kind IN ('reply','send_availability') AND a.current_phase<>'terminal' "
+                "ORDER BY t.created_at,t.task_id"
+            ):
+                rows.append({
+                    'kind': 'reply_request', 'id': task['task_id'],
+                    'application_id': task['application_id'], 'status': 'review',
+                    'detail': task['note'], 'task_kind': task['kind'],
+                    'revision_no': task['revision_no'], 'evidence_id': task['evidence_id'],
+                    'due_at': task['due_at'], 'snoozed_until': task['snoozed_until'],
+                    'created_at': task['source_time'] or task['created_at'],
+                    'employer': task['employer_snapshot'], 'title': task['title_snapshot'],
+                    'subject': task['subject'], 'sender': task['sender'],
+                })
             from .mail.understanding_store import available, briefing_analyses
             understood = available(con)
             projected = {(r['kind'],r['target_id']) for r in con.execute('SELECT kind,target_id FROM mail_understanding_projections')} if understood else set()
@@ -3094,6 +3112,16 @@ class LedgerStore:
                         "created_at": action["created_at"],
                     }
                 )
+            for review in con.execute(
+                "SELECT r.*,e.subject,e.sender FROM mail_classification_reviews r "
+                "JOIN mail_evidence e USING(evidence_id) WHERE r.status='pending' "
+                "AND NOT EXISTS(SELECT 1 FROM mail_understanding_ownership o WHERE o.evidence_id=r.evidence_id) "
+                "ORDER BY r.created_at,r.review_id"
+            ):
+                rows.append(dict(kind='mail_classification_review', id=review['review_id'],
+                    application_id=None, status='review', detail='Classification needs review',
+                    subject=review['subject'], sender=review['sender'], created_at=review['created_at'],
+                    reason_code=review['reason_code']))
             for message in con.execute(
                 "SELECT account_id,folder_ref,query_version,immutable_message_id,subject,last_error,updated_at,web_link,removed "
                 "FROM outlook_message_stage WHERE processing_status='failed' "

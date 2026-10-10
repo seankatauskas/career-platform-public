@@ -16,7 +16,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .application_documents import application_documents, application_document_content
 from .browser_tracking import BrowserTracking
@@ -187,14 +187,19 @@ class DashboardController:
         automation_config: Any = None,
         cost_snapshot_path: Optional[Path] = None,
         review_classifier_factory: Optional[Callable[[], Any]] = None,
+        application_gateway: Optional[Any] = None,
     ) -> None:
         from .curated import CuratedShortlists
-        self.curated = CuratedShortlists(ledger.store.db_path, jobs)
+        self.application_gateway = application_gateway
+        self.applications = application_gateway or ledger
+        self.curated = CuratedShortlists(ledger.store.db_path, jobs, application_gateway=application_gateway)
         self.ledger = ledger
         self.preferences = preferences
         self.settings = settings
         self.jobs = jobs
         self.resume_lab = resume_lab
+        if resume_lab is not None and application_gateway is not None:
+            resume_lab.application_gateway = application_gateway
         self._readiness = readiness
         self.notification_recovery = notification_recovery
         self.mail_source = mail_source
@@ -207,16 +212,19 @@ class DashboardController:
         from .job_reviews.context import profile_context
         from .scanning import scan_status
         self.job_reviews = JobReviews(ledger.store.db_path, jobs, lambda: profile_context(self.resume_lab),
-            collection_provider=(lambda: scan_status(automation_config)) if automation_config else None)
+            collection_provider=(lambda: scan_status(automation_config)) if automation_config else None,
+            application_gateway=application_gateway)
 
         self.autofill = autofill or AutofillBroker(
-            ledger,
+            self.applications,
             AutofillProfile.empty(),
             submission_context=lambda application_id, decision: resume_submission_snapshot(
                 self.resume_lab, application_id, decision
             ),
         )
-        self.browser_tracking = BrowserTracking(ledger, jobs, self.autofill, resume_lab)
+        if application_gateway is not None:
+            self.autofill._ledger = application_gateway
+        self.browser_tracking = BrowserTracking(ledger, jobs, self.autofill, resume_lab, application_gateway=application_gateway)
         self._shortlist_lock = threading.Lock()
         self._shortlists: Dict[str, Mapping[str, Any]] = {}
 
@@ -229,7 +237,7 @@ class DashboardController:
                 for row, identity in zip(rows, identities)]
 
     def application_job_history(self, application_id: str, before: int | None = None) -> Mapping[str, Any]:
-        app = self.ledger.get_application_timeline(application_id)['application']
+        app = self.applications.get_application_timeline(application_id)['application']
         if not hasattr(self.jobs, 'posting_history'):
             return {'available': False, 'events': [], 'next_before': None,
                     'history_note': 'Posting history is unavailable for this catalog.'}
@@ -245,7 +253,7 @@ class DashboardController:
             return ' '.join(unicodedata.normalize('NFKC', str(value or '')).casefold().split())
 
         latest = {}
-        for order, application in enumerate(self.ledger.recent_company_applications()):
+        for order, application in enumerate(self.applications.recent_company_applications()):
             metadata = {key: application[key] for key in ('application_id', 'applied_at', 'window_days')}
             employer = company_key(application['employer_snapshot'])
             slug = company_key(application['company_slug_snapshot'])
@@ -267,6 +275,8 @@ class DashboardController:
         return enriched
 
     def conversation_message(self, application_id: str, observation_id: str) -> Mapping[str, Any]:
+        if self.application_gateway is not None:
+            return self.application_gateway.http_query("/api/v1/applications/" + application_id + "/conversation/" + observation_id, {})[1]
         observation = self.ledger.lifecycle.get_mail_observation(observation_id)
         if application_id not in observation['application_ids']:
             raise ContractError('message is not linked to this application')
@@ -282,7 +292,14 @@ class DashboardController:
         return result
 
     def application_workspace(self, application_id: str) -> Mapping[str, Any]:
-        timeline = self.ledger.get_application_timeline(application_id)
+        if self.application_gateway is not None:
+            workspace = self.application_gateway.application_workspace(application_id)
+            return {**workspace,
+                    "application": self.with_posting_dates([workspace["application"]])[0],
+                    "documents": application_documents(self.applications, self.resume_lab, application_id),
+                    "resume": self.resume_lab.get_selection(application_id) if self.resume_lab else {"available": False},
+                    "review_url": "/#review?application=" + application_id}
+        timeline = self.applications.get_application_timeline(application_id)
         messages = []
         for evidence in self.ledger.list_application_mail(application_id):
             message = {name: evidence[name] for name in ("evidence_id", "sender", "received_at", "excerpt")}
@@ -371,7 +388,7 @@ class DashboardController:
             options,
             idempotency_key=idempotency_key,
             actor="dashboard",
-            excluded_job_keys=self.ledger.application_keys(),
+            excluded_job_keys=self.applications.application_keys(),
         )
         result = {**result, 'recommendations': self.with_recent_company_applications(
             self.with_posting_dates(result.get('recommendations', [])))}
@@ -424,7 +441,7 @@ class DashboardController:
                 raise ContractError('this posting is closed')
         snapshot = JobSnapshot(ats=ats, job_id=job_id, family_id=job.get('family_id') or '',
             title=job['title'], employer=job['company'], company_slug=job['company'], job_url=job['jobUrl'])
-        started = self.ledger.start_application(snapshot,
+        started = self.applications.start_application(snapshot,
             RecommendationProvenance(session_id=list_id, policy_id='curated', rank=job['rank']),
             MutationContext(key, 'user', 'dashboard', source_ref=list_id))
         return self._prepare_started_application(started, key)
@@ -518,7 +535,7 @@ class DashboardController:
                 else None
             ),
         )
-        return self.ledger.start_application(
+        return self.applications.start_application(
             snapshot,
             provenance,
             MutationContext(
@@ -537,7 +554,7 @@ class DashboardController:
     def _application(self, application_id: str) -> Mapping[str, Any]:
         validate_identifier(application_id, "application_id")
         try:
-            value = self.ledger.get_application_timeline(application_id)
+            value = self.applications.get_application_timeline(application_id)
         except ContractError as exc:
             if str(exc) == "application not found":
                 raise _DashboardNotFound("application was not found") from exc
@@ -777,7 +794,7 @@ class DashboardController:
             raise ContractError(
                 "resume_decision must be selected or not_tracked"
             )
-        return self.ledger.record_submission(
+        return self.applications.record_submission(
             application_id,
             occurred_at,
             MutationContext(
@@ -831,7 +848,7 @@ class DashboardController:
                     "completed_at",
                 )
             }
-            for item in self.ledger.list_reminders(limit=limit)
+            for item in self.applications.list_reminders(limit=limit)
         ]
 
     def readiness_view(self) -> Mapping[str, Any]:
@@ -884,7 +901,7 @@ class DashboardController:
     def ops_view(self) -> Mapping[str, Any]:
         from .activation import controls
         automation = controls(self.ledger.store.db_path) if self.automation_config else []
-        health = self.ledger.system_health()
+        health = self.applications.system_health()
         delivery = self.notification_recovery.list_pending() if self.notification_recovery else {
             "items": [], "bridge_available": False, "reason_code": "not_configured", "truncated": False
         }
@@ -926,6 +943,8 @@ class DashboardController:
 
 
 STATIC_ROUTES = {
+    "/assets/owner-application-view.js": ("owner-application-view.js", "text/javascript; charset=utf-8"),
+    "/assets/owner-review-view.js": ("owner-review-view.js", "text/javascript; charset=utf-8"),
     "/assets/lifecycle-view.js": ("lifecycle-view.js", "text/javascript; charset=utf-8"),
     "/assets/applications-view.js": ("applications-view.js", "text/javascript; charset=utf-8"),
     "/assets/applications-view.css": ("applications-view.css", "text/css; charset=utf-8"),
@@ -1217,7 +1236,11 @@ def make_handler(
         def _handle_exception(
             self, exc: Exception, session: _Session, new_session: bool
         ) -> None:
-            if isinstance(exc, _RequestTooLarge):
+            from .commands import DomainError
+            if isinstance(exc, DomainError):
+                status = 403 if exc.code == "not_authorized" else 404 if exc.code == "not_found" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved", "needs_reconciliation"} else 400
+                self._json({"error": exc.code, "message": str(exc)}, status=status, session=session, new_session=new_session, exact_text=True)
+            elif isinstance(exc, _RequestTooLarge):
                 self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large", session, new_session)
             elif isinstance(exc, ConflictError):
                 self._error(HTTPStatus.CONFLICT, str(exc), session, new_session)
@@ -1240,7 +1263,11 @@ def make_handler(
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal server error", session, new_session)
 
         def _handle_extension_exception(self, exc: Exception) -> None:
-            if isinstance(exc, _RequestTooLarge):
+            from .commands import DomainError
+            if isinstance(exc, DomainError):
+                status = 403 if exc.code == "not_authorized" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved"} else 400
+                self._json({"error": exc.code, "message": str(exc)}, status=status, exact_text=True)
+            elif isinstance(exc, _RequestTooLarge):
                 self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
             elif isinstance(exc, ConflictError):
                 self._error(HTTPStatus.CONFLICT, str(exc))
@@ -1291,6 +1318,19 @@ def make_handler(
             parsed_url = urlsplit(self.path)
             path = parsed_url.path
             try:
+                if controller.application_gateway is not None:
+                    if path == "/applications":
+                        application_id = parse_qs(parsed_url.query).get("application_id", [""])[0]
+                        target = "/#applications" + ("/" + quote(application_id, safe="") + "/overview" if application_id else "")
+                        self._send(HTTPStatus.FOUND, b"", "text/plain; charset=utf-8", session, new_session,
+                                   extra_headers={"Location": target})
+                        return
+                    handled, result = controller.application_gateway.http_query(path, parse_qs(parsed_url.query))
+                    if handled:
+                        if path == "/api/v1/applications":
+                            result = {**result, "applications": controller.with_posting_dates(result["applications"])}
+                        self._json(result, session=session, new_session=new_session, exact_text=True)
+                        return
                 if path in STATIC_ROUTES:
                     filename, content_type = STATIC_ROUTES[path]
                     self._send(
@@ -1303,7 +1343,8 @@ def make_handler(
                     return
                 if path == "/api/v1/session":
                     self._json(
-                        {"csrf_token": session.csrf_token, "api_version": "v1", "demo_mode": controller.demo_mode},
+                        {"csrf_token": session.csrf_token, "api_version": "v1", "demo_mode": controller.demo_mode,
+                         "application_backend": "owners" if controller.application_gateway is not None else "legacy"},
                         session=session,
                         new_session=new_session,
                     )
@@ -1404,7 +1445,7 @@ def make_handler(
                     query = parse_qs(parsed_url.query, keep_blank_values=True)
                     if set(query) - {"download"} or len(query.get("download", [])) > 1 or query.get("download", ["0"])[0] not in {"0", "1"}:
                         raise ContractError("invalid document query parameter")
-                    artifact = application_document_content(controller.ledger, controller.resume_lab, document_match.group(1))
+                    artifact = application_document_content(controller.applications, controller.resume_lab, document_match.group(1))
                     if not artifact.content or len(artifact.content) > 20 * 1024 * 1024:
                         raise ContractError("resume artifact content is invalid")
                     filename = re.sub(r"[^A-Za-z0-9._-]+", "-", artifact.filename).strip(".-") or "recorded-resume.pdf"
@@ -1622,6 +1663,11 @@ def make_handler(
                     return
                 try:
                     body = self._read_json()
+                    if controller.application_gateway is not None and path in {"/api/v1/extension/observations", "/api/v1/extension/answers"}:
+                        from .application_extension import PairedExtensionAdapter
+                        adapter = PairedExtensionAdapter(controller.application_gateway.runtime, controller.browser_tracking.authenticate, self._session_audience)
+                        self._json(adapter.handle(path, self.headers, body), exact_text=True)
+                        return
                     if path.startswith("/api/v1/extension/"):
                         tracker = controller.browser_tracking
                         if path == "/api/v1/extension/enroll":
@@ -1698,6 +1744,12 @@ def make_handler(
                     self._json(result, status=HTTPStatus.ACCEPTED, session=session, new_session=new_session)
                     return
                 body = self._read_json()
+                if controller.application_gateway is not None and (path.startswith("/api/v1/application-commands/") or controller.application_gateway.legacy_domain_route(path)):
+                    handled, result = controller.application_gateway.http_command(path,
+                        {k: v for k, v in body.items() if k != "idempotency_key"}, self._idempotency(body), "dashboard:" + session.session_id)
+                    if handled:
+                        self._json(result, session=session, new_session=new_session, exact_text=True)
+                        return
                 if path in ('/api/v1/mail-review/preview', '/api/v1/mail-review/resolve'):
                     from .mail.review import MailReviewService
                     review = MailReviewService(controller.ledger)

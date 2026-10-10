@@ -6,6 +6,7 @@ FIELDS = {
     'follow-up/configure': ({'application_id','after_days'}, {'application_id','after_days'}),
     'tasks/create': ({'application_id','values'}, {'application_id','values'}),
     'tasks/transition': ({'task_id','operation','values'}, {'task_id','operation'}),
+    'tasks/prepare-reply': ({'task_id','expected_revision'}, {'task_id','expected_revision'}),
     'details/record': ({'application_id','kind','values','detail_id'}, {'application_id','kind','values'}),
     'corrections/decide': ({'proposal_id','decision'}, {'proposal_id','decision'}),
     'interviews/import': ({'schedule_id'}, {'schedule_id'}),
@@ -35,6 +36,8 @@ def mutate(service, operation, body, context):
         return service.create_task(values['application_id'], values['values'], context)
     if operation == 'tasks/transition':
         return service.transition_task(values['task_id'], values['operation'], values.get('values',{}), context)
+    if operation == 'tasks/prepare-reply':
+        return service.prepare_task_reply(values['task_id'], values['expected_revision'], context)
     if operation == 'details/record':
         return service.record_detail(values['application_id'], values['kind'], values['values'], context, detail_id=values.get('detail_id'))
     if operation == 'corrections/decide':

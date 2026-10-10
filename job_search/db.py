@@ -1119,6 +1119,9 @@ from .job_reviews.routing_schema import SCHEMA as MIGRATION_022
 from .job_reviews.adjudication_schema import SCHEMA as MIGRATION_023
 
 
+from .mail.classification_review import SCHEMA as MIGRATION_024
+
+
 MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (1, "initial_job_search_ledger", MIGRATION_001),
     (2, "outlook_sync_state", MIGRATION_002),
@@ -1143,6 +1146,7 @@ MIGRATIONS: Tuple[Tuple[int, str, str], ...] = (
     (21, "review_quality_and_context", MIGRATION_021),
     (22, "conservative_review_routing", MIGRATION_022),
     (23, "basis_bound_review_adjudication", MIGRATION_023),
+    (24, "manual_mail_classification_review", MIGRATION_024),
 )
 
 
@@ -1152,11 +1156,10 @@ def _checksum(sql: str) -> str:
 
 def _ensure_private_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path, 0o600)
+    if path.exists():
+        # Inspect the database format before changing an existing file, including
+        # its permissions. Candidate databases belong to a different writer.
         return
-    except FileNotFoundError:
-        pass
     # Closing any descriptor for an open SQLite inode drops this process's
     # POSIX locks, including locks held by other connections. Publish a closed,
     # private file atomically instead of opening/closing the live database.
@@ -1169,7 +1172,11 @@ def _ensure_private_file(path: Path) -> None:
             pass  # Another process or thread already created the database.
     finally:
         os.unlink(temporary)
-    os.chmod(path, 0o600)
+
+
+def _reject_application_candidate(con: sqlite3.Connection) -> None:
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('command_schema_versions','command_installation') LIMIT 1").fetchone():
+        raise RuntimeError("The application candidate database cannot be opened by legacy ledger writers")
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -1178,6 +1185,12 @@ def connect(path: Path) -> sqlite3.Connection:
     _ensure_private_file(path)
     con = sqlite3.connect(str(path), timeout=10)
     con.row_factory = sqlite3.Row
+    try:
+        _reject_application_candidate(con)
+        os.chmod(path, 0o600)
+    except Exception:
+        con.close()
+        raise
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 10000")
     deadline = time.monotonic() + 10
@@ -1236,6 +1249,9 @@ def migrate(path: Path, applied_at: str) -> None:
             # start together, and a stale pre-lock snapshot would make the loser
             # replay ALTER TABLE statements which the winner just committed.
             con.execute("BEGIN IMMEDIATE")
+            # Recheck after taking the schema-migration lock: another initializer
+            # may have claimed a previously empty file since connect's inspection.
+            _reject_application_candidate(con)
             applied = {int(row["version"]): row for row in _applied_migrations(con)}
             if applied and max(applied) > MIGRATIONS[-1][0]:
                 raise RuntimeError("job-search database schema is newer than this code")
@@ -1262,6 +1278,12 @@ def migrate(path: Path, applied_at: str) -> None:
             # has already shipped. Its own PRAGMA must not regress schema metadata.
             highest_applied = max(applied)
             con.execute(f"PRAGMA user_version = {highest_applied}")
+            # Recovery's additive audit records must remain readable and writable
+            # beside predecessor core tables without advancing their schema version.
+            from .recovery import install_owner_resolution_schema
+            install_owner_resolution_schema(con)
+            from .inference.usage import install_allowance_schema
+            install_allowance_schema(con)
             con.commit()
         except Exception:
             if con.in_transaction:

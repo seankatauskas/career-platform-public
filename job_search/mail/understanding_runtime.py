@@ -9,7 +9,9 @@ from ..contracts import ContractError, ConflictError, MutationContext, canonical
 from ..db import connect
 from ..inference.usage import InvocationReconciliationRequired, UsagePolicy, current_scope, invocation_scope
 from ..inference.contracts import InferenceResponseRejected
-from .model import ModelExecutionError
+from .model import ModelExecutionError, ModelOutputError
+from .classification_review import assert_reviewable_outcome
+from .understanding_contracts import AnalysisValidationError, validate_analysis
 from .understanding_evaluation import load_report
 
 
@@ -124,7 +126,14 @@ class MailUnderstandingRuntime:
                     try:
                         try:
                             raw = self.analyzer.analyze(request)
-                        except (ModelExecutionError, ContractError, InferenceResponseRejected) as exc:
+                            validate_analysis(raw, request)
+                        except (ModelOutputError, AnalysisValidationError, InferenceResponseRejected):
+                            assert_reviewable_outcome()
+                            raw = dict(relevance='uncertain', events=[], actions=[], temporal_facts=[],
+                                uncertainties=[dict(reason='classification_output_rejected',
+                                    description='The AI answer could not be verified. Review the email manually; no application update was inferred.',
+                                    finding_type='message', finding_index=None)])
+                        except (ModelExecutionError, ContractError) as exc:
                             # Validation rejected a received answer. This is a known
                             # local failure, unlike losing a valid answer before save.
                             attempt['output_rejected'] = exc

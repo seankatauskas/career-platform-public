@@ -66,7 +66,7 @@ class RuntimeConfig:
             raise ValueError('invalid screening runtime scope')
         if self.purpose == 'screening' and (not self.screening_enabled or not self.preload_enabled):
             raise ValueError('screening requires enabled capability and complete preload')
-        if self.memory not in ('512m', '1g', '2g') or self.cpus not in ('0.5', '1', '2'):
+        if self.memory not in ('512m', '1g', '2g', '3g') or self.cpus not in ('0.5', '1', '2'):
             raise ValueError('invalid review resource bounds')
 
 
@@ -302,7 +302,7 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
-def bridge_server(path):
+def bridge_server(path, *, native_codex=False):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -315,7 +315,12 @@ def bridge_server(path):
                     self.send_error(400)
                     return
                 connection = UnixHTTPConnection(path)
-                connection.request('POST', '/v1/responses', self.rfile.read(length), {'Content-Type': 'application/json'})
+                if native_codex:
+                    from .native_client import forwarding_headers
+                    headers = forwarding_headers(self.headers)
+                else:
+                    headers = {}
+                connection.request('POST', '/v1/responses', self.rfile.read(length), {'Content-Type': 'application/json', **headers})
                 response = connection.getresponse()
                 data = response.read(16 * 1024 * 1024 + 1)
                 if len(data) > 16 * 1024 * 1024:
@@ -323,6 +328,9 @@ def bridge_server(path):
                 self.send_response(response.status)
                 self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
                 self.send_header('Content-Length', str(len(data)))
+                if native_codex:
+                    for key, value in forwarding_headers(response.headers, response=True).items():
+                        self.send_header(key, value)
                 self.end_headers()
                 self.wfile.write(data)
             except (OSError, ValueError, http.client.HTTPException):

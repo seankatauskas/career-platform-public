@@ -1,10 +1,12 @@
 """Fictional persisted state exercised by both release images, with no network."""
 from datetime import datetime, timezone
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
+import types
 
 from job_search.collection import boards
 from job_search.collection.dedupe import prepare_families
@@ -99,6 +101,28 @@ def install_ranking_trackers(config):
     ensure_tracking(config.preference_db, 'scores')
 
 
+def install_owner_resolution_receipt(config):
+    """The predecessor must preserve a nonempty candidate-owned audit table."""
+    from job_search.recovery import RecoveryService
+    from job_search.db import connect
+    reference = {'owner':'correspondence','kind':'understand_message','key':'fixture-revision',
+                 'work_id':'fixture-owner-work'}
+    enqueue_work(config.application_db, 'transition-owner-recovery', 'applications.mail.understand',
+                 status='dead', attempts=1)
+    with connect(config.application_db) as con:
+        con.execute('UPDATE work_items SET payload_json=? WHERE work_id=?',
+                    (json.dumps(reference), 'transition-owner-recovery'))
+    proof = {'owner_work_id':reference['work_id'],'owner':reference['owner'],'kind':reference['kind'],
+             'key':reference['key'],'reason':'owner_resolved','source_id':'fixture-source',
+             'revision':'fixture-revision','issue_id':'fixture-issue','issue_version':3,'analysis_id':'fixture-analysis'}
+    result = RecoveryService(config.application_db).resolve_owner_mail_work('transition-owner-recovery',
+        expected_revision=0, expected_payload=reference, proof=proof, now='2026-10-10T12:00:00Z')
+    assert result['status'] == 'cancelled'
+    with sqlite3.connect(config.application_db) as con:
+        assert con.execute('SELECT COUNT(*) FROM work_owner_resolutions').fetchone()[0] == 1
+        assert con.execute('PRAGMA user_version').fetchone()[0] == 24
+
+
 def verify_predecessor_ranking_writes(config):
     """Execute the old collector and its score SQL shape with new triggers installed."""
     def tracker(path, kind, scope):
@@ -122,9 +146,68 @@ def verify_predecessor_ranking_writes(config):
     assert scores_before[0] == scores_after[0] and scores_after[1] > scores_before[1]
 
 
+def verify_application_owners(root):
+    from dataclasses import replace
+    from unittest import TestResult
+    from tests.test_redesign_commands import CommandsTest
+    from job_search.application_migration import convert_snapshot, CANDIDATE_NAME
+    from job_search.application_runtime import ApplicationRuntime
+    from job_search.application_installation import freeze_legacy, LEGACY_TASKS
+    from job_search.runtime import build_runtime
+    from job_search.commands import CommandContext, Principal
+    # Exercise the candidate image's SQLite build; host-only tests do not expose
+    # every build's lazy virtual-table initialization under the owner authorizer.
+    result=TestResult()
+    CommandsTest('test_json_table_reads_work_without_relaxing_owner_or_schema_authorization').run(result)
+    assert result.testsRun == 1 and result.wasSuccessful() and not result.skipped, (result.errors,result.failures)
+    config,ledger,_=initialize(root)
+    destination=root/'data'/'application-owners'
+    report=convert_snapshot(config.application_db,destination)
+    assert report['ready_for_review'], report['issues']
+    owner=ApplicationRuntime(destination/CANDIDATE_NAME)
+    freeze_legacy(config.application_db,owner,operator='transition-test',report=report)
+    selected=replace(config,application_backend='owners',application_owner_db=owner.executor.path)
+    production=build_runtime(selected,base_environment={})
+    assert not (set(production.worker.task_handlers)&LEGACY_TASKS)
+    apps=owner.queries.list_applications()['items']
+    assert apps
+    app_id=apps[0]['id']
+    context=CommandContext(Principal('transition-human','human',frozenset({'*'})),'transition-note')
+    owner.command(context,'add_note',{'application_id':app_id,'text':'After owner transition'})
+    try:
+        ledger.record_submission(app_id,'2026-10-09T00:00:00Z',MutationContext('forbidden-old','user','transition'))
+    except sqlite3.DatabaseError:
+        pass
+    else:
+        raise AssertionError('predecessor application write was not fenced')
+    owner.executor.set_activation(paused=False,expected_revision=0,operator='fixture',reason='restore test')
+    stage=root/'restored'
+    # Recovery runs on the host in production. Load only that package from the
+    # reviewed fixture mount, without extending the image's job_search package
+    # and accidentally hiding missing runtime modules in the container.
+    host_package=types.ModuleType('_release_host')
+    host_package.__path__=[str(Path(__file__).resolve().parents[2]/'job_search')]
+    sys.modules['_release_host']=host_package
+    host_ops=importlib.import_module('_release_host.aws_ops')
+    host_ops.copy_snapshot(destination,stage/'state'/'application-owners')
+    host_ops.prepare_application_restore(stage)
+    restored=ApplicationRuntime(stage/'state'/'application-owners'/CANDIDATE_NAME)
+    assert restored.executor.activation_status()['paused']
+    assert restored.executor.restore_status()['required']
+    assert restored.queries.workspace(app_id)['records']['notes']['items']
+    assert (destination/'predecessor.sqlite').read_bytes()==(stage/'state'/'application-owners'/'predecessor.sqlite').read_bytes()
+    return {'action':'application_owners','passed':True,'legacy_writes_fenced':True,
+            'conversion_blockers':len(report['issues']),'restore_paused':True,
+            'restore_review_required':True,'source_archive_preserved':True,
+            'json_table_authorization_verified':True}
+
+
 def main():
     action, path = sys.argv[1:]
     root = Path(path)
+    if action == 'owners':
+        print(json.dumps(verify_application_owners(root)))
+        return
     if action == 'seed':
         data = root / 'data'; data.mkdir(parents=True)
         config = {'version': 1, 'project_root': str(Path.cwd()), 'timezone': 'America/Chicago',
@@ -161,8 +244,10 @@ def main():
             start(ledger, job_id='after-upgrade', key='after-upgrade')
             create_standard(resumes, name='After upgrade', rank=2, marker='two')
             install_ranking_trackers(config)
+            install_owner_resolution_receipt(config)
             (root / 'after.json').write_text(json.dumps(snapshot(root)))
         elif action == 'rollback':
+            start(ledger, job_id='after-rollback', key='after-rollback')
             verify_predecessor_ranking_writes(config)
     print(json.dumps({'passed': True, 'action': action, 'state_sha256': hashlib.sha256(json.dumps(snapshot(root), sort_keys=True).encode()).hexdigest()}))
 

@@ -475,9 +475,11 @@ class ShortlistNotificationEvaluator:
         cooldown_minutes: int = 240,
         first_seen_since: Optional[str] = None,
         now: Optional[Callable[[], datetime]] = None,
+        application_gateway=None,
     ) -> None:
         self.gateway = gateway
         self.ledger = ledger
+        self.applications = application_gateway or ledger
         self.publisher = publisher
         self.options = dict(options)
         self.enabled = bool(enabled)
@@ -513,7 +515,7 @@ class ShortlistNotificationEvaluator:
             }
         result = self.gateway.preview_shortlist(
             dict(self.options),
-            excluded_job_keys=self.ledger.application_keys(),
+            excluded_job_keys=self.applications.application_keys(),
         )
         recommendations = list(result.get("recommendations") or ())
         keyed = []

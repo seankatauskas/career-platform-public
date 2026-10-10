@@ -1,17 +1,29 @@
 name: Public demo and offline checks
 on:
   push:
-    branches: [main]
+    branches: [main, codex/aws-infrastructure, codex/system-completion]
   pull_request:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: application-checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   offline:
-    if: github.repository == 'seankatauskas/career-platform' || github.repository == 'seankatauskas/career-platform-public'
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository == 'seankatauskas/career-platform-public' ||
+      (github.repository == 'seankatauskas/career-platform' &&
+       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))
+    # The public export must continue to use hosted runners, including for forks.
+    runs-on: ${{ fromJSON(github.repository == 'seankatauskas/career-platform' && '["self-hosted","macOS","ARM64","career-platform"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 20
     steps:
+      - name: Isolate fixture Git configuration
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg-config"
+          : > "$RUNNER_TEMP/gitconfig"
+          printf '%s\n' "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" "GIT_CONFIG_NOSYSTEM=1" "XDG_CONFIG_HOME=$RUNNER_TEMP/xdg-config" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
@@ -19,12 +31,21 @@ jobs:
         with:
           node-version: '22'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        if: runner.os == 'Linux'
         with:
           version: '0.8.4'
+      - name: Verify the Mac's managed uv installation
+        if: runner.os == 'macOS'
+        run: uv --version
       - run: npm ci --prefix extension
-      - run: npx --prefix extension playwright-core install --with-deps chromium
+      - name: Install Chromium on macOS
+        if: runner.os == 'macOS'
+        run: npx --prefix extension playwright-core install chromium
+      - name: Install Chromium and Linux dependencies
+        if: runner.os == 'Linux'
+        run: npx --prefix extension playwright-core install --with-deps chromium
       - name: Check services, demo, browser behavior and recovery
-        run: uv run --python 3.12 --with cryptography --with pypdf --with reportlab python scripts/check-system.py --browser --output .cache/system-checks.json
+        run: uv run --python 3.12 --with-requirements requirements/cloud.txt --with-requirements requirements/demo.txt python scripts/check-system.py --browser --output .cache/system-checks.json
       - name: Export the source that the daily publisher will validate
         if: github.repository == 'seankatauskas/career-platform'
         run: python3 scripts/prepare-public-showcase.py --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/public-export"
@@ -42,6 +63,7 @@ jobs:
         if: always()
         with:
           name: offline-validation
+          retention-days: 7
           path: |
             .cache/system-checks.json
             .cache/console-browser/results.json

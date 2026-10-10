@@ -26,6 +26,10 @@ class ModelExecutionError(RuntimeError):
     pass
 
 
+class ModelOutputError(ModelExecutionError):
+    """The command returned, but its answer is not a usable classification."""
+
+
 @dataclass(frozen=True)
 class LocalClassifierConfig:
     producer_version: str
@@ -230,11 +234,11 @@ class LocalCommandClassifier:
             raise ModelExecutionError(f"local model exited with status {completed.returncode}")
         output = completed.stdout
         if not isinstance(output, str) or len(output.encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
-            raise ModelExecutionError("local model output is empty or too large")
+            raise ModelOutputError("local model output is empty or too large")
         try:
             parsed = json.loads(output)
         except json.JSONDecodeError as exc:
-            raise ModelExecutionError("local model output is not JSON") from exc
+            raise ModelOutputError("local model output is not JSON") from exc
         if not isinstance(parsed, Mapping):
-            raise ModelExecutionError("local model output must be an object")
+            raise ModelOutputError("local model output must be an object")
         return parsed

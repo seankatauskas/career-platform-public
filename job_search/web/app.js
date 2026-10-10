@@ -115,7 +115,7 @@ async function api(path, options = {}) {
     throw error;
   }
   if (!response.ok) {
-    const error = new Error(payload.error || `Request failed (${response.status})`);
+    const error = new Error(payload.message || payload.error || `Request failed (${response.status})`);
     error.status = response.status;
     throw error;
   }
@@ -151,6 +151,7 @@ function meta(parts) {
 function readableResumeReason(value) {
   const reason = String(value || "").trim();
   if (!reason) return "Resume comparison could not be prepared.";
+  if (state.applicationBackend === "owners" && reason === "application_not_preparing") return "This application is closed or no longer matches this resume work.";
   if (reason === "runpod_reconciliation_required" || reason.startsWith("runpod_reconciliation_required:")) {
     const jobId = reason.includes(":") ? reason.slice(reason.indexOf(":") + 1) : "";
     return `${RESUME_BLOCK_REASONS.runpod_reconciliation_required}${jobId ? ` Accepted job: ${jobId}.` : ""}`;
@@ -194,6 +195,7 @@ async function initialize() {
   try {
     const session = await api("/api/v1/session");
     state.csrf = session.csrf_token;
+    state.applicationBackend = session.application_backend;
     $("#demo-badge").hidden = !session.demo_mode;
     consoleState.initialized = true;
     loadConsoleView();

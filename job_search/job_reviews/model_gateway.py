@@ -405,8 +405,21 @@ class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 @contextmanager
 def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFFORT,
                    uid=None, gid=None, transport=None, kind='primary', rubric_version='job-review-v1',
-                   telemetry_callback=None, purpose='detailed'):
-    _scoped_tools(kind, rubric_version, purpose)
+                   telemetry_callback=None, purpose='detailed', native_codex=False):
+    native_transport = None
+    if native_codex:
+        from . import native_protocol
+        if kind != 'old_method' or purpose != 'detailed':
+            raise ValueError('native execution requires the old-method worker')
+        request_validator = lambda value: native_protocol.validate_request(value, model, reasoning_effort)
+        completion = native_protocol.completion
+        if transport is None:
+            native_transport = native_protocol.NativeTransport()
+            transport = native_transport
+    else:
+        _scoped_tools(kind, rubric_version, purpose)
+        request_validator = lambda value: validate_request(value, model, reasoning_effort, kind=kind, rubric_version=rubric_version, purpose=purpose)
+        completion = lambda data: _validated_completion(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
     if transport is None:
         transport = lambda body, headers: subscription_transport(body, headers, kind=kind, rubric_version=rubric_version, purpose=purpose)
     path = Path(socket_path)
@@ -435,7 +448,7 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
                 event['upstream_status'] = status
             event['upstream_duration_ms'] = round((time.monotonic() - started) * 1000, 3)
             if status == 200:
-                completed = _validated_completion(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
+                completed = completion(data)
                 usage = completed.get('usage')
                 if isinstance(usage, dict):
                     counts = {key: usage.get(key) for key in ('input_tokens', 'output_tokens', 'total_tokens')}
@@ -465,12 +478,14 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
             super().setup()
             self.connection.settimeout(610)
 
-        def send_result(self, status, body, content='application/json'):
+        def send_result(self, status, body, content='application/json', headers=None):
             self.send_response(status)
             self.send_header('Content-Type', content)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Connection', 'close')
             self.send_header('Cache-Control', 'no-store')
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -491,19 +506,22 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise GatewayRejected('incomplete request')
-                value = validate_request(_json_object(body, MAX_REQUEST), model, reasoning_effort, kind=kind, rubric_version=rubric_version, purpose=purpose)
+                value = request_validator(_json_object(body, MAX_REQUEST))
                 body = encode_json(value, MAX_REQUEST)
                 phase = 'upstream'
-                status, data = request_upstream(body, auth_owner._request_headers())
+                routing = native_protocol.routing_headers(self.headers) if native_codex else {}
+                status, data = request_upstream(body, {**routing, **auth_owner._request_headers()})
                 if status == 401:
-                    status, data = request_upstream(body, auth_owner._request_headers(refresh=True))
+                    status, data = request_upstream(body, {**routing, **auth_owner._request_headers(refresh=True)})
                 if status != 200:
                     self.send_result(503, b'{"error":"subscription inference unavailable"}')
                     return
                 phase = 'response'
-                data = native_response(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
+                if not native_codex:
+                    data = native_response(data, kind=kind, rubric_version=rubric_version, purpose=purpose)
                 phase = 'delivery'
-                self.send_result(200, data, 'text/event-stream')
+                response_headers = native_transport.observations.get('response_headers', {}) if native_transport else {}
+                self.send_result(200, data, 'text/event-stream', response_headers)
             except (GatewayRejected, ValueError, TypeError, KeyError, UnicodeError) as error:
                 if phase == 'request':
                     emit_telemetry({'gateway_request_rejected_count': 1})
@@ -537,3 +555,5 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
         server.server_close()
         thread.join(timeout=5)
         path.unlink(missing_ok=True)
+        if native_transport is not None:
+            native_transport.close()

@@ -151,7 +151,19 @@ def _dependency_capabilities(dependencies: Mapping[str, Any] | None) -> list[dic
 def readiness_report(
     db_path: Path, *, now: datetime | None = None,
     dependencies: Mapping[str, Any] | None = None, automation_enabled: bool = True,
+    application_backend: str = "legacy",
 ) -> dict[str, Any]:
+    owners = application_backend == "owners"
+    if owners:
+        from .application_installation import LEGACY_TASKS
+        from .application_mail import OWNER_QUERY_VERSION
+    retired = tuple(sorted(LEGACY_TASKS)) if owners else ()
+    work_filter = " AND task_kind NOT IN (" + ",".join("?" for _ in retired) + ")" if retired else ""
+    schedule_groups = tuple((identity,
+        ("applications.tick",) if owners and identity == "automation" else
+        ("applications.mail.sync",) if owners and identity == "outlook" else
+        ("notification.deliver",) if owners and identity == "notifications" else kinds, grace)
+        for identity, kinds, grace in _SCHEDULE_GROUPS)
     current = as_utc(now or datetime.now(timezone.utc))
     stamp = utc_stamp(current)
     capabilities: list[dict[str, Any]] = []
@@ -168,7 +180,7 @@ def readiness_report(
             if "external_outcome" not in columns:
                 return _report(stamp, [_capability("database", "blocked", reason="schema_upgrade_required", action="upgrade_release")], metrics)
             capabilities.append(_capability("database", "ready", reason="readable_schema"))
-            for identity, kinds, grace in _SCHEDULE_GROUPS:
+            for identity, kinds, grace in schedule_groups:
                 group = [item for item in schedules if item["task_kind"] in kinds]
                 capabilities.append(_scheduled_capability(con, identity, group, grace, current, automation_enabled))
             ats_enabled = any(row["enabled"] and row["task_kind"] in {"ats.authoritative", "ats.new_only"} for row in schedules)
@@ -188,27 +200,33 @@ def readiness_report(
             if automation_enabled and set(GROUPS) <= switches.keys() and not any(switches.values()) and not worker_cap["last_attempt_at"]:
                 worker_cap.update(status="configured_unverified", reason_code="worker_not_started",
                                   next_action="start_local_services")
-            for connector in con.execute("SELECT * FROM connector_health"):
+            # These rows belong to the retired semantic mail coordinator. Owner
+            # synchronization reports through its own scheduled work; it neither
+            # updates nor repairs this older connector-health namespace.
+            for connector in (() if owners else con.execute("SELECT * FROM connector_health")):
                 if connector["status"] not in {"healthy", "disabled"}:
                     for item in capabilities:
                         if item["id"] == "outlook" and item["enabled"] and automation_enabled:
                             item.update(status="blocked", reason_code="reauth_required" if connector["status"] == "reauth_required" else "connector_failed",
                                         next_action="reconnect_outlook" if connector["status"] == "reauth_required" else "inspect_connector",
                                         last_attempt_at=connector["last_attempt_at"], last_success_at=connector["last_success_at"])
-            metrics["expired_work_leases"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status='running' AND lease_expires_at<=?", (stamp,)).fetchone()[0]
-            metrics["overdue_work"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status='queued' AND due_at<?", (utc_stamp(current - timedelta(minutes=15)),)).fetchone()[0]
-            paused_tasks = tuple(task for group, active in switches.items() if not active for task in GROUPS.get(group, ()))
+            metrics["expired_work_leases"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status='running' AND lease_expires_at<=?" + work_filter, (stamp, *retired)).fetchone()[0]
+            metrics["overdue_work"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status='queued' AND due_at<?" + work_filter, (utc_stamp(current - timedelta(minutes=15)), *retired)).fetchone()[0]
+            paused_tasks = retired + tuple(task for group, active in switches.items() if not active for task in GROUPS.get(group, ()))
             if paused_tasks:
                 placeholders = ','.join('?' for _ in paused_tasks)
                 metrics["overdue_work"] = con.execute(
                     f"SELECT COUNT(*) FROM work_items WHERE status='queued' AND due_at<? AND task_kind NOT IN ({placeholders})",
                     (utc_stamp(current - timedelta(minutes=15)), *paused_tasks),
                 ).fetchone()[0]
-            metrics["pending_reconciliation"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status!='succeeded' AND external_outcome IN ('unknown','in_flight') AND (status='dead' OR lease_expires_at<=?)", (stamp,)).fetchone()[0]
+            # Retiring a handler cannot establish whether its provider effect
+            # occurred. Binding cancels those work items, preserving this intent
+            # until explicit reconciliation records a terminal outcome.
+            metrics["pending_reconciliation"] = con.execute("SELECT COUNT(*) FROM work_items WHERE status!='succeeded' AND external_outcome IN ('unknown','in_flight') AND (status IN ('dead','cancelled') OR lease_expires_at<=?)", (stamp,)).fetchone()[0]
             # A successful newer occurrence resolves operational freshness, while
             # historical failure rows remain available in the recovery inspector.
-            metrics["unresolved_work"] = unresolved_work_count(con)
-            pending_actions = con.execute("SELECT COUNT(*) FROM action_proposals WHERE status='needs_reconciliation'").fetchone()[0]
+            metrics["unresolved_work"] = unresolved_work_count(con, excluded_tasks=retired)
+            pending_actions = 0 if owners else con.execute("SELECT COUNT(*) FROM action_proposals WHERE status='needs_reconciliation'").fetchone()[0]
             metrics["pending_reconciliation"] += pending_actions
             queue_status, reason, action = "ready", "no_stalled_work", "none"
             if metrics["pending_reconciliation"]:
@@ -221,12 +239,20 @@ def readiness_report(
                 queue_status, reason, action = "stale", "work_progress_overdue", "inspect_workflow"
             capabilities.append(_capability("work_queue", queue_status, reason=reason, action=action))
             for table, identity in (("outbox_messages", "application_outbox"), ("notification_outbox", "notification_outbox")):
-                rows = con.execute(f"SELECT status,COUNT(*) FROM {table} GROUP BY status").fetchall()
+                # The retired application-event topic is frozen history. The same
+                # operational outbox still owns recommendation feedback.
+                predicate = "topic!='notification.application_event'" if table == "outbox_messages" else "((application_id IS NULL AND topic NOT IN ('reminder.due','attention.required','mail.recruiter_update')) OR (status='dead' AND last_error='delivery_reconciliation_required'))"
+                # An unresolved provider delivery is still evidence even when
+                # its originating business topic was retired. Keep it visible
+                # here until the actual receipt is reconciled; conversion does
+                # not currently transfer these receipts to an owner record.
+                scope = " WHERE " + predicate if owners else ""
+                rows = con.execute(f"SELECT status,COUNT(*) FROM {table}" + scope + " GROUP BY status").fetchall()
                 counts = dict(rows)
-                overdue = con.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN ('pending','delivering') AND available_at<?", (utc_stamp(current - timedelta(minutes=15)),)).fetchone()[0]
+                overdue = con.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN ('pending','delivering') AND available_at<?" + (" AND " + predicate if scope else ""), (utc_stamp(current - timedelta(minutes=15)),)).fetchone()[0]
                 state, why, act = ("blocked", "delivery_failed", "inspect_delivery") if counts.get("dead") else (("stale", "delivery_overdue", "inspect_delivery") if overdue else ("ready", "no_failed_delivery", "none"))
                 if table == "notification_outbox":
-                    uncertain_delivery = con.execute("SELECT COUNT(*) FROM notification_outbox WHERE status='dead' AND last_error='delivery_reconciliation_required'").fetchone()[0]
+                    uncertain_delivery = con.execute("SELECT COUNT(*) FROM notification_outbox WHERE status='dead' AND last_error='delivery_reconciliation_required'" + (" AND " + predicate if owners else "")).fetchone()[0]
                     if uncertain_delivery:
                         metrics["pending_reconciliation"] += uncertain_delivery
                         state, why, act = "blocked", "external_reconciliation_required", "inspect_reconciliation"
@@ -234,7 +260,7 @@ def readiness_report(
                     if why != "external_reconciliation_required":
                         state, why, act = "paused", "automation_paused", "review_activation"
                 capabilities.append(_capability(identity, state, reason=why, action=act))
-            failed_mail = con.execute("SELECT COUNT(*) FROM outlook_message_stage WHERE processing_status='failed'").fetchone()[0]
+            failed_mail = con.execute("SELECT COUNT(*) FROM outlook_message_stage WHERE processing_status='failed'" + (" AND query_version=?" if owners else ""), (OWNER_QUERY_VERSION,) if owners else ()).fetchone()[0]
             if failed_mail:
                 capabilities.append(_capability("mail_processing", "blocked", reason="staged_mail_failed", action="inspect_mail_processing"))
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):

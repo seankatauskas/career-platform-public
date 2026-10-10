@@ -92,6 +92,11 @@ def _mcp_tools(adapter: HermesAdapter) -> Sequence[Mapping[str, Any]]:
         "get_action_status",
         "system_health",
     }
+    read_only = getattr(adapter, "read_only_tool_names", read_only)
+    idempotent = getattr(adapter, "idempotent_tool_names", read_only | {
+        "publish_curated_shortlist", "propose_reply", "propose_interview_slots",
+        "create_reminder", "cancel_reminder"})
+    destructive = getattr(adapter, "destructive_tool_names", {"cancel_reminder"})
     tools = []
     for definition in adapter.tool_definitions():
         name = str(definition["name"])
@@ -102,16 +107,8 @@ def _mcp_tools(adapter: HermesAdapter) -> Sequence[Mapping[str, Any]]:
                 "inputSchema": definition["input_schema"],
                 "annotations": {
                     "readOnlyHint": name in read_only,
-                    "destructiveHint": name == "cancel_reminder",
-                    "idempotentHint": name in read_only
-                    or name
-                    in {
-                        "publish_curated_shortlist",
-                        "propose_reply",
-                        "propose_interview_slots",
-                        "create_reminder",
-                        "cancel_reminder",
-                    },
+                    "destructiveHint": name in destructive,
+                    "idempotentHint": name in idempotent,
                     "openWorldHint": False,
                 },
             }
@@ -124,6 +121,11 @@ def make_mcp_handler(
     bearer_token: str,
     allowed_hosts: Sequence[str] = ("127.0.0.1", "localhost"),
 ):
+    # Candidate domains bind exact text in approvals. Their adapter can select a
+    # wire serializer without changing historical canonical_json hashes elsewhere.
+    serialize_output = getattr(adapter, "serialize_output", canonical_json)
+    if not callable(serialize_output):
+        raise ValueError("MCP adapter output serializer must be callable")
     if (
         not isinstance(bearer_token, str)
         or len(bearer_token) < 32
@@ -193,7 +195,7 @@ def make_mcp_handler(
             self.send_header("Referrer-Policy", "no-referrer")
 
         def _send_json(self, status: int, value: Mapping[str, Any]) -> None:
-            encoded = canonical_json(value).encode("utf-8")
+            encoded = serialize_output(value).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
@@ -404,7 +406,7 @@ def make_mcp_handler(
                     )
                     tool_result = {
                         "content": [
-                            {"type": "text", "text": canonical_json(structured)}
+                            {"type": "text", "text": serialize_output(structured)}
                         ],
                         "structuredContent": structured,
                         "isError": False,

@@ -67,11 +67,12 @@ def unpack(value):
 
 
 class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
-    def __init__(self, db_path, catalog, context_provider, *, collection_provider=None, availability_checker=None, now=stamp):
+    def __init__(self, db_path, catalog, context_provider, *, collection_provider=None, availability_checker=None, now=stamp, application_gateway=None):
+        self.application_gateway = application_gateway
         self.availability_checker = availability_checker
         self.db_path, self.catalog = db_path, catalog
         self.context_provider, self.collection_provider, self.now = context_provider, collection_provider, now
-        self.curated = CuratedShortlists(db_path, catalog)
+        self.curated = CuratedShortlists(db_path, catalog, application_gateway=application_gateway)
 
     def call(self, action, args=None):
         if action == 'verify-availability':
@@ -85,6 +86,10 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
 
     def _guard_managed(self, con, action, args, principal):
         rid = args.get('review_id')
+        if rid:
+            workflow = con.execute('SELECT metadata_json FROM job_reviews WHERE review_id=?', (rid,)).fetchone()
+            if workflow and unpack(workflow[0]).get('workflow') == 'old-method-v1' and (action in WRITES or action == 'job'):
+                raise ContractError('OLD METHOD mutations require its dedicated host workflow')
         if not rid or action not in _MANAGED_MUTATIONS:
             return
         row = con.execute('SELECT metadata_json FROM job_reviews WHERE review_id=?', (rid,)).fetchone()
@@ -411,7 +416,8 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
             con.execute('INSERT INTO job_review_reads VALUES(?,?,?,?,?) ON CONFLICT DO UPDATE SET through_offset=MAX(through_offset,excluded.through_offset)',
                         (args['review_id'], row['ordinal'], actor, row['snapshot_sha256'], min(len(description), offset + limit)))
         history = [dict(r) for r in con.execute('SELECT l.list_id,l.title FROM curated_shortlist_items i JOIN curated_shortlists l USING(list_id) WHERE i.ats=? AND i.job_id=? ORDER BY l.sequence DESC LIMIT 5', (row['ats'], row['job_id']))]
-        application = con.execute('SELECT application_id,current_phase FROM applications WHERE ats=? AND job_id=?', (row['ats'], row['job_id'])).fetchone()
+        application = (self.application_gateway.lookup_job(row['ats'], row['job_id']) if self.application_gateway is not None else
+            con.execute('SELECT application_id,current_phase FROM applications WHERE ats=? AND job_id=?', (row['ats'], row['job_id'])).fetchone())
         previous = [{'review_id': r['review_id'], 'revision': r['revision'],
                      'assessment': self._assessment_brief(r['assessment_json'])} for r in con.execute(
             'SELECT j.review_id,j.revision,j.assessment_json FROM job_review_items j JOIN job_reviews r USING(review_id) '
@@ -528,14 +534,15 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
     def _status(self, con, args, *, _include_calibration=True):
         run = self._run(con, args['review_id'])
         rows = con.execute('SELECT ordinal,ats,job_id,revision,snapshot_sha256,assessment_json,check_json FROM job_review_items WHERE review_id=? ORDER BY ordinal', (run['review_id'],)).fetchall()
+        old_method = unpack(run['metadata_json']).get('workflow') == 'old-method-v1'
         counts, families, reasons = Counter(), Counter(), Counter()
         for row in rows:
             value = unpack(row['assessment_json'])
-            counts[value['decision'] if value else 'pending'] += 1
+            counts[value['decision'] if value else ('unexamined' if old_method else 'pending')] += 1
             if value:
                 families[value['family']] += 1
                 reasons[value['reason_code']] += 1
-        required, effective_rows = self._audit_membership(con, run, rows)
+        required, effective_rows = ([], rows) if old_method else self._audit_membership(con, run, rows)
         unchecked = [r['ordinal'] for r in rows if r['ordinal'] in required and not r['check_json']]
         disagreements, unresolved = [], []
         adjudication_states = defaultdict(list)
@@ -563,16 +570,16 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
 
         return {k: run[k] for k in ('review_id', 'mode', 'status', 'window_start', 'window_end', 'created_at', 'version')} | {
             'total': len(rows), 'counts': dict(counts), 'families': dict(families), 'reasons': dict(reasons),
-            'metadata': unpack(run['metadata_json']), 'audit_required_count': len(required),
+            'metadata': {k: v for k, v in unpack(run['metadata_json']).items() if k not in ('result', 'availability', 'attempt')}, 'audit_required_count': len(required),
             'audit_remaining_count': len(unchecked), 'audit_remaining': unchecked[:100],
             'disagreement_count': len(disagreements), 'disagreements': disagreements[:100],
             'unresolved_disagreement_count': len(unresolved), 'unresolved_disagreements': unresolved[:100],
             'resolved_disagreement_count': len(disagreements) - len(unresolved),
             'adjudication': {state: {'count': len(adjudication_states[state]), 'ordinals': adjudication_states[state][:100]}
                              for state in ('pending', 'active', 'incomplete', 'unresolved')},
-            'effective_counts': dict(Counter((unpack(r['assessment_json']) or {}).get('decision', 'pending') for r in effective_rows)),
+            'effective_counts': dict(Counter((unpack(r['assessment_json']) or {}).get('decision', 'unexamined' if old_method else 'pending') for r in effective_rows)),
             'receipt': unpack(run['receipt_json']), 'rubric_version': unpack(run['context_json']).get('rubric_version', LEGACY_RUBRIC_VERSION),
-            'calibration': self._calibration_state(con, run) if _include_calibration else None}
+            'calibration': self._calibration_state(con, run) if _include_calibration and not old_method else None}
 
     def _preview_data(self, con, run):
         status = self._status(con, {'review_id': run['review_id']})
@@ -621,9 +628,12 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
                 blockers.append('selected_posting_unavailable')
                 blocking_jobs.append({'ordinal': row['ordinal'], 'reason': blockers[-1]})
                 continue
-            app = con.execute('SELECT current_phase FROM applications WHERE ats=? AND job_id=?', (row['ats'], row['job_id'])).fetchone()
-            versions.append([row['ordinal'], fingerprint(current), current.get('closed_at'), app[0] if app else None])
-            if current.get('closed_at') or (app and app[0] != 'preparing'):
+            app = (self.application_gateway.lookup_job(row['ats'], row['job_id']) if self.application_gateway is not None else
+                con.execute('SELECT current_phase FROM applications WHERE ats=? AND job_id=?', (row['ats'], row['job_id'])).fetchone())
+            phase = app['current_phase'] if app else None
+            excluded = (app['shortlist_excluded'] if self.application_gateway is not None else phase != 'preparing') if app else False
+            versions.append([row['ordinal'], fingerprint(current), current.get('closed_at'), phase, excluded])
+            if current.get('closed_at') or excluded:
                 omitted.append({'ordinal': row['ordinal'], 'reason': 'closed' if current.get('closed_at') else 'already_applied'})
                 continue
             if fingerprint(current) != row['snapshot_sha256']:
@@ -740,6 +750,8 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
             if not publication:
                 return {}
             run = self._run(con, publication[0])
+            if unpack(run['metadata_json']).get('workflow') == 'old-method-v1':
+                return {}  # The validated visible explanation is already on the curated card.
             state = self._calibration_state(con, run)
             availability = self._availability(con, run)
             entries = {r['ordinal']: r for r in con.execute('SELECT ordinal,related_group_json FROM job_review_calibration_entries WHERE review_id=? AND basis_sha256=?',

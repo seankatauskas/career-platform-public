@@ -11,6 +11,13 @@ The public-export tool keeps the credential-free `public-checks.yml` active and
 moves deployment and publishing workflows into `.github/workflow-examples/`.
 OpenWiki examples require separate configuration and remain inactive.
 
+The private repository's application/browser and Terraform validation jobs use
+the Apple Silicon self-hosted runner described in
+[Mac mini runner operations](operations/macos-actions-runner.md). Production
+Compose and container checks use a [Linux VM on the Mac](operations/linux-actions-runner.md).
+Release workflows still run on hosted Linux. The public repository's application
+checks continue to use hosted Ubuntu.
+
 The private repository publishes daily source snapshots to
 [`career-platform-public`](https://github.com/seankatauskas/career-platform-public).
 See [public publishing](operations/public-publishing.md) for the export rules,

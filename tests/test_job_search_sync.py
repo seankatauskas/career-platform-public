@@ -464,10 +464,8 @@ def test_exhausted_transient_body_failure_is_visible_for_attention():
         assert service.system_health()["status"] == "attention"
 
 
-def test_retry_failed_mail_repairs_layout_and_persists_exact_evidence_once():
-    import json
-    from job_search.mail import RemoteMailClassifier
-    from tests.test_job_search_remote_mail import FakeProvider, evidence_response
+def test_unverifiable_layout_becomes_reviewable_without_repeated_inference():
+    from tests.test_job_search_remote_mail import evidence_response
 
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "job-search.db"
@@ -491,24 +489,11 @@ def test_retry_failed_mail_repairs_layout_and_persists_exact_evidence_once():
 
         coordinator = OutlookMailCoordinator(mail, state, service, classifier=UnalignedClassifier())
         failed = coordinator.process_pending(query_version=2)
-        assert failed.failed == 1 and failed.proposed == 0 and failed.auto_applied == 0
-        assert any(item["kind"] == "mail_processing_failure" for item in service.list_attention_items())
-        service.resolve_mail_failure(
-            "personal", "inbox", message_id, 2, "retry",
-            MutationContext("retry-layout", "user", "dashboard"),
-        )
-        classifier = RemoteMailClassifier(FakeProvider(json.dumps(response)))
-        coordinator.classifier = classifier
-        coordinator.model_version = classifier.producer_version
-        recovered = coordinator.process_pending(query_version=2)
-        assert recovered.processed == 1 and recovered.failed == 0 and recovered.proposed == 1
-        assert recovered.auto_applied == 0
+        assert failed.processed == 1 and failed.failed == 0 and failed.proposed == 0 and failed.auto_applied == 0
         attention = service.list_attention_items()
-        assert not any(item["kind"] == "mail_processing_failure" for item in attention)
-        proposals = [item for item in attention if item["kind"] == "event_proposal"]
-        assert len(proposals) == 1
-        assert proposals[0]["evidence_quote"] == "Thanks for applying to\n\nExample Labs."
-        assert coordinator.process_pending(query_version=2).proposed == 0
+        assert not any(item['kind'] == 'mail_processing_failure' for item in attention)
+        assert len([item for item in attention if item['kind'] == 'mail_classification_review']) == 1
+        assert coordinator.process_pending(query_version=2).processed == 0
 
 
 def test_model_cannot_auto_apply_with_more_than_twenty_candidate_applications():

@@ -66,7 +66,7 @@ def main():
     project = "career-acceptance-" + secrets.token_hex(5)
     report = {"passed": False, "source_sha": source, "image_id": image, "image_architecture": machine, "image_source_sha": image_source, "working_tree_dirty": False,
               "host": platform.system(), "docker_os": daemon["OperatingSystem"],
-              "linux_host_verified": linux_host, "checks": [],
+              "linux_host_verified": linux_host, "checks": [], "timings_seconds": {},
               "limitations": ["No live ATS, Outlook, Telegram, inference, Tailscale, AWS IAM, alarms, or cloud disk recovery is exercised.",
                               "Restore uses generated fixture secrets; live secret-manager recovery remains external acceptance."]}
     if not linux_host:
@@ -291,8 +291,10 @@ print(json.dumps({'supervisor_exec':True,'temporary_exec_blocked':True}))
                        "--entrypoint", "/toolchain/tectonic", image, "--version"])
         assert args.tectonic_version in version
         report["toolchain"] = {"version": version, **{name + "_sha256": hashlib.sha256((data / "toolchain" / name).read_bytes()).hexdigest() for name in ("tectonic", "tectonic.bundle")}}
+        startup_started = time.monotonic()
         compose("up", "--detach", "--no-build", *SERVICES, timeout=200)
         await_healthy()
+        report["timings_seconds"]["initialization_and_service_health"] = round(time.monotonic() - startup_started, 3)
         report["checks"].append("All six application Compose services, including the interactions broker, are healthy with generated fixture configuration.")
         if mail_overlay.is_file():
             for service in SERVICES:
@@ -397,11 +399,15 @@ print(json.dumps({"application_id":app}))
         report["recovered_work"] = recovered
 
         compose("stop", "--timeout", "15", *SERVICES)
+        snapshot_started = time.monotonic()
         backup = ops_helper("backup", data)
+        report["timings_seconds"]["paused_snapshot_helper"] = round(time.monotonic() - snapshot_started, 3)
         restored = temporary / "restored"
         setup_data(restored, copy_tools=False)
         assert ops_helper("bad-checksum", restored, bundle=backup["bundle"])["rejected"]
+        restore_started = time.monotonic()
         restore = ops_helper("restore", restored, bundle=backup["bundle"], sha256=backup["sha256"])
+        report["timings_seconds"]["restore_helper"] = round(time.monotonic() - restore_started, 3)
         assert restore["status"] == "restored_paused"
         report["backup"] = {"sha256": backup["sha256"], "status": restore["status"]}
         report["checks"].append("Production backup/restore functions reject a bad checksum and restore a quiesced snapshot into a fresh paused fixture directory.")
@@ -411,8 +417,10 @@ print(json.dumps({"application_id":app}))
         # including on native Linux where the runner cannot overwrite it.
         assert ops_helper("review-gate", restored)["status"] == "fixture_review_allowed"
         use_data(restored)
+        restart_started = time.monotonic()
         compose("up", "--detach", "--no-build", "tools", "dashboard", "mcp", timeout=200)
         await_healthy(("tools", "dashboard", "mcp"))
+        report["timings_seconds"]["restored_service_health"] = round(time.monotonic() - restart_started, 3)
         restored_state = execute("dashboard", 'import json; from job_search.service import JobSearchLedger; print(json.dumps(JobSearchLedger("/var/lib/job-search/applications.db").get_application_timeline(' + repr(seed["application_id"]) + ')))')
         assert restored_state["application"]["title_snapshot"] == "Platform Engineer"
         assert len(restored_state["events"]) == 1

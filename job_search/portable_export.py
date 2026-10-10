@@ -35,6 +35,16 @@ from .secure_persistence import (
 )
 
 
+def require_legacy_export_source(connection) -> None:
+    """These single-database exports cannot preserve an owner installation."""
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    bound = "application_owner_binding" in tables and connection.execute(
+        "SELECT 1 FROM application_owner_binding LIMIT 1").fetchone()
+    if bound or "installation_identity" in tables:
+        raise ContractError("Owner application installations are not supported by portable/state transfer export; "
+                            "use the complete installation backup and preserve its original encryption key")
+
+
 _MAIL_COLUMNS = frozenset(
     {
         "archive_id",
@@ -363,9 +373,12 @@ def _rekey_database(
     shared_rows = connection.execute(
         "SELECT * FROM mail_understanding_sources ORDER BY analysis_id,source_id"
     ).fetchall() if _schema_columns(connection, "mail_understanding_sources") else []
+    owner_refs = connection.execute(
+        "SELECT archive_ref FROM owner_mail_archive ORDER BY sequence"
+    ).fetchall() if _schema_columns(connection, "owner_mail_archive") else []
     if not message_rows and attachment_rows:
         raise ContractError("attachment archive exists without a mail archive")
-    if not message_rows and not shared_rows:
+    if not message_rows and not shared_rows and not owner_refs:
         return 0, 0
 
     if source_archive_key_provider is None:
@@ -454,6 +467,37 @@ def _rekey_database(
         finally:
             connection.execute(shared_trigger['sql'])
 
+    # Immutable owner revisions are also part of the private operational archive.
+    # Process one ciphertext at a time; alter only the staging copy's encryption.
+    if owner_refs:
+        from .mail.revision_archive import ImmutableMailArchive
+        trigger = connection.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='owner_mail_archive_immutable'").fetchone()
+        if trigger is None:
+            raise ContractError("owner mail revision immutability guard is missing")
+        connection.execute("SAVEPOINT rekey_owner_mail")
+        try:
+            connection.execute("DROP TRIGGER owner_mail_archive_immutable")
+            for reference in owner_refs:
+                row = connection.execute("SELECT * FROM owner_mail_archive WHERE archive_ref=?", (reference["archive_ref"],)).fetchone()
+                fields = ImmutableMailArchive._aad(row["account_id"], row["provider_message_id"], row["source_version"])
+                text = source_archive._open(row, fields, "sealed_sha256")
+                value = json.loads(text)
+                if len(value["text"]) != row["content_chars"] or hashlib.sha256(value["text"].encode("utf-8")).hexdigest() != row["source_sha256"]:
+                    raise ContractError("owner mail revision source does not match")
+                aad = canonical_json(fields).encode("utf-8")
+                nonce = _nonce(nonce_factory, seen_nonces)
+                ciphertext = target_cipher.encrypt(nonce, text.encode("utf-8"), aad)
+                if not isinstance(ciphertext, bytes) or len(ciphertext) < 16:
+                    raise ContractError("portable owner mail cipher returned invalid ciphertext")
+                connection.execute("UPDATE owner_mail_archive SET key_id=?,nonce=?,ciphertext=? WHERE archive_ref=?",
+                                   (target_key_id, nonce, ciphertext, reference["archive_ref"]))
+            connection.execute(trigger["sql"])
+        except Exception:
+            connection.execute("ROLLBACK TO rekey_owner_mail")
+            raise
+        finally:
+            connection.execute("RELEASE rekey_owner_mail")
+
     _rekey_command_results(connection, target_key_id)
 
     target_archive = EncryptedMailArchive(
@@ -476,7 +520,14 @@ def _rekey_database(
         text = target_archive._open(saved, fields, 'plaintext_sha256')
         if len(text) != row['plaintext_chars']:
             raise ContractError('portable shared mail source verification failed')
-    return len(message_rows), len(attachment_rows)
+    for reference in owner_refs:
+        row = connection.execute("SELECT * FROM owner_mail_archive WHERE archive_ref=?", (reference["archive_ref"],)).fetchone()
+        fields = ImmutableMailArchive._aad(row["account_id"], row["provider_message_id"], row["source_version"])
+        text = target_archive._open(row, fields, "sealed_sha256")
+        value = json.loads(text)
+        if len(value["text"]) != row["content_chars"] or hashlib.sha256(value["text"].encode("utf-8")).hexdigest() != row["source_sha256"]:
+            raise ContractError("portable owner mail revision verification failed")
+    return len(message_rows) + len(owner_refs), len(attachment_rows)
 
 
 def _stage_database(
@@ -498,6 +549,7 @@ def _stage_database(
         destination_connection = sqlite3.connect(str(temporary), timeout=10)
         destination_connection.row_factory = sqlite3.Row
         source_connection.backup(destination_connection)
+        require_legacy_export_source(destination_connection)
         destination_connection.execute("PRAGMA journal_mode=DELETE")
         destination_connection.execute("PRAGMA foreign_keys=ON")
         secure_delete = destination_connection.execute(
@@ -620,6 +672,9 @@ def export_portable_state(
     """Create verified portable copies without modifying or replacing source state."""
 
     source_db = _absolute_input(source_database, "source database")
+    from contextlib import closing
+    with closing(sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True)) as con:
+        require_legacy_export_source(con)
     target_db = _absolute_output(destination_database, "portable database")
     key_file = _absolute_input(portable_key_file, "portable encryption key")
     # Validate key contents and ownership before staging a potentially large backup.

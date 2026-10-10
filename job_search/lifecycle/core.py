@@ -152,8 +152,10 @@ class CoreMixin:
             lambda con,stamp: {'task':self._create_task(con,application_id,values,context,stamp)})
 
     def _transition_task(self, con, task_id, operation, values, context, stamp):
-        _known(values, ('evidence_id','source_time','snoozed_until','reason'))
+        _known(values, ('evidence_id','source_time','snoozed_until','reason','expected_revision'))
         task = _task(con,task_id)
+        if 'expected_revision' in values:
+            self._check_task_revision(task, values['expected_revision'])
         if operation not in ('complete','cancel','supersede','snooze'):
             raise ContractError('invalid task operation')
         target = {'complete':'completed','cancel':'cancelled','supersede':'superseded','snooze':'open'}[operation]
@@ -175,7 +177,8 @@ class CoreMixin:
             task['source_time'] = _time(values['source_time'],'source_time')
         con.execute('UPDATE lifecycle_tasks SET status=?,revision_no=?,updated_at=?,snoozed_until=?,completed_evidence_id=?,source_time=? WHERE task_id=?',
             (task['status'],task['revision_no'],stamp,task['snoozed_until'],task['completed_evidence_id'],task['source_time'],task_id))
-        _revision(con,task,operation,context,stamp)
+        history = {**task, 'transition_reason': _text(values['reason'], 'reason')} if values.get('reason') else task
+        _revision(con,history,operation,context,stamp)
         _cancel_task_notifications(con,task_id)
         return task
 
@@ -183,6 +186,27 @@ class CoreMixin:
         _user(context)
         return self._core_command('transition_task',dict(task_id=task_id,operation=operation,values=values),context,
             lambda con,stamp:{'task':self._transition_task(con,task_id,operation,values,context,stamp)})
+
+    @staticmethod
+    def _check_task_revision(task, expected_revision):
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ContractError('invalid task revision')
+        if task['revision_no'] != expected_revision:
+            raise ConflictError('task changed; refresh before reviewing')
+
+    def prepare_task_reply(self, task_id, expected_revision, context):
+        """Prepare from the reviewed task; leave it open until resolved or sent."""
+        _user(context)
+        def operation(con, stamp):
+            task = _task(con, task_id)
+            self._check_task_revision(task, expected_revision)
+            if task['status'] != 'open' or task['owner'] != 'applicant' or task['kind'] not in ('reply', 'send_availability'):
+                raise ConflictError('task is not an open applicant reply request')
+            return self.ledger._queue_career_reply(con, {
+                'application_id': task['application_id'], 'evidence_id': task['evidence_id'],
+            }, context, stamp)
+        return self._core_command('prepare_task_reply',
+            dict(task_id=task_id, expected_revision=expected_revision), context, operation)
 
     def complete_task_from_evidence(self, con, task_id, evidence_id, source_time, context, stamp):
         task = _task(con,task_id)

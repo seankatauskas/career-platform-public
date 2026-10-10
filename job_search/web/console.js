@@ -27,7 +27,7 @@ window.addEventListener("storage", event => {
 
 // Presentation state is independent of the services that own application changes.
 const consoleState = { view: "applications", applicationId: "", tab: "overview", epoch: 0, workspace: null, reviews: [], actions: [] };
-const stageLabel = (value) => ({ active: "Submitted", awaiting_confirmation: "Awaiting confirmation", preparing: "Draft", interviewing: "Interviewing", offer: "Offer", terminal: "Closed" }[value] || String(value || "Unknown").replaceAll("_", " "));
+const stageLabel = (value) => ({ active: "Submitted", awaiting_confirmation: "Awaiting confirmation", preparing: state.applicationBackend === "owners" ? "Tracking" : "Draft", interviewing: "Interviewing", offer: "Offer", terminal: "Closed" }[value] || String(value || "Unknown").replaceAll("_", " "));
 function displayDate(value) {
   if (!value) return "Not recorded";
   const date = new Date(value);
@@ -60,7 +60,7 @@ function postingDates(item, prominent = false) {
   if (postingDate(job.source_updated_at)) parts.push(["Updated", job.source_updated_at]);
   if (!parts.length && postingDate(job.publishedAt)) parts.push(["Posted or updated", job.publishedAt]);
   const root = node("p", `meta posting-dates${prominent ? " posting-dates-prominent" : ""}`);
-  if (!parts.length) root.textContent = "Posting date unavailable";
+  if (!parts.length) root.append(node("span", "posting-date", "Posting date unavailable"));
   parts.forEach(([label, value], index) => {
     if (index && !prominent) root.append(document.createTextNode(" · "));
     const time = node("time", "posting-date", `${label} ${prominent ? relativePostingDate(value) : postingDate(value)}`);

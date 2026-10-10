@@ -5,7 +5,7 @@ Start with the [project README](../README.md), [demo](demo.md), and [system desi
 | Topic | Guides |
 | --- | --- |
 | Development | [Develop alongside production](development.md), [repository map](../README.md#repository-map), [command reference](commands.md), [testing](../tests/README.md), [architecture and contracts](architecture.md) |
-| Agent-selected shortlists | [Agent review workflow](agent-job-reviews.md), [isolated AWS reviewers](operations/isolated-reviews.md), [Publish Codex picks](curated-shortlists.md) |
+| Agent-selected shortlists | [OLD METHOD async reviews](operations/old-method-reviews.md), [Agent review workflow](agent-job-reviews.md), [isolated AWS reviewers](operations/isolated-reviews.md), [Publish Codex picks](curated-shortlists.md) |
 | Collection and ranking | [Collector guide](collector-guide.md), [model training](models/local-model-training.md), [ATS approximation](models/ats-proxy-model.md), [inference providers](models/inference-providers.md), [salary model](models/salary-v3.md) |
 | Running locally | [Application runbook](operations/job-search-runbook.md), [runtime and scheduling](operations/job-search-runtime.md), [isolated system demo](offline-system-demo.md) |
 | Deployment | [Coordinated releases](operations/coordinated-releases.md), [AWS](operations/aws-deployment.md), [Docker Compose](operations/cloud-deployment.md), [Compose acceptance](compose-acceptance.md), [workflow setup](workflow-setup.md) |

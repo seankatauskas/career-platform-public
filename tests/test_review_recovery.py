@@ -40,7 +40,7 @@ class Classifier:
 
 def fixture(directory, existing_excerpt=None):
     path, ledger, archive = archive_fixture(directory)
-    staged = replace(change('graph-message-recovery'), subject=SUBJECT)
+    staged = replace(change('graph-message-recovery'), subject=SUBJECT, sender_address='recruiter@example.test')
     state = SQLiteOutlookState(path)
     state.stage_changes('outlook-personal', 'inbox', [staged])
     state.mark_message('outlook-personal', 'inbox', staged.immutable_id, 'failed', 'Graph HTTP 400: original failure')
@@ -114,8 +114,8 @@ def test_existing_evidence_is_preserved_and_quote_offsets_are_relocated():
             assert excerpt[proposal['span_start']:proposal['span_end']] == QUOTE
 
 
-def test_model_failure_invalid_span_and_missing_retained_quote_preserve_original_review():
-    for mode, existing in [('error', None), ('invalid', None), ('valid', 'A different retained excerpt')]:
+def test_model_execution_failure_preserves_original_review():
+    for mode, existing in [('error', None)]:
         with tempfile.TemporaryDirectory() as directory:
             path, ledger, _, source, query, _ = fixture(directory, existing_excerpt=existing)
             before = stage(path)
@@ -277,7 +277,7 @@ def test_review_recovery_obeys_daily_inference_limit_and_retries_do_not_spend_ag
         first = recover_review(ledger, source, query, classifier, 'fixture-model-v1', usage_limits={'daily_requests': 1})
         repeated = recover_review(ledger, source, query, classifier, 'fixture-model-v1', usage_limits={'daily_requests': 1})
         assert first['proposal_id'] == repeated['proposal_id'] and classifier.posts == 1
-        second_message = replace(change('graph-message-second-recovery'), subject=SUBJECT)
+        second_message = replace(change('graph-message-second-recovery'), subject=SUBJECT, sender_address='recruiter@example.test')
         state = SQLiteOutlookState(path)
         state.stage_changes('outlook-personal', 'inbox', [second_message])
         state.mark_message('outlook-personal', 'inbox', second_message.immutable_id, 'failed', 'Original second error')

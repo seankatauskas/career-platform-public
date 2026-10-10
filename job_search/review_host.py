@@ -47,6 +47,7 @@ def application_projection(value, data_root, release):
     # Read gateway needs only these paths. Inference, mail, secrets and remote
     # tools are deliberately absent from the generated host application config.
     result['resume_mode'] = value.get('resume_mode', 'standard')
+    result['scraper_contact'] = value.get('scraper_contact', '')
     return result
 
 
@@ -224,7 +225,8 @@ def status(c):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--operations-config', type=Path, default=Path('/etc/job-search/operations.json'))
-    parser.add_argument('action', choices=('login', 'readiness', 'run', 'status'))
+    parser.add_argument('action', choices=('login', 'readiness', 'run', 'status', 'submit', 'resume', 'export'))
+    parser.add_argument('--workflow', choices=('managed', 'old-method-v1'), default='managed')
     args, remaining = parser.parse_known_args(argv)
     try:
         if os.geteuid() != 0:
@@ -241,6 +243,9 @@ def main(argv=None):
         # No ambient OpenAI/API credentials pass to the coordinator authentication owner.
         for key in ('OPENAI_API_KEY', 'CODEX_API_KEY'):
             os.environ.pop(key, None)
+        if args.workflow == 'old-method-v1':
+            from .job_reviews.old_method.host import main as old_method_main
+            return old_method_main([args.action, '--runner-config', str(config), *remaining])
         from .job_reviews.runner import main as runner_main
         return runner_main([args.action, '--runner-config', str(config), *remaining])
     except (OpsError, OSError, ValueError):

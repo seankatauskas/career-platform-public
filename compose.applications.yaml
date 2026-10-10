@@ -1,0 +1,20 @@
+# Selected only with the owners backend. Understanding runs on the model lane
+# with its dedicated mail profile; the MCP agent receives neither credential.
+services:
+  model:
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/mail-inference.json"
+        target: /run/job-search/mail-inference.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/openrouter-api-key"
+        target: /run/job-search/openrouter-api-key
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/portable-master-key"
+        target: /run/job-search/portable-master-key
+        read_only: true
+        bind: {create_host_path: false}

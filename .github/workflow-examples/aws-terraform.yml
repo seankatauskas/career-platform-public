@@ -28,7 +28,7 @@ concurrency:
 jobs:
   terraform:
     if: github.repository == 'seankatauskas/career-platform' && github.ref == vars.AWS_WORKFLOW_REF && github.event_name == 'workflow_dispatch' && github.actor == 'seankatauskas' && github.triggering_actor == 'seankatauskas'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64, career-platform-linux]
     environment: production
     timeout-minutes: 60
     permissions:
@@ -45,6 +45,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Prepare isolated production tools
+        run: bash scripts/prepare-aws-runner.sh
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: '1.13.5'
@@ -73,6 +75,7 @@ jobs:
           PY
       - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
+          unset-current-credentials: true
           role-to-assume: ${{ vars.AWS_INFRASTRUCTURE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-terraform-${{ github.run_id }}
@@ -120,3 +123,6 @@ jobs:
       - name: Clear runner state artifacts
         if: always()
         run: rm -f "$RUNNER_TEMP/aws.tfvars.json" "$RUNNER_TEMP/aws.tfplan" infra/aws/alarm_rollout_override.tf
+      - name: Remove this job's tools and registry credentials
+        if: always() && env.CAREER_RUNNER_ROOT != ''
+        run: rm -rf -- "${CAREER_RUNNER_ROOT:?}"

@@ -192,11 +192,12 @@ ops.restore_unlocked(p['c'],Path(p['bundle']),p['sha'],replace=True)
                         fixture.doCleanups()
 
     def test_deployment_sigkill_recovery_obeys_write_boundary(self):
-        for boundary in ('prepared', 'snapshotting', 'snapshot_published', 'snapshotted', 'initializing', 'release_pointer', 'secrets', 'after_write'):
+        for boundary in ('precopy', 'prepared', 'snapshotting', 'reused_file', 'snapshot_published', 'snapshotted', 'preparing_runtime', 'initializing', 'release_pointer', 'secrets', 'after_write'):
             with self.subTest(boundary=boundary):
                 fixture = ops_fixtures.OperationsTests(); fixture.setUp()
                 try:
                     fixture.original_data(); fixture.install_candidate()
+                    (fixture.data/'state/large.bin').write_bytes(b'fictional archive' * 100000)
                     (fixture.data/'materialized-secrets.json').write_text('{}')
                     payload = {'c':fixture.c, 'boundary':boundary}
                     code = """
@@ -228,10 +229,16 @@ def checkpoint(self,phase,**fields):
     update(self,phase,**fields)
     if phase==p['boundary']: kill()
 ops.Operation.update=checkpoint
+sync=ops.sync_tree
+def flush(path):
+    sync(path)
+    if p['boundary']=='precopy' and path.name.startswith('snapshot-preparing-'): kill()
+ops.sync_tree=flush
 replace=ops.os.replace
 def publish(source,destination):
     replace(source,destination)
     if p['boundary']=='snapshot_published' and str(destination).endswith('.snapshot'): kill()
+    if p['boundary']=='reused_file' and 'snapshot-preparing-' in str(source): kill()
 ops.os.replace=publish
 point=ops.point_current
 def point_current(c,path):
@@ -248,6 +255,12 @@ ops.deploy(p['c'],'b'*40+'-2')
                     result=subprocess.run([sys.executable,'-c',code],input=json.dumps(payload),text=True,capture_output=True,cwd=ROOT,timeout=20)
                     self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
                     record=read(fixture.c)
+                    if boundary == 'precopy':
+                        self.assertIsNone(record)
+                        self.assertFalse((fixture.data/'maintenance/gate.json').exists())
+                        self.assertEqual(ops.release_path(fixture.c).name,'a'*40+'-1')
+                        self.assertTrue(list((fixture.data/'backups').glob('snapshot-preparing-*')))
+                        continue
                     with patch.object(ops,'stop_project'), patch.object(ops,'running_services',return_value=[]), patch.object(ops,'chown_runtime'):
                         ops.recover(fixture.c,record['operation_id'])
                     if boundary=='after_write':
@@ -257,6 +270,7 @@ ops.deploy(p['c'],'b'*40+'-2')
                         self.assertFalse((fixture.data/'state/candidate.txt').exists())
                         self.assertEqual(ops.release_path(fixture.c).name,'a'*40+'-1')
                     self.assertFalse(json.loads((fixture.data/'activation.json').read_text())['enabled'])
+                    self.assertEqual((fixture.data/'state/large.bin').read_bytes(), b'fictional archive' * 100000)
                 finally:
                     fixture.doCleanups()
 

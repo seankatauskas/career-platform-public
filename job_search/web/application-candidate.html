@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Applications · Local candidate</title><link rel="stylesheet" href="/candidate.css"></head>
+<body>
+<header><div><p class="eyebrow">CAREER WORKSPACE</p><h1>Applications</h1></div><span class="badge">Local candidate · delivery paused</span></header>
+<a id="dashboard-link" href="/#shortlist" hidden>Shortlists, profile, and resumes</a>
+<p id="notice" role="status" aria-live="polite"></p>
+<main>
+<aside><h2>Your applications</h2><nav id="applications" aria-label="Applications"></nav>
+<details><summary>Add a job</summary><form id="save-job">
+<label>Employer<input name="employer" required maxlength="200"></label>
+<label>Role<input name="title" required maxlength="200"></label>
+<label>Posting reference<input name="source_id" required maxlength="500" placeholder="A URL or your own reference"></label>
+<button>Start tracking</button></form></details></aside>
+<section id="workspace"><p class="empty">Select an application, or add a job to start tracking it.</p></section>
+</main>
+<template id="workspace-template">
+<div class="application-heading"><div><h2 id="role"></h2><p id="employer"></p></div><span id="stage" class="badge"></span></div>
+<section><h3>Needs your review</h3><div id="reviews"></div></section>
+<section><h3>Tasks</h3><div id="tasks"></div><form id="new-task" class="inline"><label>New task<input name="description" required maxlength="1000"></label><button>Add task</button></form></section>
+<section><h3>Notes</h3><div id="notes"></div><form id="new-note"><label>Add a note<textarea name="text" required rows="3" maxlength="10000"></textarea></label><button>Save note</button></form></section>
+<section><h3>Correspondence and processing</h3><div id="messages"></div><div id="coverage"></div></section>
+<section><h3>External actions</h3><p id="delivery-note">Approval applies to the exact message or calendar change shown. Delivery stays paused in this local candidate.</p><div id="actions"></div></section>
+<section><h3>Application lifecycle</h3><div id="lifecycle-records"></div><button id="close-application" class="secondary">Stop pursuing</button><button id="reopen-application" class="secondary" hidden>Reopen application</button></section>
+</template>
+<script src="/candidate.js" defer></script>
+</body></html>

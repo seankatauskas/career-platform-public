@@ -118,6 +118,23 @@ class Operation:
     def finish(self, phase: str, **fields: Any) -> None:
         self.update(phase, complete=True, **fields)
 
+    def durations(self) -> dict:
+        """Completed intervals, without treating worker drain as UI downtime."""
+        phases = self.value["phase_times"]
+        pairs = {"drain": (phases.get("draining"), phases.get("stopping")),
+                 "stop": (phases.get("stopping"), phases.get("quiesced")),
+                 "snapshot": (phases.get("snapshotting"), phases.get("snapshotted")),
+                 "runtime_preparation": (phases.get("preparing_runtime"), phases.get("initializing")),
+                 "initialize": (phases.get("initializing"), phases.get("validating")),
+                 "validation": (phases.get("validating"), phases.get("resuming")),
+                 "service_startup": (phases.get("resuming"), self.value.get("downtime_finished_at")),
+                 "maintenance_window": (self.value.get("downtime_started_at"), self.value.get("downtime_finished_at"))}
+        result = {name: round(max(0, (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()), 3)
+                  for name, (start, end) in pairs.items() if start and end}
+        if "maintenance_window" in result:
+            result["downtime"] = result["maintenance_window"] if self.value.get("active_services") else 0.0
+        return result
+
     @property
     def id(self) -> str:
         return self.value["operation_id"]

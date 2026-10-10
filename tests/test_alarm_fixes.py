@@ -15,7 +15,7 @@ from job_search.inference.usage import (
     begin_invocation, current_scope, InvocationReconciliationRequired,
     UsagePolicy, usage_report,
 )
-from job_search.mail.model import ModelExecutionError
+from job_search.mail.model import ModelExecutionError, ModelOutputError
 from job_search.contracts import ContractError, ConflictError
 from tests.test_mail_understanding_runtime import fixture
 from tests import test_job_search_aws_ops as operations
@@ -35,7 +35,7 @@ class MailOutputTests(unittest.TestCase):
                 original = classifier.classify
                 def classify(text, candidates):
                     transport('https://fixture.invalid', {}, b'{"max_tokens":20}', 30, 1000)
-                    if mode == 'malformed': raise ModelExecutionError('invalid JSON')
+                    if mode == 'malformed': raise ModelOutputError('invalid JSON')
                     if mode == 'empty': raise InferenceResponseRejected('no text', retryable=False)
                     if mode == 'unknown': raise RuntimeError('unexpected interruption after response')
                     return original(text, candidates)
@@ -43,21 +43,26 @@ class MailOutputTests(unittest.TestCase):
                     if mode == 'save_failed':
                         with patch.object(ledger.store, '_idempotent', side_effect=RuntimeError('lost database save')), self.assertRaises(InvocationReconciliationRequired):
                             recover_review(ledger, source, query, classifier, 'fixture', usage_limits={'max_inflight': 1})
-                    else:
-                        expected = InvocationReconciliationRequired if mode == 'unknown' else ContractError
-                        with self.assertRaises(expected):
+                    elif mode == 'unknown':
+                        with self.assertRaises(InvocationReconciliationRequired):
                             recover_review(ledger, source, query, classifier, 'fixture', usage_limits={'max_inflight': 1})
+                    else:
+                        result = recover_review(ledger, source, query, classifier, 'fixture', usage_limits={'max_inflight': 1})
+                        self.assertEqual(result['status'], 'pending')
+                        self.assertIn('review_id', result)
                 report = usage_report(path)
                 self.assertEqual(report['uncertain'], int(mode in ('save_failed', 'unknown')))
                 self.assertEqual(report['inflight'], int(mode in ('save_failed', 'unknown')))
                 self.assertEqual(report['reserved_requests'], 1)
-                self.assertEqual(stage(path), before)
+                if mode in ('save_failed', 'unknown'):
+                    self.assertEqual(stage(path), before)
+                else:
+                    self.assertEqual(stage(path)['processing_status'], 'processed')
                 with connect(path) as con:
                     self.assertEqual(con.execute('SELECT COUNT(*) FROM event_proposals').fetchone()[0], 0)
 
     def test_rejected_answer_releases_slot_and_allows_bounded_retry(self):
-        for error in (ModelExecutionError('invalid JSON'), ContractError('invalid evidence'),
-                      InferenceResponseRejected('no text', retryable=False)):
+        for error in (ModelExecutionError('command failed'), ContractError('invalid configuration')):
             with self.subTest(error=type(error).__name__), TemporaryDirectory() as d:
                 path, ledger, runtime, analyzer, obs, candidate, _ = fixture(d)
                 runtime.policy = UsagePolicy(max_inflight=1)

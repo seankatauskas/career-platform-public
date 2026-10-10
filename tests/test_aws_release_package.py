@@ -24,7 +24,7 @@ def repository(root: Path) -> str:
     git(root, "init", "--quiet")
     for name in ("compose.cloud.yaml", "job_search/aws_ops.py", "scripts/job-search-ops",
                  "job_search/worker.py", "job_search/web/app.js", "compose.hermes.yaml",
-                 "job_search/secret.txt"):
+                 "compose.applications.yaml", "job_search/secret.txt"):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("committed runtime\n")
@@ -59,6 +59,7 @@ def test_package_uses_commit_blobs_preserves_modes_and_excludes_private_files() 
         with tarfile.open(root / "output/release.tar.gz") as archive:
             names = set(archive.getnames())
             assert "job_search/worker.py" in names and "compose.hermes.yaml" in names
+            assert "compose.applications.yaml" in names
             assert not names.intersection({"job_search/secret.txt", "job_search/history.db", ".env", "personal-resume.pdf", "job_search/new.py"})
             assert archive.extractfile("job_search/worker.py").read() == b"committed runtime\n"
             assert archive.getmember("scripts/job-search-ops").mode == 0o755

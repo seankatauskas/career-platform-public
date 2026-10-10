@@ -1,6 +1,5 @@
-# syntax=docker/dockerfile:1
-# Multi-platform index digest resolved from the official image on 2026-09-03.
-ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+# Official Python image mirrored in ECR Public; digest retained from 2026-09-03.
+ARG PYTHON_BASE_IMAGE=public.ecr.aws/docker/library/python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
 FROM ${PYTHON_BASE_IMAGE}
 
 ARG JOB_SEARCH_UID=10001

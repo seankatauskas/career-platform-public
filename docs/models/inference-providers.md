@@ -184,6 +184,26 @@ python -m job_search --config /path/to/runtime.json inference-usage
 python -m job_search --config /path/to/runtime.json inference-recovery
 ```
 
+An operator can grant a bounded token top-up for the current UTC day:
+
+```sh
+python -m job_search --config /path/to/runtime.json inference-allowance-grant \
+  --budget-day YYYY-MM-DD --tokens 2000000 \
+  --reason "Owner requested another daily allowance for waiting work" \
+  --idempotency-key owner-allowance-YYYY-MM-DD
+```
+
+The immutable receipt records the user decision and the safe queued work brought
+forward for another attempt. Repeating the same key returns the same receipt.
+The top-up expires at midnight UTC; the configured daily limit and all invocation
+history remain unchanged. Workers still enforce request and concurrency limits,
+provider reconciliation, automation controls, and domain permissions. A top-up
+does not itself approve proposals or external actions. `inference-usage` reports
+both the base limits and today's effective limits. This allowance is shared by
+all platform-managed inference, including mail and ranking; it is not a mail-only
+budget or provider credit. Additive grant storage preserves core schema compatibility;
+a predecessor release ignores grants and enforces its original configured limits.
+
 After reviewing a provider outcome, the authenticated user can issue
 `inference-reconcile INVOCATION_ID --expected-updated-at TIMESTAMP --resolution
 absent|failed|completed --provider-job-id JOB_ID --idempotency-key COMMAND_ID` using

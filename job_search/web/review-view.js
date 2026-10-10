@@ -23,6 +23,8 @@ document.querySelector("#attention").innerHTML = `
 
 function actionNeedsReview(action) { return action.status === "pending" || action.status === "needs_reconciliation"; }
 function reviewTitle(item) {
+  if (item.kind === "mail_classification_review") return "Classification needs review";
+  if (item.kind === "reply_request") return item.task_kind === "send_availability" ? "Availability requested" : "Reply requested";
   if (item.kind === "mail_analysis") return item.analysis?.subject || "Email findings";
   if (item.kind === "lifecycle_correction") return "Proposed application update";
   if (item.kind === "interview_revision") return "Interview change";
@@ -34,6 +36,7 @@ function reviewTitle(item) {
   return ({outlook_reply_draft: "Reply draft", outlook_calendar_hold: "Private interview hold"})[item.kind] || "Application action";
 }
 function reviewStatus(item) {
+  if (item.kind === "reply_request") return "Needs your response";
   return item.status === "needs_reconciliation" ? "Check outcome" : item.kind === "outlook_reply_draft" || item.kind === "outlook_calendar_hold" ? "Needs approval" : "Needs review";
 }
 function reviewEventActionLabel(item) {
@@ -89,6 +92,7 @@ function renderReviewSuggestion(item, detail) {
   return section;
 }
 function getReviewItems() {
+  if (typeof state !== "undefined" && state.applicationBackend === "owners") return ownerReviewNormalized();
   const groups = consoleState.reviews.filter(item => item.kind === "mail_analysis" && item.analysis?.mode === "shared" && !item.analysis?.replay_id && item.analysis?.current !== false);
   const groupedProposals = new Set(groups.flatMap(item => (item.analysis.findings || []).filter(f => f.projection).map(f => `${f.projection.kind}:${f.projection.id}`)));
   const rows = [...consoleState.reviews.filter(item => item.kind !== "action_proposal" && [undefined, "review", "pending", "conflict", "failed"].includes(item.status)
@@ -105,7 +109,8 @@ function getReviewItems() {
   return [...unique.values()].sort((a, b) => Number(b.status === "needs_reconciliation") - Number(a.status === "needs_reconciliation") || time(a.deadline) - time(b.deadline) || time(a.createdAt) - time(b.createdAt) || a.key.localeCompare(b.key));
 }
 function reviewItemsForApplication(id) {
-  return getReviewItems().filter(item => item.applicationId ? item.applicationId === id : (item.raw.candidate_application_ids || []).includes(id));
+  // Candidate matches are context for review, never confirmed application links.
+  return getReviewItems().filter(item => item.applicationId === id);
 }
 function reviewHref(item) { return `#review/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`; }
 let reviewAttentionLoaded = false;
@@ -114,6 +119,7 @@ let reviewAttentionError = null;
 let reviewActionsError = null;
 let lastFocusedReviewRoute = "";
 function updateReviewCount() {
+  if (typeof state !== "undefined" && state.applicationBackend === "owners") return ownerReviewCount();
   const count = getReviewItems().length;
   const badge = document.querySelector("#review-count");
   const unavailable = reviewAttentionError || reviewActionsError;
@@ -138,6 +144,7 @@ function restoreReviewDisclosures(row, saved) {
   });
 }
 function renderReviewQueue() {
+  if (typeof state !== "undefined" && state.applicationBackend === "owners") return renderOwnerReviewQueue();
   const applicationId = new URLSearchParams(location.hash.split("?")[1] || "").get("application");
   const items = applicationId ? reviewItemsForApplication(applicationId) : getReviewItems();
   const pendingIds = new Set(getReviewItems().map(item => item.id));
@@ -285,12 +292,14 @@ async function fetchReviewActions() {
   } catch (error) { if (epoch === reviewActionsEpoch) reviewActionsError = error; throw error; }
 }
 async function loadAttention() {
+  if (state.applicationBackend === "owners") return loadOwnerReviewQueue();
   try { await fetchReviewAttention(); } finally { renderReviewQueue(); }
   queueReviewFailureAnalysis();
 }
-async function loadActions() { try { await fetchReviewActions(); } finally { renderReviewQueue(); } }
+async function loadActions() { if (state.applicationBackend === "owners") return loadOwnerReviewQueue(); try { await fetchReviewActions(); } finally { renderReviewQueue(); } }
 let reviewLoadEpoch = 0;
 async function loadReviewQueue() {
+  if (state.applicationBackend === "owners") return loadOwnerReviewQueue();
   const epoch = ++reviewLoadEpoch;
   const button = document.querySelector("#refresh-attention");
   const feedback = document.querySelector("#review-feedback");
@@ -323,7 +332,9 @@ function mailResolutionEditor(item) {
     ["record", "Record an application update"], ["keep", "Keep the message without changing status"],
     ["dismiss", "Dismiss from review"]], "record"));
   const updateFields = node("div", "mail-resolution-fields"); form.append(updateFields);
-  const event = field("What does the email mean?", mailChoice("Email meaning", Object.entries(MAIL_EVENT_LABELS), item.detail), updateFields);
+  const event = field("What does the email mean?", mailChoice("Email meaning",
+    item.kind === "mail_classification_review" ? [["", "Choose an interpretation…"], ...Object.entries(MAIL_EVENT_LABELS)] : Object.entries(MAIL_EVENT_LABELS),
+    item.kind === "mail_classification_review" ? "" : item.detail), updateFields);
   const quote = field("Supporting words from the email", node("textarea"), updateFields);
   quote.rows = 3; quote.maxLength = 512; quote.value = item.evidence_quote || "";
   updateFields.append(node("p", "help", "If the interpretation is wrong, choose the right update and copy the supporting words from the message."));
@@ -418,7 +429,10 @@ function mailResolutionEditor(item) {
     if (!application.value) throw new Error("Choose an application or create a missing one.");
     if (application.value === "new") value.new_application = {employer:employer.value, title:title.value};
     else value.application_id = application.value;
-    if (value.decision === "record") { value.event_type = event.value; value.evidence_quote = quote.value; }
+    if (value.decision === "record") {
+      if (!event.value) throw new Error("Choose what the email means.");
+      value.event_type = event.value; value.evidence_quote = quote.value;
+    }
     if (task.value) value.task = {kind:task.value, note:note.value, ...(due.value ? {due_at:new Date(due.value).toISOString().replace('.000Z','Z')} : {})};
     return value;
   };
@@ -733,6 +747,43 @@ async function loadMailReviewHistory() {
 }
 document.querySelector("#refresh-mail-history").addEventListener("click", loadMailReviewHistory);
 
+function renderReplyRequest(item, detail, actions) {
+  detail.append(node("p", "", item.detail), node("p", "help", "Review the email before replying. Preparing a reply keeps this task open and does not send anything."));
+  if (item.due_at) detail.append(node("p", "meta", `Due ${displayDate(item.due_at)}`));
+  if (item.snoozed_until) detail.append(node("p", "meta", `Snoozed until ${displayDate(item.snoozed_until)}`));
+  const feedback = node("p", "meta"); feedback.setAttribute("role", "status"); detail.append(feedback);
+  const prepare = node("button", "review-suggested-action", "Prepare reply"); prepare.type = "button";
+  prepare.disabled = !item.evidence_id;
+  if (!item.evidence_id) feedback.textContent = "No source email is linked. Open the application messages to check this request.";
+  const dismiss = node("button", "quiet", "No reply needed"); dismiss.type = "button";
+  const prepared = node("a", "review-context-link", "Review prepared replies"); prepared.href = "#settings/chief";
+  const prepareKey = key("prepare-reply"), dismissKey = key("dismiss-reply");
+  let queued = false;
+  const run = async (operation) => {
+    prepare.disabled = true; dismiss.disabled = true; feedback.textContent = "";
+    try {
+      if (operation === "prepare") {
+        await api("/api/v1/lifecycle/tasks/prepare-reply", {method:"POST", body:JSON.stringify({
+          idempotency_key:prepareKey, task_id:item.id, expected_revision:item.revision_no,
+        })});
+        queued = true; prepare.textContent = "Preparation queued";
+        feedback.textContent = "Reply preparation queued. Review the result in Settings → Chief of staff before approving it.";
+      } else {
+        await api("/api/v1/lifecycle/tasks/transition", {method:"POST", body:JSON.stringify({
+          idempotency_key:dismissKey, task_id:item.id, operation:"cancel",
+          values:{expected_revision:item.revision_no, reason:"Reviewed source email: no reply needed."},
+        })});
+        await Promise.all([loadReviewQueue(), refreshApplicationWorkspace()]);
+        notice("Reply request dismissed. Future briefings will no longer include this task.");
+      }
+    } catch (error) { feedback.textContent = error.message; }
+    finally { prepare.disabled = queued || !item.evidence_id; dismiss.disabled = false; }
+  };
+  prepare.addEventListener("click", () => run("prepare"));
+  dismiss.addEventListener("click", () => run("dismiss"));
+  actions.append(prepare, dismiss, prepared);
+}
+
 function reviewItem(normalized) {
     const item = normalized.raw;
     if (item.kind === "mail_analysis") return mailAnalysisItem(item.analysis);
@@ -763,6 +814,7 @@ function reviewItem(normalized) {
       detail.append(node("p", "help", "Saves the proposed time to this application. It does not accept an invitation or notify anyone."));
     }
     const actions = node("footer", "actions review-card-actions");
+    if (item.kind === "reply_request") renderReplyRequest(item, detail, actions);
     if (["lifecycle_correction","interview_revision","mail_discovery"].includes(item.kind)) renderLifecycleReview(item, detail, actions);
     if (item.kind === "browser_submission") {
       detail.append(node("p", "", item.detail));
@@ -832,6 +884,12 @@ function reviewItem(normalized) {
         });
         actions.append(button);
       }
+    }
+    if (item.kind === "mail_classification_review") {
+      detail.append(node("p", "help", "The AI answer could not be verified. Read the email and choose an update, keep it without changing status, or dismiss it. No application status has changed."));
+      const editor = mailResolutionEditor(item);
+      editor.open = true;
+      detail.append(editor);
     }
     if (item.kind === "event_proposal") {
       const candidateIds = [...new Set([item.application_id, ...(item.candidate_application_ids || [])].filter(Boolean))];

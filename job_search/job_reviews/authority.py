@@ -80,6 +80,8 @@ class ReviewAuthority(AdjudicationAuthorityMixin, RoutingAuthorityMixin, Finaliz
 
     def _managed_run(self, con, review_id, *, active=True):
         run = self.service._run(con, review_id, active)
+        if unpack(run['metadata_json']).get('workflow') == 'old-method-v1':
+            raise ContractError('OLD METHOD reviews require their dedicated host workflow')
         if unpack(run['metadata_json']).get('execution_mode') != 'isolated':
             raise ContractError('review is not managed by the isolated coordinator')
         return run

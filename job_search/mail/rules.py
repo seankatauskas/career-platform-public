@@ -15,7 +15,7 @@ from .proposals import build_proposal
 from .sanitizer import SanitizedMail
 
 
-RULE_PRODUCER_VERSION = "mail-rules-v6-outcomes"
+RULE_PRODUCER_VERSION = "mail-rules-v7-receipt-contractions"
 SUBMISSION_CONFIRMATION_WINDOW_SECONDS = 15 * 60
 
 # Match whole, affirmative outcome sentences, never a keyword inside a negation,
@@ -75,11 +75,11 @@ def _template(
         ats_values=ats_values,
         subject_pattern=re.compile(
             r"\b(?:(?:thank you|thanks) for applying|application (?:was )?received|"
-            r"we (?:have )?received your application)\b",
+            r"we(?: have|['’]ve)? received your application)\b",
             re.I,
         ),
         evidence_pattern=re.compile(
-            r"\b(?:we (?:have )?received your application|"
+            r"\b(?:we(?: have|['’]ve)? received your application|"
             r"your application (?:has been|was) received|"
             r"(?:thank you|thanks) for applying(?: to [^\n.!]{1,120})?)\b",
             re.I,

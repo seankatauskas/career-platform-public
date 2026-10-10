@@ -34,17 +34,24 @@ def application_resume_content(gateway: Any, application_id: str) -> Mapping[str
     try:
         with ledger_connect(gateway.application_db) as connection:
             connection.execute("BEGIN")
-            app = connection.execute(
-                "SELECT ats,job_id,current_phase,submitted_at FROM applications WHERE application_id=?",
-                (application_id,),
-            ).fetchone()
+            owner = getattr(gateway, "application_gateway", None)
+            if owner is not None:
+                timeline = owner.get_application_timeline(application_id)
+                app = timeline["application"]
+                event = next(iter(timeline["events"]), None)
+                submission = {"event_id": event["event_id"], "payload_json": json.dumps(event["payload"])} if event else None
+            else:
+                app = connection.execute(
+                    "SELECT ats,job_id,current_phase,submitted_at FROM applications WHERE application_id=?",
+                    (application_id,),
+                ).fetchone()
+                submission = connection.execute(
+                    "SELECT event_id,payload_json FROM application_events WHERE application_id=? "
+                    "AND event_type IN ('submission_observed','submission_confirmed') "
+                    "ORDER BY CASE WHEN event_type='submission_observed' THEN 0 ELSE 1 END,event_seq LIMIT 1", (application_id,),
+                ).fetchone()
             if app is None:
                 return unavailable("application_not_found")
-            submission = connection.execute(
-                "SELECT event_id,payload_json FROM application_events WHERE application_id=? "
-                "AND event_type IN ('submission_observed','submission_confirmed') "
-                "ORDER BY CASE WHEN event_type='submission_observed' THEN 0 ELSE 1 END,event_seq LIMIT 1", (application_id,),
-            ).fetchone()
             if submission is not None:
                 snapshot = json.loads(submission["payload_json"]).get("resume")
                 if not isinstance(snapshot, Mapping):
@@ -53,8 +60,11 @@ def application_resume_content(gateway: Any, application_id: str) -> Mapping[str
                     return unavailable("submission_resume_not_tracked")
                 if snapshot.get("decision") == "matched_upload":
                     # This binding is based on uploaded bytes, independent of resume scoring.
-                    with ledger_connect(gateway.application_db) as tracking:
-                        bound = tracking.execute("SELECT 1 FROM browser_attempts WHERE application_id=? AND resume_sha256=?", (application_id, snapshot.get("sha256"))).fetchone()
+                    if owner is not None:
+                        bound = any(document.get("sha256") == snapshot.get("sha256") for observation in owner.browser_observations(application_id) for document in observation.get("documents", []))
+                    else:
+                        with ledger_connect(gateway.application_db) as tracking:
+                            bound = tracking.execute("SELECT 1 FROM browser_attempts WHERE application_id=? AND resume_sha256=?", (application_id, snapshot.get("sha256"))).fetchone()
                     if not bound:
                         return unavailable("resume_binding_unavailable")
                     version = gateway.service.store.get_standard_version(str(snapshot.get("standard_version_id") or ""))
@@ -71,7 +81,7 @@ def application_resume_content(gateway: Any, application_id: str) -> Mapping[str
                 artifact_id = str(snapshot.get("artifact_id") or "")
                 evaluation_id = str(snapshot.get("evaluation_id") or "")
                 binding = "submitted"
-            elif app["submitted_at"] or app["current_phase"] != "preparing":
+            elif owner is None and (app["submitted_at"] or app["current_phase"] != "preparing"):
                 return unavailable("submission_resume_not_recorded")
             else:
                 selection = gateway.service.current_application_selection(application_id)

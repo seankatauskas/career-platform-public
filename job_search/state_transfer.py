@@ -46,6 +46,11 @@ def key_fingerprint(path: Path | None) -> str:
 def export_state(config, output: Path, *, writers_stopped: bool = False) -> dict:
     if not writers_stopped:
         raise ValueError('stop dashboard, MCP, workers and all other writers before exporting')
+    if getattr(config, 'application_backend', 'legacy') == 'owners':
+        raise ValueError('Owner application installations require a complete installation backup; state transfer export is unsupported')
+    from .portable_export import require_legacy_export_source
+    with closing(sqlite3.connect(config.application_db.resolve().as_uri()+'?mode=ro', uri=True)) as con:
+        require_legacy_export_source(con)
     output = private_destination(output)
     fingerprint = key_fingerprint(config.portable_encryption_key_file)
     with closing(sqlite3.connect(config.application_db.resolve().as_uri()+'?mode=ro', uri=True)) as con:
@@ -61,6 +66,7 @@ def export_state(config, output: Path, *, writers_stopped: bool = False) -> dict
             with closing(sqlite3.connect(source.resolve().as_uri()+'?mode=ro', uri=True)) as src, \
                  closing(sqlite3.connect(stage/name)) as dst:
                 src.backup(dst)
+                if field == 'application_db': require_legacy_export_source(dst)
             (stage/name).chmod(0o600)
             sqlite_check(stage/name)
         if not config.resume_artifact_root or not config.resume_artifact_root.is_dir():
@@ -125,6 +131,9 @@ def import_state(archive: Path, expected_sha256: str, destination: Path, *, port
             if p.stat().st_size != expected['size'] or digest(p) != expected['sha256']:
                 raise ValueError('transfer member checksum mismatch')
         for name in DATABASES.values(): sqlite_check(stage/name)
+        from .portable_export import require_legacy_export_source
+        with closing(sqlite3.connect(stage/'applications.db')) as con:
+            require_legacy_export_source(con)
         with closing(sqlite3.connect(stage/'preferences.db')) as con:
             with con:
                 for run in manifest['models']:

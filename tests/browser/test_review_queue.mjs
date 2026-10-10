@@ -88,7 +88,7 @@ try {
   assert.equal(await page.locator('#review-count').innerText(), '5');
   assert.equal(await page.locator('#attention-list > article').count(), 5);
   assert.equal(await page.locator('#action-list > article').count(), 1);
-  assert.equal(await page.evaluate(()=>reviewItemsForApplication('app1').length), 4);
+  assert.equal(await page.evaluate(()=>reviewItemsForApplication('app1').length), 3, 'Unconfirmed candidates stay in global Review only');
   assert.equal(await page.evaluate(()=>reviewItemsForApplication('app2').length), 0);
   const messagePanel = page.locator('[data-review-key="event_proposal:p1"] .review-message');
   assert.equal(await messagePanel.getAttribute('open'), null);
@@ -631,6 +631,67 @@ try {
     return {guarded,preservesEdits,discovers:requests.length === before + 1};
   });
   assert.deepEqual(focusChecks,{guarded:true,preservesEdits:true,discovers:true});
+  // Rejected AI output has no inferred event or quote and requires a user decision.
+  await page.evaluate(() => {
+    requests.length = 0; consoleState.actions = []; consoleState.view = 'review';
+    consoleState.reviews = [{kind:'mail_classification_review', id:'unclassified:fixture',
+      status:'review', application_id:null, subject:'Unclassified application email', created_at:'2026-09-01'}];
+    renderReviewQueue();
+  });
+  const manual = page.locator('#attention-list > article');
+  assert.match(await manual.textContent(), /Classification needs review/);
+  assert.match(await manual.textContent(), /No application status has changed/);
+  assert.equal(await manual.getByLabel('What does the email mean?', {exact:true}).inputValue(), '');
+  assert.equal(await manual.getByLabel('Supporting words from the email', {exact:true}).inputValue(), '');
+  await manual.getByLabel('Application', {exact:true}).selectOption('app1');
+  await manual.getByRole('button', {name:'Preview resolution', exact:true}).click();
+  assert.match(await manual.textContent(), /Choose what the email means/);
+  assert.equal(await page.evaluate(() => requests.some(r=>r.path==='/api/v1/mail-review/preview')), false);
+  await manual.getByLabel('What does the email mean?', {exact:true}).selectOption('submission_confirmed');
+  await manual.getByLabel('Supporting words from the email', {exact:true}).fill('We received your application.');
+  await manual.getByRole('button', {name:'Preview resolution', exact:true}).click();
+  const manualPreview = await page.evaluate(() => JSON.parse(requests.find(r=>r.path==='/api/v1/mail-review/preview').options.body));
+  assert.equal(manualPreview.decisions[0].proposal_id, 'unclassified:fixture');
+  assert.equal(manualPreview.decisions[0].event_type, 'submission_confirmed');
+  assert.equal(await page.evaluate(() => requests.some(r=>r.path==='/api/v1/mail-review/resolve')), false);
+  await manual.getByRole('button', {name:'Save resolution', exact:true}).click();
+  assert.equal(await page.evaluate(() => requests.filter(r=>r.path==='/api/v1/mail-review/resolve').length), 1);
+
+  // A reply request appears before a draft exists and uses the same task revision
+  // for preparation and dismissal. Email HTML remains plain text.
+  await page.evaluate(() => {
+    consoleState.view = 'review'; location.hash = '#review';
+    consoleState.actions = [];
+    consoleState.reviews = [{kind:'reply_request', id:'reply-task', status:'review',
+      application_id:'app1', evidence_id:'reply-evidence', revision_no:3,
+      task_kind:'reply', detail:'Please confirm your interest.', subject:'Recruiter question',
+      created_at:'2026-10-09', due_at:'2026-10-10'}];
+    renderReviewQueue();
+  });
+  const replyRequest = page.locator('[data-review-key="reply_request:reply-task"]');
+  assert.equal(await page.locator('#review-count').innerText(), '1');
+  assert.match(await replyRequest.innerText(), /Needs your response/);
+  assert.equal(await replyRequest.getByRole('link', {name:'Review prepared replies'}).getAttribute('href'), '#settings/chief');
+  await replyRequest.locator('.review-message summary').click();
+  await replyRequest.locator('.message-body').waitFor();
+  await replyRequest.getByRole('button', {name:'Prepare reply', exact:true}).click();
+  assert.equal(await replyRequest.getByRole('button', {name:'Preparation queued'}).isDisabled(), true);
+  assert.match(await replyRequest.innerText(), /does not send anything/);
+  assert.equal(await page.locator('#review-count').innerText(), '1');
+  const prepRequest = await page.evaluate(() => requests.find(r=>r.path==='/api/v1/lifecycle/tasks/prepare-reply'));
+  assert.deepEqual(JSON.parse(prepRequest.options.body), {idempotency_key:'prepare-reply-fixture', task_id:'reply-task', expected_revision:3});
+  await replyRequest.getByRole('button', {name:'No reply needed', exact:true}).click();
+  const dismissRequest = await page.evaluate(() => requests.find(r=>r.path==='/api/v1/lifecycle/tasks/transition'));
+  assert.deepEqual(JSON.parse(dismissRequest.options.body), {idempotency_key:'dismiss-reply-fixture',
+    task_id:'reply-task', operation:'cancel', values:{expected_revision:3, reason:'Reviewed source email: no reply needed.'}});
+  assert.equal(await replyRequest.count(), 0);
+  await page.evaluate(() => {
+    consoleState.reviews = [{kind:'reply_request', id:'unlinked-reply', status:'review',
+      application_id:'app1', revision_no:1, task_kind:'send_availability', detail:'Check source'}];
+    renderReviewQueue();
+  });
+  assert.equal(await page.getByRole('button', {name:'Prepare reply', exact:true}).isDisabled(), true);
+  assert.match(await page.locator('#attention-list').innerText(), /No source email is linked/);
   // The legacy Ranking Lab retains jobs and order without duplicating score diagnostics.
   const lab = await browser.newPage();
   lab.on('pageerror',error=>errors.push(error.message));

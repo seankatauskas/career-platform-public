@@ -13,6 +13,7 @@ from .inference import InferenceTransportError
 from .mail.context import CandidateApplication
 from .mail.evaluation import EvaluationReport
 from .mail.pipeline import analyze_mail
+from .mail.classification_review import ClassificationRejected, save_review
 from .mail.policy import ProposalDisposition, decide_proposal
 from .mail.sanitizer import sanitize_mail
 from .outlook.mail import GraphMailClient
@@ -558,17 +559,29 @@ class OutlookMailCoordinator:
                         mark(*identity, 'processed', query_version=query_version)
                         processed += 1
                         continue
-                proposal = analyze_mail(
-                    evidence_id=evidence_id,
-                    sender_address=sender,
-                    mail=sanitized,
-                    candidates=candidates,
-                    classifier=self.classifier,
-                    model_version=self.model_version,
-                    received_at=received_at,
-                    sender_authenticated=authenticated_sender(payload, sender),
-                    candidate_context_complete=candidate_context_complete,
-                )
+                with connect(self.state.db_path) as con:
+                    classification_review = con.execute(
+                        'SELECT 1 FROM mail_classification_reviews WHERE evidence_id=?', (evidence_id,)
+                    ).fetchone() is not None
+                proposal = None
+                try:
+                    if not classification_review:
+                        proposal = analyze_mail(
+                            evidence_id=evidence_id,
+                            sender_address=sender,
+                            mail=sanitized,
+                            candidates=candidates,
+                            classifier=self.classifier,
+                            model_version=self.model_version,
+                            received_at=received_at,
+                            sender_authenticated=authenticated_sender(payload, sender),
+                            candidate_context_complete=candidate_context_complete,
+                        )
+                except ClassificationRejected:
+                    save_review(self.service.store, evidence_id, self.model_version,
+                        MutationContext('unclassified:' + evidence_id, 'system', 'outlook_mail', identity[2]))
+                    proposal = None
+                    classification_review = True
                 if proposal is not None:
                     created = self.service.create_event_proposal(
                         proposal,
@@ -603,7 +616,7 @@ class OutlookMailCoordinator:
                         auto_applied += 1
                 if proposal is not None and proposal.proposed_application_id and candidate_context_complete and (created['proposal']['status'] in {'accepted', 'auto_applied'} or (not historical and direction == 'inbound' and decision.disposition is ProposalDisposition.AUTO_APPLY)):
                     self.service.lifecycle.link_mail({'observation_id': observed['observation_id'], 'application_id': proposal.proposed_application_id, 'confidence': proposal.confidence, 'source':'lifecycle_proposal'}, MutationContext('proposal-link:' + observed['observation_id'] + ':' + proposal.proposed_application_id, 'system', 'outlook_sync'))
-                elif proposal is None and not linked and recruiting:
+                elif proposal is None and not classification_review and not linked and recruiting:
                     self.service.lifecycle.propose_discovery({'observation_id': observed['observation_id']}, MutationContext('discovery:' + observed['observation_id'], 'system', 'outlook_sync'))
                 mark(
                     *identity, "processed", query_version=query_version

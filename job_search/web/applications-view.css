@@ -48,3 +48,14 @@
 .lifecycle-proposal { overflow-wrap: anywhere; }
 .lifecycle-proposal dt { font-weight: 600; margin-top: 10px; }
 .lifecycle-proposal dd { margin: 4px 0 8px; }
+
+#workspace-lifecycle > section + section { margin-top: 28px; }
+#applications .owner-application-form { display: grid; gap: 12px; margin-top: 12px; }
+#applications .owner-application-form label { display: grid; gap: 8px; }
+#applications .owner-application-form textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+#applications .owner-application-form button { justify-self: start; }
+#applications #workspace-messages { padding: 24px; }
+#applications .message-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  #applications #workspace-messages { padding: 16px; }
+}

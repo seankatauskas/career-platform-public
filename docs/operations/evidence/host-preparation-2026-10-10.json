@@ -1,0 +1,4731 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-10",
+  "scope": "Local fictional fixtures only; no measured application downtime. Each retained row passed full verify_snapshot after capture.",
+  "baseline_commit": "b93525906fb0cb1168066a6c2a98b1af83e1e4a6",
+  "resources": {
+    "cpus": 2,
+    "memory_gib": 1,
+    "image": "python:3.12-slim-bookworm",
+    "storage": "local Docker Linux named volume",
+    "network": "none"
+  },
+  "limitations": [
+    "Shared host; initial 2 GiB candidate trials overlapped offline tests.",
+    "Initial baseline and parallel trials used advisory eviction without mincore residency or idle probe recording.",
+    "Large baseline was stopped after one completed and fully verified cold case; no other baseline large cases are represented.",
+    "Per-file telemetry gained a cutover field after the initial candidate trials; each report records its actual aws_ops.py SHA-256.",
+    "The read probe is tiny and cached; it cannot establish production request latency under parallel I/O.",
+    "restore_verification_seconds was added after large trials, but all successful rows were recorded only after full verification."
+  ],
+  "experiments": {
+    "baseline-linux": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "52fda6a4171af3212333dfb34a75bb7efbd81cc769f5e027008426256682c091",
+      "fixture_mib": 2048,
+      "check_workers": 0,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 8.260029796045274,
+          "cpu_seconds": 3.4644354710000003,
+          "io": {
+            "rchar": 6315042781,
+            "wchar": 2149184552,
+            "syscr": 496833,
+            "syscw": 2067,
+            "read_bytes": 2865000448,
+            "write_bytes": 2149199872,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.52568246005103,
+          "preparation_timings": {
+            "copy": 3.3539004189660773,
+            "sqlite_check": 3.552818084950559,
+            "hash": 1.096887375228107,
+            "sync": 0.24387070804368705,
+            "total": 8.250585795962252
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.8624973967671394e-05,
+              "cpu_seconds": 3.6625000000123364e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07256895897444338,
+              "cpu_seconds": 0.0725224579999999
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.4049097100505605,
+              "cpu_seconds": 1.1981358539999998
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.02309991593938321,
+              "cpu_seconds": 0.02307833299999995
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.05176187492907047,
+              "cpu_seconds": 0.051714542999999225
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 0.00011266604997217655,
+              "cpu_seconds": 6.512700000005367e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.2667070627212524e-05,
+              "cpu_seconds": 3.0999999999892225e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053526-6fe08d6d",
+            "sha256": "8f526f7ae390bcd25788631878aac58ed3a4dcc4817d692bf96af0b3313b8150",
+            "snapshot_at": "2026-10-10T05:35:26.406520+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.354,
+              "sqlite_check": 3.553,
+              "hash": 1.097,
+              "sync": 0.244,
+              "total": 8.251
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.15,
+              "reuse_publish": 0.009,
+              "capture": 1.179,
+              "manifest": 0.003,
+              "durable_publish": 0.343,
+              "total": 1.526
+            }
+          },
+          "probe": {
+            "count": 341,
+            "p95_ms": 0.09829096961766481,
+            "max_ms": 0.3268750151619315
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 0,
+          "preparation_seconds": 9.161532380036078,
+          "cpu_seconds": 3.623227463000001,
+          "io": {
+            "rchar": 6315051560,
+            "wchar": 2149150720,
+            "syscr": 496862,
+            "syscw": 2051,
+            "read_bytes": 2869829632,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.413103083963506,
+          "preparation_timings": {
+            "copy": 4.13380441791378,
+            "sqlite_check": 3.6427510852226987,
+            "hash": 1.137785375234671,
+            "sync": 0.24263720901217312,
+            "total": 9.160203880048357
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.666698466986418e-05,
+              "cpu_seconds": 3.4750000001082526e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07517025002744049,
+              "cpu_seconds": 0.07514716700000079
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.489440210047178,
+              "cpu_seconds": 1.2634879219999995
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.025948999915271997,
+              "cpu_seconds": 0.02592770899999941
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.05178141698706895,
+              "cpu_seconds": 0.051668832999999026
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.808306064456701e-05,
+              "cpu_seconds": 3.608299999946496e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.812497016042471e-05,
+              "cpu_seconds": 3.6291000000687745e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053538-9e8909ed",
+            "sha256": "3bddbd8544259bd28a9145eb5dfac16c9333c6d6d6c0dada8a12a358a94df42e",
+            "snapshot_at": "2026-10-10T05:35:38.701040+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 4.134,
+              "sqlite_check": 3.643,
+              "hash": 1.138,
+              "sync": 0.243,
+              "total": 9.16
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.195,
+              "reuse_publish": 0.014,
+              "capture": 1.233,
+              "manifest": 0.004,
+              "durable_publish": 0.176,
+              "total": 1.413
+            }
+          },
+          "probe": {
+            "count": 370,
+            "p95_ms": 0.13037503231316805,
+            "max_ms": 0.4603340057656169
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 7.801180253969505,
+          "cpu_seconds": 3.615642552999999,
+          "io": {
+            "rchar": 6315050921,
+            "wchar": 2149150720,
+            "syscr": 496822,
+            "syscw": 2051,
+            "read_bytes": 2850701312,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5415195840178058,
+          "preparation_timings": {
+            "copy": 3.0425871680490673,
+            "sqlite_check": 3.4499472110765055,
+            "hash": 1.118497624876909,
+            "sync": 0.18555416690651327,
+            "total": 7.799757295055315
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 5.520798731595278e-05,
+              "cpu_seconds": 5.2999999999414626e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07771487499121577,
+              "cpu_seconds": 0.07767012499999915
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.2928865019930527,
+              "cpu_seconds": 1.2904612150000023
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.02532579202670604,
+              "cpu_seconds": 0.025292916999998027
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.05362179200164974,
+              "cpu_seconds": 0.05359329200000218
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.562506753951311e-05,
+              "cpu_seconds": 3.3666000000209806e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.275007475167513e-05,
+              "cpu_seconds": 3.083300000028544e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053550-b5a56aac",
+            "sha256": "a2ca9b7ddc618654ef9665ffe16ef54610d38a6eda68ef65cd74c5fd2b4f84fe",
+            "snapshot_at": "2026-10-10T05:35:50.005226+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.043,
+              "sqlite_check": 3.45,
+              "hash": 1.118,
+              "sync": 0.186,
+              "total": 7.8
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.209,
+              "reuse_publish": 0.025,
+              "capture": 1.261,
+              "manifest": 0.006,
+              "durable_publish": 0.274,
+              "total": 1.541
+            }
+          },
+          "probe": {
+            "count": 330,
+            "p95_ms": 0.14004099648445845,
+            "max_ms": 1.213582931086421
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 0,
+          "preparation_seconds": 7.755810752976686,
+          "cpu_seconds": 3.5584697679999984,
+          "io": {
+            "rchar": 6315050585,
+            "wchar": 2149150720,
+            "syscr": 496801,
+            "syscw": 2051,
+            "read_bytes": 2889637888,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.7194575839675963,
+          "preparation_timings": {
+            "copy": 3.1638972508953884,
+            "sqlite_check": 3.2676968759624287,
+            "hash": 1.1311166669474915,
+            "sync": 0.1885309589561075,
+            "total": 7.754447001963854
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.6250101402401924e-05,
+              "cpu_seconds": 3.4082999999185404e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.076344083994627,
+              "cpu_seconds": 0.07630337399999831
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.1137912099948153,
+              "cpu_seconds": 1.2438923909999993
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.024276499985717237,
+              "cpu_seconds": 0.024254041999999032
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.05290479201357812,
+              "cpu_seconds": 0.05285979199999957
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.854196984320879e-05,
+              "cpu_seconds": 3.679099999942537e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.420806024223566e-05,
+              "cpu_seconds": 3.241699999989578e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053600-24e3469a",
+            "sha256": "399ea8bc152a8f9363810f7281a8a6c1a4a9ebff8cbd247e67edc6b1232cdb5d",
+            "snapshot_at": "2026-10-10T05:36:00.936015+00:00",
+            "file_count": 108,
+            "size_bytes": 2149271899,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933910016,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.164,
+              "sqlite_check": 3.268,
+              "hash": 1.131,
+              "sync": 0.189,
+              "total": 7.754
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.053,
+              "destination_hash": 0.102,
+              "source_hash": 1.075,
+              "reuse_publish": 0.017,
+              "sqlite_backup": 0.237,
+              "capture": 1.508,
+              "manifest": 0.006,
+              "durable_publish": 0.206,
+              "total": 1.719
+            }
+          },
+          "probe": {
+            "count": 309,
+            "p95_ms": 0.12879190035164356,
+            "max_ms": 0.1860830234363675
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 0,
+          "preparation_seconds": 9.370249837986194,
+          "cpu_seconds": 3.8952397219999995,
+          "io": {
+            "rchar": 6315080427,
+            "wchar": 2149163008,
+            "syscr": 496875,
+            "syscw": 2051,
+            "read_bytes": 2804555776,
+            "write_bytes": 2149163008,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 2.0066135430242866,
+          "preparation_timings": {
+            "copy": 3.3191024580737576,
+            "sqlite_check": 4.55831670993939,
+            "hash": 1.1829132518032566,
+            "sync": 0.3052180410595611,
+            "total": 9.36876129603479
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.374996595084667e-05,
+              "cpu_seconds": 3.166700000178935e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07737004198133945,
+              "cpu_seconds": 0.07734299999999905
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 4.400270001962781,
+              "cpu_seconds": 1.4785681629999985
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.027215207926928997,
+              "cpu_seconds": 0.027136999999999745
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.0530618749326095,
+              "cpu_seconds": 0.05304020900000239
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.5541015677154064e-05,
+              "cpu_seconds": 3.337499999744864e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.804103471338749e-05,
+              "cpu_seconds": 3.6165999997450626e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053613-68c75b32",
+            "sha256": "79540cbe268071fda6a6bd485fa07f68be8fb1d75e4433caa3be7d265be478ce",
+            "snapshot_at": "2026-10-10T05:36:13.931462+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.319,
+              "sqlite_check": 4.558,
+              "hash": 1.183,
+              "sync": 0.305,
+              "total": 9.369
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.028,
+              "destination_hash": 0.053,
+              "source_hash": 1.277,
+              "reuse_publish": 0.306,
+              "sqlite_backup": 0.135,
+              "capture": 1.823,
+              "manifest": 0.003,
+              "durable_publish": 0.18,
+              "total": 2.007
+            }
+          },
+          "probe": {
+            "count": 382,
+            "p95_ms": 0.13649999164044857,
+            "max_ms": 0.2951250644400716
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 0,
+          "preparation_seconds": 7.490870462032035,
+          "cpu_seconds": 3.7064366050000004,
+          "io": {
+            "rchar": 6315107819,
+            "wchar": 2149175296,
+            "syscr": 496796,
+            "syscw": 2051,
+            "read_bytes": 2854916096,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5015179170295596,
+          "preparation_timings": {
+            "copy": 2.4697555009042844,
+            "sqlite_check": 3.5569871682673693,
+            "hash": 1.1683123739203438,
+            "sync": 0.29097462503705174,
+            "total": 7.489361421088688
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.0209037251770496e-05,
+              "cpu_seconds": 3.812500000321961e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07751741702668369,
+              "cpu_seconds": 0.07747479100000021
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.397276210016571,
+              "cpu_seconds": 1.300612852999997
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.026596957934089005,
+              "cpu_seconds": 0.026577873999997337
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.055173750035464764,
+              "cpu_seconds": 0.055143207999996946
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 4.38750721514225e-05,
+              "cpu_seconds": 4.137500000211958e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.791600465774536e-05,
+              "cpu_seconds": 3.5999999994373866e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053625-c3000d8c",
+            "sha256": "7ad0342ca240c41cac24ab11b21ce8fe036128ddecbc05e42a11987a07674b52",
+            "snapshot_at": "2026-10-10T05:36:25.515680+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.47,
+              "sqlite_check": 3.557,
+              "hash": 1.168,
+              "sync": 0.291,
+              "total": 7.489
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.225,
+              "reuse_publish": 0.042,
+              "capture": 1.298,
+              "manifest": 0.002,
+              "durable_publish": 0.201,
+              "total": 1.501
+            }
+          },
+          "probe": {
+            "count": 302,
+            "p95_ms": 0.12795801740139723,
+            "max_ms": 0.2150830114260316
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 1,
+          "preparation_seconds": 7.042446586070582,
+          "cpu_seconds": 3.5598349019999986,
+          "io": {
+            "rchar": 6315107499,
+            "wchar": 2149175296,
+            "syscr": 496776,
+            "syscw": 2051,
+            "read_bytes": 2956509184,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5425523339072242,
+          "preparation_timings": {
+            "copy": 2.2070896670920774,
+            "sqlite_check": 3.5018444169545546,
+            "hash": 1.104118749848567,
+            "sync": 0.224391125026159,
+            "total": 7.0406487949658185
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.89590859413147e-05,
+              "cpu_seconds": 3.712499999863894e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07639662502333522,
+              "cpu_seconds": 0.07636691599999779
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.3454130010213703,
+              "cpu_seconds": 1.2905945770000002
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.025489915977232158,
+              "cpu_seconds": 0.02546370900000028
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05411370797082782,
+              "cpu_seconds": 0.054090207999998086
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.308395389467478e-05,
+              "cpu_seconds": 3.1040999999731866e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 7.862504571676254e-05,
+              "cpu_seconds": 6.391800000216108e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053635-cba5c329",
+            "sha256": "1778f4d3bda35e041083e5c3e95bcfe548f886ce0a252917c8f72600f73f8e69",
+            "snapshot_at": "2026-10-10T05:36:35.741522+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.207,
+              "sqlite_check": 3.502,
+              "hash": 1.104,
+              "sync": 0.224,
+              "total": 7.041
+            },
+            "timings_seconds": {
+              "file_copy": 0.169,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.002,
+              "source_hash": 1.236,
+              "reuse_publish": 0.084,
+              "capture": 1.518,
+              "manifest": 0.015,
+              "durable_publish": 0.009,
+              "total": 1.542
+            }
+          },
+          "probe": {
+            "count": 282,
+            "p95_ms": 0.0742089468985796,
+            "max_ms": 0.2139579737558961
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 1,
+          "preparation_seconds": 8.47217921295669,
+          "cpu_seconds": 3.555756099,
+          "io": {
+            "rchar": 6315108379,
+            "wchar": 2149175296,
+            "syscr": 496831,
+            "syscw": 2051,
+            "read_bytes": 2711891968,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.639833000022918,
+          "preparation_timings": {
+            "copy": 3.2020688768243417,
+            "sqlite_check": 3.6428469178499654,
+            "hash": 1.1856637919554487,
+            "sync": 0.43714883306529373,
+            "total": 8.47078892099671
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.5041943192481995e-05,
+              "cpu_seconds": 3.3375000001001354e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07517116598319262,
+              "cpu_seconds": 0.07515004100000056
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.488229668000713,
+              "cpu_seconds": 1.1940885590000008
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.0252789999358356,
+              "cpu_seconds": 0.02527037499999807
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.053726833895780146,
+              "cpu_seconds": 0.053699291000000926
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.7624966353178024e-05,
+              "cpu_seconds": 3.5666999998795745e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.012498538941145e-05,
+              "cpu_seconds": 3.812500000321961e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053647-d4138725",
+            "sha256": "5d87a44f0c43abd2ed000db5c9154650ec5e2fb238365e6cb16e1318e8752ff0",
+            "snapshot_at": "2026-10-10T05:36:47.710007+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.202,
+              "sqlite_check": 3.643,
+              "hash": 1.186,
+              "sync": 0.437,
+              "total": 8.471
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.195,
+              "reuse_publish": 0.017,
+              "capture": 1.232,
+              "manifest": 0.003,
+              "durable_publish": 0.404,
+              "total": 1.64
+            }
+          },
+          "probe": {
+            "count": 337,
+            "p95_ms": 0.12283399701118469,
+            "max_ms": 0.21304201800376177
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 1,
+          "preparation_seconds": 7.57582787796855,
+          "cpu_seconds": 3.644121118000001,
+          "io": {
+            "rchar": 6315108428,
+            "wchar": 2149175296,
+            "syscr": 496834,
+            "syscw": 2051,
+            "read_bytes": 2760769536,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.7508871679892763,
+          "preparation_timings": {
+            "copy": 2.6355364999035373,
+            "sqlite_check": 3.4427479611476883,
+            "hash": 1.18463929311838,
+            "sync": 0.30793091596569866,
+            "total": 7.574192836997099
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.5665929317474365e-05,
+              "cpu_seconds": 3.383299999626388e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07907579210586846,
+              "cpu_seconds": 0.07904258299999611
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.2838908759877086,
+              "cpu_seconds": 1.2493528830000002
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.027720000012777746,
+              "cpu_seconds": 0.0276962499999982
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05165195802692324,
+              "cpu_seconds": 0.051582333999995456
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.445905167609453e-05,
+              "cpu_seconds": 3.254100000305016e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.975001163780689e-05,
+              "cpu_seconds": 3.7333000001638084e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053700-be23b8f6",
+            "sha256": "de79fc654729d5e92cae418c7de80671f68536996db7d6a827fc43d176d1485f",
+            "snapshot_at": "2026-10-10T05:37:00.272783+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.636,
+              "sqlite_check": 3.443,
+              "hash": 1.185,
+              "sync": 0.308,
+              "total": 7.574
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.207,
+              "reuse_publish": 0.041,
+              "capture": 1.269,
+              "manifest": 0.003,
+              "durable_publish": 0.479,
+              "total": 1.751
+            }
+          },
+          "probe": {
+            "count": 340,
+            "p95_ms": 0.12699991930276155,
+            "max_ms": 0.268499949015677
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 1,
+          "preparation_seconds": 9.76823950407561,
+          "cpu_seconds": 3.3185527059999984,
+          "io": {
+            "rchar": 6315109580,
+            "wchar": 2149175296,
+            "syscr": 496906,
+            "syscw": 2051,
+            "read_bytes": 2469572608,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.8129197920206934,
+          "preparation_timings": {
+            "copy": 5.448781833052635,
+            "sqlite_check": 2.8217598772607744,
+            "hash": 1.126022751093842,
+            "sync": 0.3669782499782741,
+            "total": 9.766816172050312
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.329198807477951e-05,
+              "cpu_seconds": 3.0832999996732724e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07624445809051394,
+              "cpu_seconds": 0.0762272500000023
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.6512268770020455,
+              "cpu_seconds": 0.9243756580000024
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.02754370798356831,
+              "cpu_seconds": 0.0275161670000017
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.06634966609999537,
+              "cpu_seconds": 0.06631020800000442
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.795791417360306e-05,
+              "cpu_seconds": 3.450000000526643e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.0624989196658134e-05,
+              "cpu_seconds": 3.874999999453621e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053714-c0705c2d",
+            "sha256": "2dc6b3f4a48b95b3abf56e22be07721934e9e60a242b9c3832b735cf7903feaf",
+            "snapshot_at": "2026-10-10T05:37:14.175848+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933922304,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 5.449,
+              "sqlite_check": 2.822,
+              "hash": 1.126,
+              "sync": 0.367,
+              "total": 9.767
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.055,
+              "destination_hash": 0.107,
+              "source_hash": 1.243,
+              "reuse_publish": 0.007,
+              "sqlite_backup": 0.186,
+              "capture": 1.622,
+              "manifest": 0.005,
+              "durable_publish": 0.186,
+              "total": 1.813
+            }
+          },
+          "probe": {
+            "count": 412,
+            "p95_ms": 0.14037499204277992,
+            "max_ms": 1.8109589582309127
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 1,
+          "preparation_seconds": 7.479705294943415,
+          "cpu_seconds": 3.5285054570000085,
+          "io": {
+            "rchar": 6315108093,
+            "wchar": 2149175296,
+            "syscr": 496813,
+            "syscw": 2051,
+            "read_bytes": 2755280896,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.779514500987716,
+          "preparation_timings": {
+            "copy": 2.7985460428753868,
+            "sqlite_check": 3.3024207920534536,
+            "hash": 1.159020126098767,
+            "sync": 0.21483974996954203,
+            "total": 7.478229795000516
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.0375085771083832e-05,
+              "cpu_seconds": 2.879100000541257e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07530870800837874,
+              "cpu_seconds": 0.07526141599998937
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.152479126933031,
+              "cpu_seconds": 1.2073737369999975
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.026162124937400222,
+              "cpu_seconds": 0.026137915999996153
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.04809616692364216,
+              "cpu_seconds": 0.04803774900000235
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.833393566310406e-05,
+              "cpu_seconds": 3.6708999999746084e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.3791991882026196e-05,
+              "cpu_seconds": 3.195799999389237e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053725-95ac240b",
+            "sha256": "15b385a3a64399b93cd935e8842bf6fce7c283ae74daa5c8bcf4799557a89a4d",
+            "snapshot_at": "2026-10-10T05:37:25.433192+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.799,
+              "sqlite_check": 3.302,
+              "hash": 1.159,
+              "sync": 0.215,
+              "total": 7.478
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.027,
+              "destination_hash": 0.052,
+              "source_hash": 1.131,
+              "reuse_publish": 0.239,
+              "sqlite_backup": 0.109,
+              "capture": 1.581,
+              "manifest": 0.005,
+              "durable_publish": 0.194,
+              "total": 1.779
+            }
+          },
+          "probe": {
+            "count": 319,
+            "p95_ms": 0.09804207365959883,
+            "max_ms": 0.33312500454485416
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 1,
+          "preparation_seconds": 6.653481377987191,
+          "cpu_seconds": 3.607781408000008,
+          "io": {
+            "rchar": 6315107469,
+            "wchar": 2149175296,
+            "syscr": 496774,
+            "syscw": 2051,
+            "read_bytes": 2848624640,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.6521757510490716,
+          "preparation_timings": {
+            "copy": 1.7365805440349504,
+            "sqlite_check": 3.5461107100127265,
+            "hash": 1.174610793008469,
+            "sync": 0.191496166982688,
+            "total": 6.652026794967242
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.370898775756359e-05,
+              "cpu_seconds": 3.17919999872629e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.0758833329891786,
+              "cpu_seconds": 0.07586004099999855
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.38783029303886,
+              "cpu_seconds": 1.262710848999987
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.026498874998651445,
+              "cpu_seconds": 0.02648200000000145
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05551058310084045,
+              "cpu_seconds": 0.055482541000003494
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.5958015359938145e-05,
+              "cpu_seconds": 3.399999999942338e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.74580267816782e-05,
+              "cpu_seconds": 3.558299999895098e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053736-21714c62",
+            "sha256": "3a51ac637b876c75897d24579d6a6b8b38027a56597567e8d028876f94881980",
+            "snapshot_at": "2026-10-10T05:37:36.441947+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 1.737,
+              "sqlite_check": 3.546,
+              "hash": 1.175,
+              "sync": 0.191,
+              "total": 6.652
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.223,
+              "reuse_publish": 0.072,
+              "capture": 1.316,
+              "manifest": 0.002,
+              "durable_publish": 0.333,
+              "total": 1.652
+            }
+          },
+          "probe": {
+            "count": 280,
+            "p95_ms": 0.08162506856024265,
+            "max_ms": 0.19574991893023252
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 2,
+          "preparation_seconds": 10.660338546033017,
+          "cpu_seconds": 3.7882046439999897,
+          "io": {
+            "rchar": 6315110077,
+            "wchar": 2149175296,
+            "syscr": 496937,
+            "syscw": 2051,
+            "read_bytes": 2883002368,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.7269062930718064,
+          "preparation_timings": {
+            "copy": 5.078530917991884,
+            "sqlite_check": 4.158889543847181,
+            "hash": 1.164283626829274,
+            "sync": 0.253945832955651,
+            "total": 10.658921170979738
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.8041966035962105e-05,
+              "cpu_seconds": 3.6417000004007605e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07791854196693748,
+              "cpu_seconds": 0.07789129100000025
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.998653793008998,
+              "cpu_seconds": 1.3450850499999945
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.025719291996210814,
+              "cpu_seconds": 0.025699165999995444
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.0562197919934988,
+              "cpu_seconds": 0.05615708199999858
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.2833078876137733e-05,
+              "cpu_seconds": 3.095799999641713e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.400002606213093e-05,
+              "cpu_seconds": 3.21250000041573e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053750-8c6f1b2c",
+            "sha256": "2339c01a1da7ecac1cdcae231e1a13981b6b2f40908337651955be54771fc80f",
+            "snapshot_at": "2026-10-10T05:37:50.466359+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 5.079,
+              "sqlite_check": 4.159,
+              "hash": 1.164,
+              "sync": 0.254,
+              "total": 10.659
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.291,
+              "reuse_publish": 0.18,
+              "capture": 1.497,
+              "manifest": 0.006,
+              "durable_publish": 0.224,
+              "total": 1.727
+            }
+          },
+          "probe": {
+            "count": 443,
+            "p95_ms": 0.14245801139622927,
+            "max_ms": 0.21579198073595762
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 2,
+          "preparation_seconds": 8.513120045070536,
+          "cpu_seconds": 3.681616597999991,
+          "io": {
+            "rchar": 6315108637,
+            "wchar": 2149175296,
+            "syscr": 496847,
+            "syscw": 2051,
+            "read_bytes": 2707075072,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4816415419336408,
+          "preparation_timings": {
+            "copy": 3.728294166037813,
+            "sqlite_check": 3.3664041241863742,
+            "hash": 1.1846910419408232,
+            "sync": 0.2289866249775514,
+            "total": 8.511703085969202
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.5624951124191284e-05,
+              "cpu_seconds": 3.3625000000370164e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07757695904001594,
+              "cpu_seconds": 0.0775170830000036
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.207987210014835,
+              "cpu_seconds": 1.2678874900000068
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.02502599998842925,
+              "cpu_seconds": 0.025006500000003484
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05543325003236532,
+              "cpu_seconds": 0.055416166000000544
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.654195461422205e-05,
+              "cpu_seconds": 3.4790999990264027e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.89590859413147e-05,
+              "cpu_seconds": 3.704099999879418e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053802-c1f01d0f",
+            "sha256": "1aacc2124cb1f4c274bb9c02f8c6bc173fc7231c0f72d31682fd9527cbc3b0d3",
+            "snapshot_at": "2026-10-10T05:38:02.412447+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.728,
+              "sqlite_check": 3.366,
+              "hash": 1.185,
+              "sync": 0.229,
+              "total": 8.512
+            },
+            "timings_seconds": {
+              "file_copy": 0.007,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.225,
+              "reuse_publish": 0.026,
+              "capture": 1.276,
+              "manifest": 0.004,
+              "durable_publish": 0.202,
+              "total": 1.482
+            }
+          },
+          "probe": {
+            "count": 353,
+            "p95_ms": 0.14391692820936441,
+            "max_ms": 0.4544580588117242
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 2,
+          "preparation_seconds": 9.504901545937173,
+          "cpu_seconds": 3.8149325030000085,
+          "io": {
+            "rchar": 6315109293,
+            "wchar": 2149175296,
+            "syscr": 496888,
+            "syscw": 2051,
+            "read_bytes": 2874707968,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5197252930374816,
+          "preparation_timings": {
+            "copy": 4.240092460997403,
+            "sqlite_check": 3.821367084980011,
+            "hash": 1.208027665852569,
+            "sync": 0.230437251040712,
+            "total": 9.503523254999891
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.0166894905269146e-05,
+              "cpu_seconds": 3.833399999564335e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07765308406669647,
+              "cpu_seconds": 0.07761570799999618
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.6611907930346206,
+              "cpu_seconds": 1.3149107480000026
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.02652724995277822,
+              "cpu_seconds": 0.02646120900000426
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05557524994947016,
+              "cpu_seconds": 0.0555259570000004
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 4.349998198449612e-05,
+              "cpu_seconds": 4.1667000004963484e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.1082967072725296e-05,
+              "cpu_seconds": 3.891699999769571e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053816-9495163e",
+            "sha256": "abf34494ef7c1a4bce415eebc347ca126778309756cc22ef72b7ea3308597190",
+            "snapshot_at": "2026-10-10T05:38:16.528762+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 4.24,
+              "sqlite_check": 3.821,
+              "hash": 1.208,
+              "sync": 0.23,
+              "total": 9.504
+            },
+            "timings_seconds": {
+              "file_copy": 0.205,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.002,
+              "source_hash": 1.248,
+              "reuse_publish": 0.013,
+              "capture": 1.487,
+              "manifest": 0.025,
+              "durable_publish": 0.008,
+              "total": 1.52
+            }
+          },
+          "probe": {
+            "count": 394,
+            "p95_ms": 0.13637507800012827,
+            "max_ms": 0.2423339756205678
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 2,
+          "preparation_seconds": 8.897850712994114,
+          "cpu_seconds": 3.7309685959999968,
+          "io": {
+            "rchar": 6315108862,
+            "wchar": 2149175296,
+            "syscr": 496861,
+            "syscw": 2051,
+            "read_bytes": 2760491008,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.7878064590040594,
+          "preparation_timings": {
+            "copy": 3.993169211084023,
+            "sqlite_check": 3.4981452502543107,
+            "hash": 1.1500434599583969,
+            "sync": 0.25179574999492615,
+            "total": 8.896366253960878
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.583298530429602e-05,
+              "cpu_seconds": 3.366699999673983e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.08167049998883158,
+              "cpu_seconds": 0.08163837499999715
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.3360606259666383,
+              "cpu_seconds": 1.258080150000012
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.026536792051047087,
+              "cpu_seconds": 0.02650958399999581
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05349433294031769,
+              "cpu_seconds": 0.05346604099999297
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.5375007428228855e-05,
+              "cpu_seconds": 3.375000000005457e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.7416000850498676e-05,
+              "cpu_seconds": 3.5499999995636244e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053828-d52c067e",
+            "sha256": "8c33e64fd851030ae72ac8b68e5951ccd26b45c5facf60542092143e671c0f34",
+            "snapshot_at": "2026-10-10T05:38:28.651113+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933922304,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.993,
+              "sqlite_check": 3.498,
+              "hash": 1.15,
+              "sync": 0.252,
+              "total": 8.896
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.057,
+              "destination_hash": 0.104,
+              "source_hash": 1.202,
+              "reuse_publish": 0.011,
+              "sqlite_backup": 0.2,
+              "capture": 1.599,
+              "manifest": 0.007,
+              "durable_publish": 0.182,
+              "total": 1.788
+            }
+          },
+          "probe": {
+            "count": 367,
+            "p95_ms": 0.1567919971421361,
+            "max_ms": 0.28325000312179327
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 2,
+          "preparation_seconds": 9.318076045950875,
+          "cpu_seconds": 3.560845383,
+          "io": {
+            "rchar": 6315109806,
+            "wchar": 2149175296,
+            "syscr": 496920,
+            "syscw": 2051,
+            "read_bytes": 2787803136,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5321917090332136,
+          "preparation_timings": {
+            "copy": 4.686474876943976,
+            "sqlite_check": 3.38965400098823,
+            "hash": 1.1000357927987352,
+            "sync": 0.1372676669852808,
+            "total": 9.316740921000019
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.2832962460815907e-05,
+              "cpu_seconds": 3.0667000004314104e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07459491596091539,
+              "cpu_seconds": 0.07456862399999409
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.2361568770138547,
+              "cpu_seconds": 1.2312767149999928
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.027709708083420992,
+              "cpu_seconds": 0.027692792000010513
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05083341698627919,
+              "cpu_seconds": 0.050805957999997986
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.545801155269146e-05,
+              "cpu_seconds": 3.383300000336931e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.058307968080044e-05,
+              "cpu_seconds": 3.9125000000694854e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053841-5c3b12ea",
+            "sha256": "d952bab2cde2fce3ecc7a1a303b3be42f1fedc598266bea011e09979c29bcb2f",
+            "snapshot_at": "2026-10-10T05:38:41.429382+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 4.686,
+              "sqlite_check": 3.39,
+              "hash": 1.1,
+              "sync": 0.137,
+              "total": 9.317
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.027,
+              "destination_hash": 0.054,
+              "source_hash": 1.121,
+              "reuse_publish": 0.01,
+              "sqlite_backup": 0.117,
+              "capture": 1.348,
+              "manifest": 0.004,
+              "durable_publish": 0.18,
+              "total": 1.532
+            }
+          },
+          "probe": {
+            "count": 426,
+            "p95_ms": 0.13283302541822195,
+            "max_ms": 0.33120799344033003
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 2,
+          "preparation_seconds": 6.562671461957507,
+          "cpu_seconds": 3.1525244780000037,
+          "io": {
+            "rchar": 6315107118,
+            "wchar": 2149175296,
+            "syscr": 496752,
+            "syscw": 2051,
+            "read_bytes": 3049943040,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.2900536670349538,
+          "preparation_timings": {
+            "copy": 2.200993250007741,
+            "sqlite_check": 3.2254343767417595,
+            "hash": 1.0088719171471894,
+            "sync": 0.12296762492042035,
+            "total": 6.5613073779968545
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.3958000130951405e-05,
+              "cpu_seconds": 3.2000000004472895e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07236654206644744,
+              "cpu_seconds": 0.07235012399999619
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.0785431679105386,
+              "cpu_seconds": 1.1216879440000014
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.024916832917369902,
+              "cpu_seconds": 0.02489220799999714
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.049141208990477026,
+              "cpu_seconds": 0.049117791000000466
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.27499583363533e-05,
+              "cpu_seconds": 3.104200000336732e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.533398896455765e-05,
+              "cpu_seconds": 4.312500000480668e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053851-ad0b8b74",
+            "sha256": "b3b169cfc237f6fe621eb6986ff4144963a16b394956161d338487adb9c5b120",
+            "snapshot_at": "2026-10-10T05:38:51.200471+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.201,
+              "sqlite_check": 3.225,
+              "hash": 1.009,
+              "sync": 0.123,
+              "total": 6.561
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.07,
+              "reuse_publish": 0.01,
+              "capture": 1.097,
+              "manifest": 0.004,
+              "durable_publish": 0.189,
+              "total": 1.29
+            }
+          },
+          "probe": {
+            "count": 258,
+            "p95_ms": 0.07895799353718758,
+            "max_ms": 0.2139160642400384
+          }
+        }
+      ]
+    },
+    "candidate-linux": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "2b0891f42af0ad1bbefd10fa84e32a0cde053f6144e3265d33ba7c135919b2c3",
+      "fixture_mib": 2048,
+      "check_workers": 0,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 6.291666168952361,
+          "cpu_seconds": 3.108409669,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 524801
+          },
+          "io": {
+            "rchar": 4165887009,
+            "wchar": 2149150720,
+            "syscr": 494701,
+            "syscw": 2051,
+            "read_bytes": 2669428736,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3558658759575337,
+          "preparation_timings": {
+            "hash_in_copy": 0.7533049770863727,
+            "copy_and_hash": 3.164264543913305,
+            "sqlite_check": 3.0042090428760275,
+            "sync": 0.11857466690707952,
+            "total": 6.289992961916141
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07480900001246482,
+              "cpu_seconds": 0.0747922919999997
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.8514723350526765,
+              "cpu_seconds": 1.101460539
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.024611542001366615,
+              "cpu_seconds": 0.02458304099999964
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.0531432080315426,
+              "cpu_seconds": 0.05310120899999937
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054050-5a5bca31",
+            "sha256": "495af79b44176cf310aa854d1da33672eb92c1b545878d8874567273d69721f1",
+            "snapshot_at": "2026-10-10T05:40:50.628297+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.753,
+              "copy_and_hash": 3.164,
+              "sqlite_check": 3.004,
+              "sync": 0.119,
+              "total": 6.29
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.114,
+              "reuse_publish": 0.022,
+              "capture": 1.154,
+              "manifest": 0.008,
+              "durable_publish": 0.194,
+              "total": 1.356
+            }
+          },
+          "probe": {
+            "count": 274,
+            "p95_ms": 0.08699996396899223,
+            "max_ms": 0.19291695207357407
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 0,
+          "preparation_seconds": 2.0835331260459498,
+          "cpu_seconds": 1.6258114310000007,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049603
+          },
+          "io": {
+            "rchar": 2149196152,
+            "wchar": 2149150720,
+            "syscr": 2147,
+            "syscw": 2051,
+            "read_bytes": 2149224448,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.2819650009041652,
+          "preparation_timings": {
+            "hash_in_copy": 0.7120007332414389,
+            "copy_and_hash": 1.6516374191269279,
+            "sync": 0.42714666691608727,
+            "total": 2.0822478759801015
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054055-45de1539",
+            "sha256": "92d426e7285281774281cfb4697df9866a9a6e92520cc8c006c75efa9358fe6c",
+            "snapshot_at": "2026-10-10T05:40:55.736041+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.712,
+              "copy_and_hash": 1.652,
+              "sync": 0.427,
+              "total": 2.082
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.177,
+              "reuse_publish": 0.012,
+              "capture": 1.208,
+              "manifest": 0.004,
+              "durable_publish": 0.069,
+              "total": 1.282
+            }
+          },
+          "probe": {
+            "count": 80,
+            "p95_ms": 0.07108296267688274,
+            "max_ms": 0.6701670354232192
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 2.3080746249761432,
+          "cpu_seconds": 1.5966026029999991,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049604
+          },
+          "io": {
+            "rchar": 2417840690,
+            "wchar": 2149150720,
+            "syscr": 67753,
+            "syscw": 2051,
+            "read_bytes": 2149224448,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3494064169935882,
+          "preparation_timings": {
+            "hash_in_copy": 0.6671494073234499,
+            "copy_and_hash": 1.7871356677496806,
+            "sqlite_check": 0.04946362506598234,
+            "sync": 0.4663140829652548,
+            "total": 2.3067356660030782
+          },
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.04941966605838388,
+              "cpu_seconds": 0.049384749999999755
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054101-80d8528e",
+            "sha256": "54832e7bd4f93553089f61cdc08a6aafd8837554918216b62f9d49ec44ecadbf",
+            "snapshot_at": "2026-10-10T05:41:01.011860+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.667,
+              "copy_and_hash": 1.787,
+              "sqlite_check": 0.049,
+              "sync": 0.466,
+              "total": 2.307
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.107,
+              "reuse_publish": 0.008,
+              "capture": 1.132,
+              "manifest": 0.004,
+              "durable_publish": 0.213,
+              "total": 1.349
+            }
+          },
+          "probe": {
+            "count": 98,
+            "p95_ms": 0.0689169391989708,
+            "max_ms": 0.18270895816385746
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 0,
+          "preparation_seconds": 4.262919335043989,
+          "cpu_seconds": 1.6802383479999996,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049605
+          },
+          "io": {
+            "rchar": 2149197404,
+            "wchar": 2149150720,
+            "syscr": 2233,
+            "syscw": 2051,
+            "read_bytes": 2149212160,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.520645417040214,
+          "preparation_timings": {
+            "hash_in_copy": 0.719129656907171,
+            "copy_and_hash": 3.655532332835719,
+            "sync": 0.6022458339575678,
+            "total": 4.261542586027645
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054108-1cc215a9",
+            "sha256": "28868f3a68a14bae356331539ec0df47037527c7ba076ca580286c06cdb922ab",
+            "snapshot_at": "2026-10-10T05:41:08.295714+00:00",
+            "file_count": 108,
+            "size_bytes": 2149271899,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933910016,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.719,
+              "copy_and_hash": 3.656,
+              "sync": 0.602,
+              "total": 4.262
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.052,
+              "destination_hash": 0.103,
+              "source_hash": 1.037,
+              "reuse_publish": 0.004,
+              "sqlite_backup": 0.215,
+              "capture": 1.43,
+              "manifest": 0.002,
+              "durable_publish": 0.088,
+              "total": 1.521
+            }
+          },
+          "probe": {
+            "count": 166,
+            "p95_ms": 0.10870792903006077,
+            "max_ms": 0.16795797273516655
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 0,
+          "preparation_seconds": 4.36118612694554,
+          "cpu_seconds": 1.846707379999998,
+          "source_residency_before": {
+            "resident_pages": 8,
+            "total_pages": 1049631
+          },
+          "io": {
+            "rchar": 2551937030,
+            "wchar": 2149163008,
+            "syscr": 100574,
+            "syscw": 2051,
+            "read_bytes": 2149236736,
+            "write_bytes": 2149163008,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5801084589911625,
+          "preparation_timings": {
+            "hash_in_copy": 0.7303468192694709,
+            "copy_and_hash": 3.7433405849151313,
+            "sqlite_check": 0.0799031660426408,
+            "sync": 0.5261272509815171,
+            "total": 4.3596526280744
+          },
+          "per_file_checks": [
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.026691542007029057,
+              "cpu_seconds": 0.026673458000001204
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05312995798885822,
+              "cpu_seconds": 0.053078875000000636
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054115-7dbd12ea",
+            "sha256": "6b29bfe74369fca4172a1dec42c9fafefd4cd6014b588da7d3c73a998bd9afe3",
+            "snapshot_at": "2026-10-10T05:41:15.958664+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 2,
+              "reused": 2,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.73,
+              "copy_and_hash": 3.743,
+              "sqlite_check": 0.08,
+              "sync": 0.526,
+              "total": 4.36
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.027,
+              "destination_hash": 0.051,
+              "source_hash": 1.156,
+              "reuse_publish": 0.019,
+              "sqlite_backup": 0.112,
+              "capture": 1.387,
+              "manifest": 0.006,
+              "durable_publish": 0.187,
+              "total": 1.58
+            }
+          },
+          "probe": {
+            "count": 183,
+            "p95_ms": 0.1330419909209013,
+            "max_ms": 0.23549993056803942
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 0,
+          "preparation_seconds": 5.784643127000891,
+          "cpu_seconds": 2.8770798840000005,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049615
+          },
+          "io": {
+            "rchar": 4165920786,
+            "wchar": 2149175296,
+            "syscr": 494678,
+            "syscw": 2051,
+            "read_bytes": 2494234624,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4539076259825379,
+          "preparation_timings": {
+            "hash_in_copy": 0.7245487396139652,
+            "copy_and_hash": 3.1312301688594744,
+            "sqlite_check": 2.4325773760210723,
+            "sync": 0.21554991696029902,
+            "total": 5.783099586027674
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07582041597925127,
+              "cpu_seconds": 0.07580387399999822
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.275303626083769,
+              "cpu_seconds": 0.9399946939999992
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.02721241710241884,
+              "cpu_seconds": 0.027190083000000698
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05406820902135223,
+              "cpu_seconds": 0.05403795900000219
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054125-76ad53fe",
+            "sha256": "2d73da004458845ba352ff1fad693ff220b1d296f42344e52197a64cc63862b1",
+            "snapshot_at": "2026-10-10T05:41:25.159842+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.725,
+              "copy_and_hash": 3.131,
+              "sqlite_check": 2.433,
+              "sync": 0.216,
+              "total": 5.783
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.218,
+              "reuse_publish": 0.018,
+              "capture": 1.256,
+              "manifest": 0.004,
+              "durable_publish": 0.194,
+              "total": 1.454
+            }
+          },
+          "probe": {
+            "count": 245,
+            "p95_ms": 0.13175001367926598,
+            "max_ms": 0.558583065867424
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 1,
+          "preparation_seconds": 6.798675126978196,
+          "cpu_seconds": 3.109800891999999,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049614
+          },
+          "io": {
+            "rchar": 4165919883,
+            "wchar": 2149175296,
+            "syscr": 494709,
+            "syscw": 2051,
+            "read_bytes": 2669703168,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4236263759667054,
+          "preparation_timings": {
+            "hash_in_copy": 0.7331833835924044,
+            "copy_and_hash": 2.9094749989453703,
+            "sqlite_check": 3.724254795932211,
+            "sync": 0.16054395900573581,
+            "total": 6.797132793930359
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07174391590524465,
+              "cpu_seconds": 0.07172758300000126
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.5738005429739133,
+              "cpu_seconds": 1.2582317339999989
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.026492875069379807,
+              "cpu_seconds": 0.026456291999998882
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.052041833056136966,
+              "cpu_seconds": 0.052011333999999465
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054135-428e0c1f",
+            "sha256": "1d061a45570bdacc04c5dc7613ae74c5ddcd463b96156db29951b9d75c293516",
+            "snapshot_at": "2026-10-10T05:41:35.234888+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.733,
+              "copy_and_hash": 2.909,
+              "sqlite_check": 3.724,
+              "sync": 0.161,
+              "total": 6.797
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.191,
+              "reuse_publish": 0.019,
+              "capture": 1.231,
+              "manifest": 0.005,
+              "durable_publish": 0.188,
+              "total": 1.424
+            }
+          },
+          "probe": {
+            "count": 280,
+            "p95_ms": 0.10083289816975594,
+            "max_ms": 0.14887494035065174
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 1,
+          "preparation_seconds": 2.9439084589248523,
+          "cpu_seconds": 1.7293030390000013,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049615
+          },
+          "io": {
+            "rchar": 2149221343,
+            "wchar": 2149175296,
+            "syscr": 2185,
+            "syscw": 2051,
+            "read_bytes": 2149265408,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.5145267919870093,
+          "preparation_timings": {
+            "hash_in_copy": 0.7405243010725826,
+            "copy_and_hash": 2.3879327080212533,
+            "sync": 0.5484691249439493,
+            "total": 2.942401834996417
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054141-8c826138",
+            "sha256": "ba351125969f01e2b43b2d7650e411002323308dffd7ad6f28687442020004d0",
+            "snapshot_at": "2026-10-10T05:41:41.333457+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.741,
+              "copy_and_hash": 2.388,
+              "sync": 0.548,
+              "total": 2.942
+            },
+            "timings_seconds": {
+              "file_copy": 0.007,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.246,
+              "reuse_publish": 0.007,
+              "capture": 1.328,
+              "manifest": 0.004,
+              "durable_publish": 0.183,
+              "total": 1.514
+            }
+          },
+          "probe": {
+            "count": 118,
+            "p95_ms": 0.1413749996572733,
+            "max_ms": 0.4176660440862179
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 1,
+          "preparation_seconds": 2.204253542004153,
+          "cpu_seconds": 1.7362739289999993,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049616
+          },
+          "io": {
+            "rchar": 2417869242,
+            "wchar": 2149175296,
+            "syscr": 67746,
+            "syscw": 2051,
+            "read_bytes": 2149232640,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3546451679430902,
+          "preparation_timings": {
+            "hash_in_copy": 0.7311791043030098,
+            "copy_and_hash": 1.718223040807061,
+            "sqlite_check": 0.05253195809200406,
+            "sync": 0.4283567500533536,
+            "total": 2.2028845419408754
+          },
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05247624998446554,
+              "cpu_seconds": 0.05245833300000413
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054146-1795f686",
+            "sha256": "452547cb81e7b8a561737d33c18233fb5e79f721d109c420c6b09b268d93f51e",
+            "snapshot_at": "2026-10-10T05:41:46.949149+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.731,
+              "copy_and_hash": 1.718,
+              "sqlite_check": 0.053,
+              "sync": 0.428,
+              "total": 2.203
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.14,
+              "reuse_publish": 0.006,
+              "capture": 1.166,
+              "manifest": 0.004,
+              "durable_publish": 0.185,
+              "total": 1.355
+            }
+          },
+          "probe": {
+            "count": 90,
+            "p95_ms": 0.06599992047995329,
+            "max_ms": 0.21595798898488283
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 1,
+          "preparation_seconds": 3.225574917974882,
+          "cpu_seconds": 1.6024511569999973,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049617
+          },
+          "io": {
+            "rchar": 2149221314,
+            "wchar": 2149175296,
+            "syscr": 2191,
+            "syscw": 2051,
+            "read_bytes": 2149261312,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4744337929878384,
+          "preparation_timings": {
+            "hash_in_copy": 0.6842879267642274,
+            "copy_and_hash": 2.724013249739073,
+            "sync": 0.49602733296342194,
+            "total": 3.2241704600164667
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054153-b7cb6688",
+            "sha256": "1d5df47d1e27efa80b3792383f3f1a97ee22b9a51c69ce8c11646a619911f0e4",
+            "snapshot_at": "2026-10-10T05:41:53.204270+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933922304,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.684,
+              "copy_and_hash": 2.724,
+              "sync": 0.496,
+              "total": 3.224
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.05,
+              "destination_hash": 0.091,
+              "source_hash": 1.073,
+              "reuse_publish": 0.009,
+              "sqlite_backup": 0.172,
+              "capture": 1.411,
+              "manifest": 0.006,
+              "durable_publish": 0.057,
+              "total": 1.474
+            }
+          },
+          "probe": {
+            "count": 124,
+            "p95_ms": 0.11441705282777548,
+            "max_ms": 0.20591705106198788
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 1,
+          "preparation_seconds": 4.101505375932902,
+          "cpu_seconds": 1.6842938479999958,
+          "source_residency_before": {
+            "resident_pages": 8,
+            "total_pages": 1049629
+          },
+          "io": {
+            "rchar": 2417870661,
+            "wchar": 2149175296,
+            "syscr": 67833,
+            "syscw": 2051,
+            "read_bytes": 2149232640,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3975558759411797,
+          "preparation_timings": {
+            "hash_in_copy": 0.6787572151515633,
+            "copy_and_hash": 3.6220268339384347,
+            "sqlite_check": 0.048704750020988286,
+            "sync": 0.42333479202352464,
+            "total": 4.100277126068249
+          },
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.048658500076271594,
+              "cpu_seconds": 0.048633415999994156
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054200-f16038ec",
+            "sha256": "ff7b20ab70caaeb7763f6fde8532c0d7ea2a2e89cffc223f73fd5225cbd0435a",
+            "snapshot_at": "2026-10-10T05:42:00.387203+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.679,
+              "copy_and_hash": 3.622,
+              "sqlite_check": 0.049,
+              "sync": 0.423,
+              "total": 4.1
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.025,
+              "destination_hash": 0.046,
+              "source_hash": 1.014,
+              "reuse_publish": 0.006,
+              "sqlite_backup": 0.103,
+              "capture": 1.211,
+              "manifest": 0.003,
+              "durable_publish": 0.183,
+              "total": 1.398
+            }
+          },
+          "probe": {
+            "count": 177,
+            "p95_ms": 0.15245797112584114,
+            "max_ms": 0.25570893194526434
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 1,
+          "preparation_seconds": 5.098439211025834,
+          "cpu_seconds": 2.7377547979999974,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049615
+          },
+          "io": {
+            "rchar": 4165920149,
+            "wchar": 2149175296,
+            "syscr": 494638,
+            "syscw": 2051,
+            "read_bytes": 2669531136,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1612734999507666,
+          "preparation_timings": {
+            "hash_in_copy": 0.6900412447284907,
+            "copy_and_hash": 1.6421577928122133,
+            "sqlite_check": 2.9938370030140504,
+            "sync": 0.45824854203965515,
+            "total": 5.097245335928164
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07206849998328835,
+              "cpu_seconds": 0.07203816699999521
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.848611834924668,
+              "cpu_seconds": 1.016767197
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.023254625033587217,
+              "cpu_seconds": 0.02323541600000567
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.04974391602445394,
+              "cpu_seconds": 0.04972208399999545
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054208-e932881f",
+            "sha256": "ce8d18904758a823d0793113e5f45e010b02122dccb9fdbb9bba75bdff8849b6",
+            "snapshot_at": "2026-10-10T05:42:08.511386+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.69,
+              "copy_and_hash": 1.642,
+              "sqlite_check": 2.994,
+              "sync": 0.458,
+              "total": 5.097
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.065,
+              "reuse_publish": 0.011,
+              "capture": 1.092,
+              "manifest": 0.002,
+              "durable_publish": 0.067,
+              "total": 1.161
+            }
+          },
+          "probe": {
+            "count": 205,
+            "p95_ms": 0.050584087148308754,
+            "max_ms": 0.1090840669348836
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 2,
+          "preparation_seconds": 8.43451575411018,
+          "cpu_seconds": 2.8212274150000027,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049614
+          },
+          "io": {
+            "rchar": 4165920748,
+            "wchar": 2149175296,
+            "syscr": 494763,
+            "syscw": 2051,
+            "read_bytes": 2668146688,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1850997919682413,
+          "preparation_timings": {
+            "hash_in_copy": 0.6776543403975666,
+            "copy_and_hash": 4.913151502958499,
+            "sqlite_check": 3.308544209925458,
+            "sync": 0.2086399580584839,
+            "total": 8.433203670894727
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.06957762502133846,
+              "cpu_seconds": 0.06955804099999341
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 3.1676570429699495,
+              "cpu_seconds": 1.0282019640000044
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.024331458029337227,
+              "cpu_seconds": 0.02431666700000079
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.046814417000859976,
+              "cpu_seconds": 0.04678983299999828
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054219-f9de9302",
+            "sha256": "709e2bf148e889d5d6e3da8c2c83b789e1599f105be61f0f3d660b3eb86ecfba",
+            "snapshot_at": "2026-10-10T05:42:19.683771+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.678,
+              "copy_and_hash": 4.913,
+              "sqlite_check": 3.309,
+              "sync": 0.209,
+              "total": 8.433
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.078,
+              "reuse_publish": 0.006,
+              "capture": 1.1,
+              "manifest": 0.002,
+              "durable_publish": 0.082,
+              "total": 1.185
+            }
+          },
+          "probe": {
+            "count": 334,
+            "p95_ms": 0.12075004633516073,
+            "max_ms": 0.2472499618306756
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 2,
+          "preparation_seconds": 4.32726625201758,
+          "cpu_seconds": 1.5941383259999924,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049615
+          },
+          "io": {
+            "rchar": 2149222146,
+            "wchar": 2149175296,
+            "syscr": 2235,
+            "syscw": 2051,
+            "read_bytes": 2149249024,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.169514125911519,
+          "preparation_timings": {
+            "hash_in_copy": 0.6687807734124362,
+            "copy_and_hash": 4.018410916789435,
+            "sync": 0.30421658407431096,
+            "total": 4.326066919020377
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054226-7164ec6f",
+            "sha256": "801ba8a581e357844c575094adfb053d3934acde720087d6aed4a963061cd5e6",
+            "snapshot_at": "2026-10-10T05:42:26.767547+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.669,
+              "copy_and_hash": 4.018,
+              "sync": 0.304,
+              "total": 4.326
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.073,
+              "reuse_publish": 0.012,
+              "capture": 1.105,
+              "manifest": 0.002,
+              "durable_publish": 0.063,
+              "total": 1.169
+            }
+          },
+          "probe": {
+            "count": 168,
+            "p95_ms": 0.12799992691725492,
+            "max_ms": 0.18820806872099638
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 2,
+          "preparation_seconds": 3.262626833980903,
+          "cpu_seconds": 1.6161282939999921,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049616
+          },
+          "io": {
+            "rchar": 2417869798,
+            "wchar": 2149175296,
+            "syscr": 67781,
+            "syscw": 2051,
+            "read_bytes": 2149265408,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.148611333919689,
+          "preparation_timings": {
+            "hash_in_copy": 0.6651948128128424,
+            "copy_and_hash": 2.807405708008446,
+            "sqlite_check": 0.04774416598957032,
+            "sync": 0.4025920839048922,
+            "total": 3.2612826669355854
+          },
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.04770429199561477,
+              "cpu_seconds": 0.04770404200000655
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054232-906520fa",
+            "sha256": "c7a6038f7bb021d3466475146312d70765bd2ad950c6c2ee71814eeba6ce5219",
+            "snapshot_at": "2026-10-10T05:42:32.796643+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.665,
+              "copy_and_hash": 2.807,
+              "sqlite_check": 0.048,
+              "sync": 0.403,
+              "total": 3.261
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.066,
+              "reuse_publish": 0.01,
+              "capture": 1.093,
+              "manifest": 0.002,
+              "durable_publish": 0.053,
+              "total": 1.149
+            }
+          },
+          "probe": {
+            "count": 125,
+            "p95_ms": 0.11441600508987904,
+            "max_ms": 0.21937501151114702
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 2,
+          "preparation_seconds": 5.78669950296171,
+          "cpu_seconds": 1.6613809149999952,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049617
+          },
+          "io": {
+            "rchar": 2149223043,
+            "wchar": 2149175296,
+            "syscr": 2299,
+            "syscw": 2051,
+            "read_bytes": 2149249024,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4746047089574859,
+          "preparation_timings": {
+            "hash_in_copy": 0.6796297295950353,
+            "copy_and_hash": 5.756797545123845,
+            "sync": 0.025669416994787753,
+            "total": 5.785468003014103
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054241-be1b9d65",
+            "sha256": "fa6b46ca64dfa805407e011288aa41449d22ba338e459744f2c844436eb2cf76",
+            "snapshot_at": "2026-10-10T05:42:41.325657+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933922304,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.68,
+              "copy_and_hash": 5.757,
+              "sync": 0.026,
+              "total": 5.785
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.051,
+              "destination_hash": 0.091,
+              "source_hash": 1.074,
+              "reuse_publish": 0.007,
+              "sqlite_backup": 0.17,
+              "capture": 1.41,
+              "manifest": 0.002,
+              "durable_publish": 0.062,
+              "total": 1.475
+            }
+          },
+          "probe": {
+            "count": 232,
+            "p95_ms": 0.1283750170841813,
+            "max_ms": 0.24429091718047857
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 2,
+          "preparation_seconds": 5.012607211014256,
+          "cpu_seconds": 1.6875964170000088,
+          "source_residency_before": {
+            "resident_pages": 8,
+            "total_pages": 1049629
+          },
+          "io": {
+            "rchar": 2417871075,
+            "wchar": 2149175296,
+            "syscr": 67859,
+            "syscw": 2051,
+            "read_bytes": 2149249024,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.2823937920620665,
+          "preparation_timings": {
+            "hash_in_copy": 0.6619587205350399,
+            "copy_and_hash": 4.511514501995407,
+            "sqlite_check": 0.047862375038675964,
+            "sync": 0.44776108302176,
+            "total": 5.011362086050212
+          },
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.04781766701489687,
+              "cpu_seconds": 0.047804374999998345
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054249-4bb927d5",
+            "sha256": "e8decdd07cda7f165bce2de5cdfb68fee4c50fc2b7ce43e5f25d94cbd2542ce1",
+            "snapshot_at": "2026-10-10T05:42:49.408265+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.662,
+              "copy_and_hash": 4.512,
+              "sqlite_check": 0.048,
+              "sync": 0.448,
+              "total": 5.011
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.025,
+              "destination_hash": 0.045,
+              "source_hash": 1.012,
+              "reuse_publish": 0.007,
+              "sqlite_backup": 0.11,
+              "capture": 1.217,
+              "manifest": 0.002,
+              "durable_publish": 0.063,
+              "total": 1.282
+            }
+          },
+          "probe": {
+            "count": 203,
+            "p95_ms": 0.1426249509677291,
+            "max_ms": 0.5917500238865614
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 2,
+          "preparation_seconds": 4.774270585970953,
+          "cpu_seconds": 2.7007586309999994,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049615
+          },
+          "io": {
+            "rchar": 4165920168,
+            "wchar": 2149175296,
+            "syscr": 494639,
+            "syscw": 2051,
+            "read_bytes": 2669199360,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1717234590323642,
+          "preparation_timings": {
+            "hash_in_copy": 0.6568135916022584,
+            "copy_and_hash": 1.5741266668774188,
+            "sqlite_check": 3.042737585026771,
+            "sync": 0.15217645792290568,
+            "total": 4.773054710938595
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.06921216694172472,
+              "cpu_seconds": 0.06919499900000403
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.9017427100334316,
+              "cpu_seconds": 1.0400549750000039
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.0238569580251351,
+              "cpu_seconds": 0.023827042000007737
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.047759874956682324,
+              "cpu_seconds": 0.04773833299999808
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054257-17d812a5",
+            "sha256": "2281908d11d068fab8d216cf008df594786fd30cb19ae7a2773c1df5175411fc",
+            "snapshot_at": "2026-10-10T05:42:57.077710+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.657,
+              "copy_and_hash": 1.574,
+              "sqlite_check": 3.043,
+              "sync": 0.152,
+              "total": 4.773
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.07,
+              "reuse_publish": 0.014,
+              "capture": 1.101,
+              "manifest": 0.002,
+              "durable_publish": 0.069,
+              "total": 1.172
+            }
+          },
+          "probe": {
+            "count": 206,
+            "p95_ms": 0.047416891902685165,
+            "max_ms": 0.09812507778406143
+          }
+        }
+      ],
+      "idle_probe": {
+        "count": 37,
+        "p95_ms": 0.11179200373589993,
+        "max_ms": 0.15195796731859446
+      }
+    },
+    "parallel-linux": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "52fda6a4171af3212333dfb34a75bb7efbd81cc769f5e027008426256682c091",
+      "fixture_mib": 2048,
+      "check_workers": 2,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 4.668465751921758,
+          "cpu_seconds": 2.583020964,
+          "io": {
+            "rchar": 6315040205,
+            "wchar": 2149184552,
+            "syscr": 496672,
+            "syscw": 2067,
+            "read_bytes": 2904567808,
+            "write_bytes": 2149199872,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.2085587499896064,
+          "preparation_timings": {
+            "copy": 3.0260519181611016,
+            "sqlite_check": 0.0005264169303700328,
+            "hash": 1.1893576671136543,
+            "sync": 0.4154536669375375,
+            "total": 4.634384501958266
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 8.783303201198578e-05,
+              "cpu_seconds": 5.3083999999999995e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07145458401646465,
+              "cpu_seconds": 0.071440001
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.5546386670321226,
+              "cpu_seconds": 0.34004706100000004
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.023783500073477626,
+              "cpu_seconds": 0.023762832999999983
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.04846362490206957,
+              "cpu_seconds": 0.048463707999999994
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 6.299989763647318e-05,
+              "cpu_seconds": 5.016699999998986e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 5.183310713618994e-05,
+              "cpu_seconds": 4.995799999996109e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053942-2a72987c",
+            "sha256": "823d1bc5896567fbb3f3b8811ffd15499be018d33be027624080f54bc03206ce",
+            "snapshot_at": "2026-10-10T05:39:42.462909+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 3.026,
+              "sqlite_check": 0.001,
+              "hash": 1.189,
+              "sync": 0.415,
+              "total": 4.634
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.125,
+              "reuse_publish": 0.009,
+              "capture": 1.152,
+              "manifest": 0.002,
+              "durable_publish": 0.054,
+              "total": 1.209
+            }
+          },
+          "probe": {
+            "count": 180,
+            "p95_ms": 0.10791700333356857,
+            "max_ms": 0.21929200738668442
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 0,
+          "preparation_seconds": 3.7456782930530608,
+          "cpu_seconds": 2.6021634989999995,
+          "io": {
+            "rchar": 6315048024,
+            "wchar": 2149150720,
+            "syscr": 496641,
+            "syscw": 2051,
+            "read_bytes": 2550321152,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1570482089882717,
+          "preparation_timings": {
+            "copy": 1.909928084933199,
+            "sqlite_check": 0.0005379169015213847,
+            "hash": 1.2146923759719357,
+            "sync": 0.6154759170021862,
+            "total": 3.7435939179267734
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 8.487491868436337e-05,
+              "cpu_seconds": 4.812499999999999e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07462579198181629,
+              "cpu_seconds": 0.074626083
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.41369750106241554,
+              "cpu_seconds": 0.315051438
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.02589041693136096,
+              "cpu_seconds": 0.025890749000000046
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.052060042042285204,
+              "cpu_seconds": 0.052060457999999976
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 5.416700150817633e-05,
+              "cpu_seconds": 5.225000000003144e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 5.541602149605751e-05,
+              "cpu_seconds": 4.524999999999668e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053948-1a313b00",
+            "sha256": "9cbb9b1cf9824b9f4937a45c915a52591309c2532241c324f7c1deb69cff4814",
+            "snapshot_at": "2026-10-10T05:39:48.991833+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 1.91,
+              "sqlite_check": 0.001,
+              "hash": 1.215,
+              "sync": 0.615,
+              "total": 3.744
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.076,
+              "reuse_publish": 0.009,
+              "capture": 1.102,
+              "manifest": 0.002,
+              "durable_publish": 0.053,
+              "total": 1.157
+            }
+          },
+          "probe": {
+            "count": 149,
+            "p95_ms": 0.08100003469735384,
+            "max_ms": 0.1094999024644494
+          }
+        },
+        {
+          "mode": "changed",
+          "trial": 0,
+          "preparation_seconds": 3.8446316269692034,
+          "cpu_seconds": 2.6468042290000007,
+          "io": {
+            "rchar": 6315048329,
+            "wchar": 2149150720,
+            "syscr": 496660,
+            "syscw": 2051,
+            "read_bytes": 2936664064,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.2230031669605523,
+          "preparation_timings": {
+            "copy": 2.4658484583487734,
+            "sqlite_check": 0.0004919602070003748,
+            "hash": 1.2025437930133194,
+            "sync": 0.1713866670615971,
+            "total": 3.8432764610042796
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 7.574993651360273e-05,
+              "cpu_seconds": 4.2624000000000004e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07447679201141,
+              "cpu_seconds": 0.074476374
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.5696694169891998,
+              "cpu_seconds": 0.345077255
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.02329712500795722,
+              "cpu_seconds": 0.023287749999999996
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.052184834028594196,
+              "cpu_seconds": 0.052185250000000016
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 8.416699711233377e-05,
+              "cpu_seconds": 7.304099999999591e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 3.7708086892962456e-05,
+              "cpu_seconds": 3.587500000001853e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T053955-739515c4",
+            "sha256": "433d33663d14f50dde7bb65bbc6e08a6b59e22d095140ea809307adda1d1637d",
+            "snapshot_at": "2026-10-10T05:39:55.600544+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.466,
+              "sqlite_check": 0.0,
+              "hash": 1.203,
+              "sync": 0.171,
+              "total": 3.843
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.128,
+              "reuse_publish": 0.008,
+              "capture": 1.154,
+              "manifest": 0.002,
+              "durable_publish": 0.067,
+              "total": 1.223
+            }
+          },
+          "probe": {
+            "count": 168,
+            "p95_ms": 0.12241699732840061,
+            "max_ms": 0.3563750069588423
+          }
+        },
+        {
+          "mode": "changed_after",
+          "trial": 0,
+          "preparation_seconds": 2.6365283760242164,
+          "cpu_seconds": 2.510610795999998,
+          "io": {
+            "rchar": 6315047177,
+            "wchar": 2149150720,
+            "syscr": 496588,
+            "syscw": 2051,
+            "read_bytes": 2942967808,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.4111693339655176,
+          "preparation_timings": {
+            "copy": 0.918379292008467,
+            "sqlite_check": 0.0004993749316781759,
+            "hash": 1.1707258759997785,
+            "sync": 0.5426539169857278,
+            "total": 2.635224001016468
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 8.795794565230608e-05,
+              "cpu_seconds": 4.975e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07067341601941735,
+              "cpu_seconds": 0.070674583
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.5635891669662669,
+              "cpu_seconds": 0.335342651
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.023841666989028454,
+              "cpu_seconds": 0.023801166999999956
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.048960666987113655,
+              "cpu_seconds": 0.048953040999999975
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 5.849997978657484e-05,
+              "cpu_seconds": 4.68339999999956e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 2.7999980375170708e-05,
+              "cpu_seconds": 2.6583999999996166e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054000-fb72f4ae",
+            "sha256": "c144e985f0359374ff646f79414f975d6705cefb8ac08adcd663bd6f56df7acf",
+            "snapshot_at": "2026-10-10T05:40:00.960863+00:00",
+            "file_count": 108,
+            "size_bytes": 2149271899,
+            "reuse": {
+              "copied_bytes": 215361883,
+              "copied_files": 102,
+              "reused_bytes": 1933910016,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 0.918,
+              "sqlite_check": 0.0,
+              "hash": 1.171,
+              "sync": 0.543,
+              "total": 2.635
+            },
+            "timings_seconds": {
+              "file_copy": 0.004,
+              "sqlite_check": 0.049,
+              "destination_hash": 0.091,
+              "source_hash": 0.964,
+              "reuse_publish": 0.01,
+              "sqlite_backup": 0.258,
+              "capture": 1.39,
+              "manifest": 0.004,
+              "durable_publish": 0.017,
+              "total": 1.411
+            }
+          },
+          "probe": {
+            "count": 96,
+            "p95_ms": 0.05925004370510578,
+            "max_ms": 0.27324992697685957
+          }
+        },
+        {
+          "mode": "wal",
+          "trial": 0,
+          "preparation_seconds": 2.5909391680033877,
+          "cpu_seconds": 2.559551913,
+          "io": {
+            "rchar": 6315075915,
+            "wchar": 2149163008,
+            "syscr": 496593,
+            "syscw": 2051,
+            "read_bytes": 2936963072,
+            "write_bytes": 2149163008,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3617861680686474,
+          "preparation_timings": {
+            "copy": 0.9418572088470683,
+            "sqlite_check": 0.0004970818990841508,
+            "hash": 1.1854027929948643,
+            "sync": 0.4588800829369575,
+            "total": 2.5896032510790974
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 8.13750084489584e-05,
+              "cpu_seconds": 4.5208000000000005e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.0712521659443155,
+              "cpu_seconds": 0.071252125
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.5691783759975806,
+              "cpu_seconds": 0.34048661999999996
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.022975790896452963,
+              "cpu_seconds": 0.02296237499999998
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.05007208394818008,
+              "cpu_seconds": 0.05007250000000002
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 5.425000563263893e-05,
+              "cpu_seconds": 4.554099999998229e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 7.695809472352266e-05,
+              "cpu_seconds": 6.80000000000125e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054006-65dc5d55",
+            "sha256": "1ed910785e86768015f57597c16a1f5506a538c14836420026836af5354cc16c",
+            "snapshot_at": "2026-10-10T05:40:06.520635+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 107743579,
+              "copied_files": 102,
+              "reused_bytes": 2041540608,
+              "reused_files": 6
+            },
+            "preparation_timings_seconds": {
+              "copy": 0.942,
+              "sqlite_check": 0.0,
+              "hash": 1.185,
+              "sync": 0.459,
+              "total": 2.59
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.026,
+              "destination_hash": 0.046,
+              "source_hash": 1.066,
+              "reuse_publish": 0.019,
+              "sqlite_backup": 0.105,
+              "capture": 1.28,
+              "manifest": 0.002,
+              "durable_publish": 0.08,
+              "total": 1.362
+            }
+          },
+          "probe": {
+            "count": 100,
+            "p95_ms": 0.08312496356666088,
+            "max_ms": 0.16387493815273046
+          }
+        },
+        {
+          "mode": "invalid",
+          "trial": 0,
+          "preparation_seconds": 4.621078626951203,
+          "cpu_seconds": 2.5907208960000006,
+          "io": {
+            "rchar": 6315105899,
+            "wchar": 2149175296,
+            "syscr": 496676,
+            "syscw": 2051,
+            "read_bytes": 2929311744,
+            "write_bytes": 2149175296,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.177902500028722,
+          "preparation_timings": {
+            "copy": 2.968909711111337,
+            "sqlite_check": 0.0004733729874715209,
+            "hash": 1.171590708894655,
+            "sync": 0.4759555010823533,
+            "total": 4.619775127037428
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 213909504,
+              "wall_seconds": 7.700000423938036e-05,
+              "cpu_seconds": 4.2624000000000004e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.07106795895379037,
+              "cpu_seconds": 0.071067667
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 0.5555364999454468,
+              "cpu_seconds": 0.332117094
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107634688,
+              "wall_seconds": 0.02360887499526143,
+              "cpu_seconds": 0.023608916000000035
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215252992,
+              "wall_seconds": 0.049115041038021445,
+              "cpu_seconds": 0.049107500000000026
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 106954752,
+              "wall_seconds": 3.8624973967671394e-05,
+              "cpu_seconds": 3.691699999996967e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 213909504,
+              "wall_seconds": 4.375004209578037e-05,
+              "cpu_seconds": 4.199999999998649e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054014-452cc83d",
+            "sha256": "369e12ba5b222656dbffac2d082cf720ccf31ebe7af45308e43150c1136a9ce5",
+            "snapshot_at": "2026-10-10T05:40:14.012195+00:00",
+            "file_count": 108,
+            "size_bytes": 2149284187,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149175296,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 2.969,
+              "sqlite_check": 0.0,
+              "hash": 1.172,
+              "sync": 0.476,
+              "total": 4.62
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.092,
+              "reuse_publish": 0.01,
+              "capture": 1.121,
+              "manifest": 0.003,
+              "durable_publish": 0.054,
+              "total": 1.178
+            }
+          },
+          "probe": {
+            "count": 182,
+            "p95_ms": 0.15029101632535458,
+            "max_ms": 0.2893330529332161
+          }
+        }
+      ]
+    },
+    "baseline-large": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "52fda6a4171af3212333dfb34a75bb7efbd81cc769f5e027008426256682c091",
+      "fixture_mib": 11264,
+      "check_workers": 0,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 69.01128186506685,
+          "cpu_seconds": 27.760906405,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 2888600
+          },
+          "io": {
+            "rchar": 34762015626,
+            "wchar": 11831271424,
+            "syscr": 2735236,
+            "syscw": 11285,
+            "read_bytes": 27037036544,
+            "write_bytes": 11831271424,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 6.434860919951461,
+          "preparation_timings": {
+            "copy": 11.008450588095002,
+            "sqlite_check": 50.72710544010624,
+            "hash": 6.768260877928697,
+            "sync": 0.5019067079992965,
+            "total": 69.00888453202788
+          },
+          "per_file_checks": [
+            {
+              "file": "state/models.bin",
+              "bytes": 1180696576,
+              "wall_seconds": 7.808394730091095e-05,
+              "cpu_seconds": 5.312500000087539e-05
+            },
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 1775894528,
+              "wall_seconds": 8.584134045988321,
+              "cpu_seconds": 2.748318392
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 5327794176,
+              "wall_seconds": 37.9690019749105,
+              "cpu_seconds": 11.480933480000001
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 591925248,
+              "wall_seconds": 0.1687983339652419,
+              "cpu_seconds": 0.1687559569999948
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 1183916032,
+              "wall_seconds": 4.004609668045305,
+              "cpu_seconds": 1.448483072000002
+            },
+            {
+              "file": "hermes/history.bin",
+              "bytes": 590348288,
+              "wall_seconds": 7.937499321997166e-05,
+              "cpu_seconds": 5.1625000004662525e-05
+            },
+            {
+              "file": "toolchain/bundle.bin",
+              "bytes": 1180696576,
+              "wall_seconds": 8.962501306086779e-05,
+              "cpu_seconds": 6.237600000247312e-05
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054516-6d06446b",
+            "sha256": "5abd2b34354c1e372c71d6f03c4c36f8d6f41f0bcc1390461fcea9e20e16d874",
+            "snapshot_at": "2026-10-10T05:45:16.165499+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_timings_seconds": {
+              "copy": 11.008,
+              "sqlite_check": 50.727,
+              "hash": 6.768,
+              "sync": 0.502,
+              "total": 69.009
+            },
+            "timings_seconds": {
+              "file_copy": 0.033,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 6.329,
+              "reuse_publish": 0.008,
+              "capture": 6.389,
+              "manifest": 0.002,
+              "durable_publish": 0.044,
+              "total": 6.435
+            }
+          },
+          "probe": {
+            "count": 2824,
+            "p95_ms": 0.0654999166727066,
+            "max_ms": 1.124250004068017
+          }
+        }
+      ],
+      "idle_probe": {
+        "count": 38,
+        "p95_ms": 0.0999579206109047,
+        "max_ms": 0.11504197027534246
+      }
+    },
+    "candidate-large": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "5a1932f6ba08a7b67d3530ce1c7aab63e5515ca22a4c00f1011bc1028f932016",
+      "fixture_mib": 11264,
+      "check_workers": 0,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 65.64203257102054,
+          "cpu_seconds": 24.717807819,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 2888600
+          },
+          "io": {
+            "rchar": 22930729178,
+            "wchar": 11831271424,
+            "syscr": 2723766,
+            "syscw": 11285,
+            "read_bytes": 20074225664,
+            "write_bytes": 11831271424,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 6.2900727110682055,
+          "preparation_timings": {
+            "hash_in_copy": 3.719395656255074,
+            "copy_and_hash": 18.322522675036453,
+            "sqlite_check": 46.6897292699432,
+            "sync": 0.625245957984589,
+            "total": 65.64045482105576
+          },
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 1775894528,
+              "wall_seconds": 8.578831628081389,
+              "cpu_seconds": 2.741097935000001
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 5327794176,
+              "wall_seconds": 33.804676181054674,
+              "cpu_seconds": 11.041322001000001
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 591925248,
+              "wall_seconds": 0.17115320800803602,
+              "cpu_seconds": 0.17107441599999618
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 1183916032,
+              "wall_seconds": 4.134880002005957,
+              "cpu_seconds": 1.5202158459999993
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T054900-e795b65d",
+            "sha256": "a37df6aad91fe3a22e9518c81b798b4588a3b1b08408a85a2aee520cef0ff569",
+            "snapshot_at": "2026-10-10T05:49:00.720077+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 3.719,
+              "copy_and_hash": 18.323,
+              "sqlite_check": 46.69,
+              "sync": 0.625,
+              "total": 65.64
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 6.2,
+              "reuse_publish": 0.007,
+              "capture": 6.233,
+              "manifest": 0.002,
+              "durable_publish": 0.055,
+              "total": 6.29
+            }
+          },
+          "probe": {
+            "count": 2653,
+            "p95_ms": 0.07062498480081558,
+            "max_ms": 0.30820793472230434
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 0,
+          "preparation_seconds": 19.405696342000738,
+          "cpu_seconds": 8.925201768000008,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 5777201
+          },
+          "io": {
+            "rchar": 11831329328,
+            "wchar": 11831271424,
+            "syscr": 12148,
+            "syscw": 11285,
+            "read_bytes": 11831463936,
+            "write_bytes": 11831271424,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 6.22921258606948,
+          "preparation_timings": {
+            "hash_in_copy": 3.6851122194202617,
+            "copy_and_hash": 18.69372546696104,
+            "sync": 0.7069675420643762,
+            "total": 19.404296466964297
+          },
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T055011-3ac4b072",
+            "sha256": "05d3f3f59139040c4f66e0ddcfa0875042ab155ca159186792b3b823859879fb",
+            "snapshot_at": "2026-10-10T05:50:11.697068+00:00",
+            "file_count": 108,
+            "size_bytes": 11831380315,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 11831271424,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 3.685,
+              "copy_and_hash": 18.694,
+              "sync": 0.707,
+              "total": 19.404
+            },
+            "timings_seconds": {
+              "file_copy": 0.006,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 6.135,
+              "reuse_publish": 0.006,
+              "capture": 6.162,
+              "manifest": 0.002,
+              "durable_publish": 0.065,
+              "total": 6.229
+            }
+          },
+          "probe": {
+            "count": 847,
+            "p95_ms": 0.11224998161196709,
+            "max_ms": 11.164374998770654
+          }
+        }
+      ],
+      "idle_probe": {
+        "count": 39,
+        "p95_ms": 0.1106249401345849,
+        "max_ms": 0.20174996461719275
+      }
+    },
+    "candidate-edge": {
+      "scope": "fictional local files; no production downtime measurement",
+      "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+      "sqlite": "3.40.1",
+      "source_sha256": "5a1932f6ba08a7b67d3530ce1c7aab63e5515ca22a4c00f1011bc1028f932016",
+      "fixture_mib": 2048,
+      "check_workers": 0,
+      "os_cache": "fixture-only fsync + POSIX_FADV_DONTNEED (advisory)",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 7.07252517004963,
+          "cpu_seconds": 2.763557396,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 524801
+          },
+          "io": {
+            "rchar": 4165887073,
+            "wchar": 2149150720,
+            "syscr": 494705,
+            "syscw": 2051,
+            "read_bytes": 2670301184,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1510994168929756,
+          "preparation_timings": {
+            "hash_in_copy": 0.6698438285384327,
+            "copy_and_hash": 3.8963157939724624,
+            "sqlite_check": 3.0199118360178545,
+            "sync": 0.15198145899921656,
+            "total": 7.071061337017454
+          },
+          "restore_verification_seconds": 1.4227958340197802,
+          "per_file_checks": [
+            {
+              "file": "state/archive/predecessor.sqlite",
+              "bytes": 322863104,
+              "wall_seconds": 0.0705179579090327,
+              "cpu_seconds": 0.07049012399999999
+            },
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.8770089600002393,
+              "cpu_seconds": 1.0372188210000002
+            },
+            {
+              "file": "state/history.db",
+              "bytes": 107622400,
+              "wall_seconds": 0.024322457960806787,
+              "cpu_seconds": 0.024322042000000543
+            },
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.04790237499400973,
+              "cpu_seconds": 0.047877707999999686
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T055113-a813907a",
+            "sha256": "ec0da3396313c8fd63037077b6a1272c3cbb3ab6cbdeca10e99c5a7da57d1436",
+            "snapshot_at": "2026-10-10T05:51:13.288085+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 4,
+              "reused": 0,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.67,
+              "copy_and_hash": 3.896,
+              "sqlite_check": 3.02,
+              "sync": 0.152,
+              "total": 7.071
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.062,
+              "reuse_publish": 0.013,
+              "capture": 1.095,
+              "manifest": 0.002,
+              "durable_publish": 0.054,
+              "total": 1.151
+            }
+          },
+          "probe": {
+            "count": 278,
+            "p95_ms": 0.08775002788752317,
+            "max_ms": 0.9053749963641167
+          }
+        },
+        {
+          "mode": "reusable",
+          "trial": 0,
+          "preparation_seconds": 4.905595794087276,
+          "cpu_seconds": 1.6210616170000005,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049603
+          },
+          "io": {
+            "rchar": 2149198195,
+            "wchar": 2149150720,
+            "syscr": 2262,
+            "syscw": 2051,
+            "read_bytes": 2149232640,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1443041670136154,
+          "preparation_timings": {
+            "hash_in_copy": 0.6605117458384484,
+            "copy_and_hash": 4.473403585026972,
+            "sync": 0.4273093759547919,
+            "total": 4.90439125301782
+          },
+          "restore_verification_seconds": 1.4570065010339022,
+          "per_file_checks": [],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T055120-d1c22c55",
+            "sha256": "b6335eddc8daf7ccc22d928b217633371b36088bce67d7bfe140df6d4a4169d3",
+            "snapshot_at": "2026-10-10T05:51:20.897734+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 0,
+              "reused": 4,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.661,
+              "copy_and_hash": 4.473,
+              "sync": 0.427,
+              "total": 4.904
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.059,
+              "reuse_publish": 0.009,
+              "capture": 1.086,
+              "manifest": 0.002,
+              "durable_publish": 0.056,
+              "total": 1.144
+            }
+          },
+          "probe": {
+            "count": 195,
+            "p95_ms": 0.10258401744067669,
+            "max_ms": 0.20483299158513546
+          }
+        },
+        {
+          "mode": "changed_largest",
+          "trial": 0,
+          "preparation_seconds": 6.330180210992694,
+          "cpu_seconds": 3.0280415949999995,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049604
+          },
+          "io": {
+            "rchar": 3359960202,
+            "wchar": 2149150720,
+            "syscr": 297915,
+            "syscw": 2051,
+            "read_bytes": 2669277184,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.1542842499911785,
+          "preparation_timings": {
+            "hash_in_copy": 0.7938872567610815,
+            "copy_and_hash": 3.204891294008121,
+            "sqlite_check": 2.950104001094587,
+            "sync": 0.17029524990357459,
+            "total": 6.3288304610177875
+          },
+          "restore_verification_seconds": 1.4392438340000808,
+          "per_file_checks": [
+            {
+              "file": "state/jobs.db",
+              "bytes": 968650752,
+              "wall_seconds": 2.950048835016787,
+              "cpu_seconds": 1.0889242919999997
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T055129-41ac1004",
+            "sha256": "59e271ede5118a8f9a26b7659bb273d20b4217de39406ba36c53e97e8fa97b02",
+            "snapshot_at": "2026-10-10T05:51:29.982745+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 108891,
+              "copied_files": 101,
+              "reused_bytes": 2149150720,
+              "reused_files": 7
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.794,
+              "copy_and_hash": 3.205,
+              "sqlite_check": 2.95,
+              "sync": 0.17,
+              "total": 6.329
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.001,
+              "destination_hash": 0.001,
+              "source_hash": 1.058,
+              "reuse_publish": 0.011,
+              "capture": 1.086,
+              "manifest": 0.003,
+              "durable_publish": 0.065,
+              "total": 1.154
+            }
+          },
+          "probe": {
+            "count": 251,
+            "p95_ms": 0.052167102694511414,
+            "max_ms": 0.1360420137643814
+          }
+        },
+        {
+          "mode": "rollback",
+          "trial": 0,
+          "preparation_seconds": 2.202628875966184,
+          "cpu_seconds": 1.5814943970000002,
+          "source_residency_before": {
+            "resident_pages": 0,
+            "total_pages": 1049610
+          },
+          "io": {
+            "rchar": 2417840904,
+            "wchar": 2149150720,
+            "syscr": 67749,
+            "syscw": 2051,
+            "read_bytes": 2149224448,
+            "write_bytes": 2149150720,
+            "cancelled_write_bytes": 0
+          },
+          "paused_snapshot_seconds": 1.3963702509645373,
+          "preparation_timings": {
+            "hash_in_copy": 0.6640940125798807,
+            "copy_and_hash": 1.731446668272838,
+            "sqlite_check": 0.0497215409995988,
+            "sync": 0.4157408339669928,
+            "total": 2.2013760010013357
+          },
+          "restore_verification_seconds": 1.4278259589336812,
+          "per_file_checks": [
+            {
+              "file": "state/owners.db",
+              "bytes": 215240704,
+              "wall_seconds": 0.04967908305115998,
+              "cpu_seconds": 0.04965075099999794
+            }
+          ],
+          "receipt": {
+            "status": "backed_up",
+            "format": "directory-v1",
+            "backup_id": "20261010T055134-06ccd736",
+            "sha256": "12bbd1c700e7063837cdfecd7903dc53263c493e79feea6f462f45fb4283d84e",
+            "snapshot_at": "2026-10-10T05:51:34.932411+00:00",
+            "file_count": 108,
+            "size_bytes": 2149259611,
+            "reuse": {
+              "copied_bytes": 215349595,
+              "copied_files": 102,
+              "reused_bytes": 1933910016,
+              "reused_files": 6
+            },
+            "preparation_validation": {
+              "checked": 1,
+              "reused": 3,
+              "not_sqlite": 3,
+              "discarded": 0
+            },
+            "preparation_timings_seconds": {
+              "hash_in_copy": 0.664,
+              "copy_and_hash": 1.731,
+              "sqlite_check": 0.05,
+              "sync": 0.416,
+              "total": 2.201
+            },
+            "timings_seconds": {
+              "file_copy": 0.005,
+              "sqlite_check": 0.05,
+              "destination_hash": 0.091,
+              "source_hash": 0.95,
+              "reuse_publish": 0.012,
+              "sqlite_backup": 0.2,
+              "capture": 1.322,
+              "manifest": 0.002,
+              "durable_publish": 0.073,
+              "total": 1.396
+            }
+          },
+          "probe": {
+            "count": 94,
+            "p95_ms": 0.06225006654858589,
+            "max_ms": 0.2115420065820217
+          }
+        }
+      ],
+      "idle_probe": {
+        "count": 37,
+        "p95_ms": 0.10708300396800041,
+        "max_ms": 0.2073750365525484
+      }
+    }
+  }
+}

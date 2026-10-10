@@ -16,7 +16,7 @@ from job_search.contracts import (
 from job_search.inference import GenerationResult, StructuredGenerationProvider
 
 from .context import CandidateApplication, bounded_candidates
-from .model import MAX_MODEL_OUTPUT_BYTES, ModelExecutionError
+from .model import MAX_MODEL_OUTPUT_BYTES, ModelExecutionError, ModelOutputError
 from .proposals import MAIL_EVENT_TYPES, MAX_EVIDENCE_QUOTE_CHARS, MODEL_OUTPUT_FIELDS
 from .temporal import (
     MAX_TEMPORAL_PROPOSALS,
@@ -436,7 +436,7 @@ class RemoteMailClassifier:
             schema_name=schema_name,
             minimum_source_chars=min(1_024, len(sanitized_text)),
             label="remote mail classifier",
-            error_type=ModelExecutionError,
+            error_type=ModelOutputError,
         )
         result = self._provider.generate(
             messages,
@@ -449,7 +449,7 @@ class RemoteMailClassifier:
             result,
             exact_fields=MODEL_OUTPUT_FIELDS,
             label="remote mail classifier",
-            error_type=ModelExecutionError,
+            error_type=ModelOutputError,
         )
         supplied_source = json.loads(messages[1]["content"])["email"]
         return _align_unique_evidence(parsed, supplied_source)

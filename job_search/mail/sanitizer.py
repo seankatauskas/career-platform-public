@@ -132,8 +132,9 @@ def sanitize_mail(
     *,
     body_kind: str = "text",
     max_chars: int = MAX_SANITIZED_CHARS,
+    drop_quoted_history: bool = True,
 ) -> SanitizedMail:
-    """Return bounded text without HTML behavior, controls, or quoted history."""
+    """Return bounded inert text; legacy callers may omit quoted history."""
 
     if not isinstance(subject, str) or not isinstance(body, str):
         raise TypeError("subject and body must be strings")
@@ -148,7 +149,7 @@ def sanitize_mail(
         body_text = html.unescape(body)
     else:
         raise ValueError("body_kind must be text or html")
-    clean_body = _normalize_lines(body_text, drop_history=True)
+    clean_body = _normalize_lines(body_text, drop_history=drop_quoted_history)
 
     prefix = "BEGIN UNTRUSTED EMAIL\nSUBJECT\n"
     middle = "\nBODY\n"

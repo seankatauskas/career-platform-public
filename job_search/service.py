@@ -63,25 +63,30 @@ class DeterministicJobSearchService:
 
     def request_career_reply(self, application_id: str, evidence_id: str, context: MutationContext):
         """Queue preparation without granting the caller permission to send mail."""
+        request = {"application_id": application_id, "evidence_id": evidence_id}
+        return self.store._idempotent("request_career_reply", context, request,
+            lambda con, stamp: self._queue_career_reply(con, request, context, stamp))
+
+    def _queue_career_reply(self, con, request, context, stamp):
+        """Enqueue within the caller's transaction, including task revision checks."""
         from .contracts import canonical_json
         from .worker import _stable_id
-        request = {"application_id": application_id, "evidence_id": evidence_id}
-        def operation(con, stamp):
-            self.store._application(con, application_id)
-            evidence = con.execute("SELECT account_id FROM mail_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
-            if evidence is None:
-                raise ContractError("reply evidence not found")
-            # The source service applies the full association and incoming-message
-            # checks again before capturing any external reply context.
-            linked = con.execute("SELECT 1 FROM lifecycle_mail_links l JOIN lifecycle_mail_observations o USING(observation_id) WHERE l.application_id=? AND o.evidence_id=? AND o.direction='inbound'", (application_id,evidence_id)).fetchone()
-            if linked is None:
-                raise ContractError("reply evidence must be linked to this application")
-            key = "career-reply:" + payload_sha256({**request, "command":context.idempotency_key})
-            work_id = _stable_id("work", key)
-            con.execute("INSERT OR IGNORE INTO work_items (work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,max_attempts,created_at,lane) VALUES (?,?,?,?,'queued',90,?,1,?,'core')",
-                        (work_id,"career.reply.context",key,canonical_json(request),stamp,stamp))
-            return {"queued":True,"work_id":work_id,"task_kind":"career.reply.context"}
-        return self.store._idempotent("request_career_reply", context, request, operation)
+        application_id, evidence_id = request['application_id'], request['evidence_id']
+        application = self.store._application(con, application_id)
+        if application['current_phase'] == 'terminal':
+            raise ContractError('application is closed')
+        evidence = con.execute("SELECT account_id FROM mail_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
+        if evidence is None:
+            raise ContractError("reply evidence not found")
+        # The worker repeats source validation before capturing external context.
+        linked = con.execute("SELECT 1 FROM lifecycle_mail_links l JOIN lifecycle_mail_observations o USING(observation_id) WHERE l.application_id=? AND o.evidence_id=? AND o.direction='inbound'", (application_id,evidence_id)).fetchone()
+        if linked is None:
+            raise ContractError("reply evidence must be linked to this application")
+        key = "career-reply:" + payload_sha256({**request, "command":context.idempotency_key})
+        work_id = _stable_id("work", key)
+        con.execute("INSERT OR IGNORE INTO work_items (work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,max_attempts,created_at,lane) VALUES (?,?,?,?,'queued',90,?,1,?,'core')",
+                    (work_id,"career.reply.context",key,canonical_json(request),stamp,stamp))
+        return {"queued":True,"work_id":work_id,"task_kind":"career.reply.context"}
 
     def start_application(
         self,

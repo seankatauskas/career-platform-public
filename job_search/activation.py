@@ -9,8 +9,10 @@ from .db import connect
 GROUPS = {
     'collection': ('ats.authoritative', 'ats.new_only', 'ats.refresh_recent', 'opportunity.location_refresh'),
     'ranking': ('opportunity.preference_refresh',),
-    'mail': ('outlook.mail.sync', 'outlook.calendar.sync', 'outlook.mail.replay', 'career.mail.reconcile'),
+    'mail': ('outlook.mail.sync', 'outlook.calendar.sync', 'outlook.mail.replay', 'career.mail.reconcile', 'applications.mail.sync', 'applications.mail.dispatch', 'applications.mail.understand', 'applications.mail.project', 'applications.mail.outgoing'),
     'outlook_actions': ('outlook.actions.execute',),
+    # Owner reminder delivery is governed by installation activation and its
+    # accepted reminder. This switch controls operational notifications only.
     'notifications': ('notification.deliver', 'notification.reminders_due', 'notification.shortlist_evaluate'),
     'salary': ('opportunity.salary_drain',),
     'resume_generation': ('resume.optimize',),
@@ -45,6 +47,8 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
             or type(expected_revision) is not int or expected_revision < 0
             or not isinstance(command_id, str) or not command_id or len(command_id)>256):
         raise ValueError('invalid automation decision')
+    if getattr(config,'application_backend','legacy')=='owners' and capability in {'outlook_actions','outlook_send','calendar_commitments','briefing_ai'}:
+        raise ValueError('Use application-installation activation and reviewed owner proposals for this installation')
     request = canonical_json({'capability':capability,'enabled':enabled,'revision':expected_revision})
     stamp = utc_now()
     with connect(config.application_db) as con:
@@ -62,7 +66,7 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
         result = {'capability':capability,'enabled':enabled,'revision':revision+1,'updated_at':stamp}
         con.execute('INSERT INTO automation_controls VALUES (?,?,?,?) ON CONFLICT(capability) DO UPDATE SET enabled=excluded.enabled,revision=excluded.revision,updated_at=excluded.updated_at',
                     (capability,int(enabled),revision+1,stamp))
-        if capability == 'notifications':
+        if capability == 'notifications' and getattr(config,'application_backend','legacy')=='legacy':
             from .attention import AttentionService
             AttentionService.on_activation_changed(con, enabled, stamp)
         # Stop schedule creation immediately. Re-enabling reseeds future occurrences,
@@ -74,7 +78,12 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
     from .scheduler import seed_default_schedules
     from datetime import datetime, timezone
     import os
-    seed_default_schedules(config.application_db,datetime.now(timezone.utc),config.environment(os.environ))
+    from .application_installation import LEGACY_TASKS
+    owners=getattr(config,'application_backend','legacy')=='owners'
+    seed_default_schedules(config.application_db,datetime.now(timezone.utc),config.environment(os.environ),excluded_tasks=LEGACY_TASKS if owners else ())
+    if owners:
+        from .application_production import _seed
+        _seed(config,lambda:datetime.now(timezone.utc),config.environment(os.environ))
     return result
 
 def mail_start(path: Path, account: str) -> str | None:

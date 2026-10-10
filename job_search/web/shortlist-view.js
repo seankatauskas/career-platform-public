@@ -361,9 +361,9 @@ function renderShortlist(result, preserveFilters = false) {
       posting.textContent = "Open posting ↗";
       actions.append(posting);
     }
-    if (curated && job.application_id && job.application_phase !== "preparing") {
+    if (curated && job.application_id && (state.applicationBackend === "owners" || job.application_phase !== "preparing")) {
       const existing = node("a", "primary-action", "View application");
-      existing.href = `#applications/${encodeURIComponent(job.application_id)}/overview`;
+      existing.href = applicationHref(job.application_id);
       actions.append(existing);
     }
     card.append(actions);

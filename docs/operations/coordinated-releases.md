@@ -129,5 +129,8 @@ policy, and prepare again. Do not edit an existing manifest, substitute its
 checksum, or bypass transition tests. A timed-out or cancelled installer needs
 its existing SSM command and host operation inspected before another install.
 
-Batching reduces the number of maintenance pauses. Snapshot creation, worker
-draining, migrations, and service restart behavior are unchanged.
+Batching reduces the number of maintenance pauses. The installer also prepares
+large rollback files while services are available, then proves equality against
+the stopped source before reuse. Worker draining, migration gates, recovery and
+service health requirements remain in force. See [deployment performance](deployment-performance.md)
+for measured snapshot costs and the distinction between total time and downtime.

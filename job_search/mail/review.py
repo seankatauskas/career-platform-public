@@ -14,7 +14,8 @@ from ..db import connect
 from ..lifecycle.core import TASK_KINDS
 from ..lifecycle.mail import link_accepted_evidence
 from ..reducer import reduce_events, EVENT_OUTCOME
-from .archive_source import _parts
+from .archive_source import _parts, _PREFIX, _MIDDLE, _SUFFIX
+from .classification_review import review_record
 
 
 EVENT_TYPES = tuple(e.value for e in ApplicationEventType if e.value not in
@@ -26,6 +27,18 @@ def _text(value, name, maximum=1000):
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ContractError(f'{name} must be 1 to {maximum} characters')
     return value.strip()
+
+
+def _manual_quote_start(excerpt, quote):
+    subject, body = _parts(excerpt)
+    if excerpt.startswith(_PREFIX) and excerpt.endswith(_SUFFIX) and _MIDDLE in excerpt[len(_PREFIX):]:
+        if quote in subject:
+            return len(_PREFIX) + subject.index(quote)
+        if quote in body:
+            return excerpt.index(_MIDDLE, len(_PREFIX)) + len(_MIDDLE) + body.index(quote)
+    elif quote in body:
+        return excerpt.index(quote)
+    raise ContractError('supporting quote must be inside the saved subject or body')
 
 
 class MailReviewService:
@@ -51,6 +64,12 @@ class MailReviewService:
                 "WHERE p.status IN ('pending','conflict') AND p.understanding_finding_id IS NULL "
                 "AND NOT EXISTS(SELECT 1 FROM mail_understanding_ownership o WHERE o.evidence_id=p.evidence_id) "
                 "AND p.proposal_id>? ORDER BY p.proposal_id LIMIT ?", (after, limit+1)).fetchall()
+            manual = con.execute("SELECT r.review_id AS proposal_id,r.review_id,r.evidence_id,r.status,r.reason_code,r.producer_version,r.created_at,"
+                "e.subject,e.sender,e.received_at,e.excerpt FROM mail_classification_reviews r JOIN mail_evidence e USING(evidence_id) "
+                "WHERE r.status='pending' AND r.review_id>? "
+                "AND NOT EXISTS(SELECT 1 FROM mail_understanding_ownership o WHERE o.evidence_id=r.evidence_id) "
+                "ORDER BY r.review_id LIMIT ?", (after, limit+1)).fetchall()
+        rows = sorted([*rows, *manual], key=lambda r: r['proposal_id'])[:limit+1]
         items = []
         for row in rows[:limit]:
             item = dict(row)
@@ -68,16 +87,18 @@ class MailReviewService:
         if not isinstance(decisions, list) or not 1 <= len(decisions) <= MAX_BATCH:
             raise ContractError(f'provide 1 to {MAX_BATCH} decisions')
         allowed = {'proposal_id', 'decision', 'application_id', 'new_application', 'event_type',
-                   'evidence_quote', 'reason', 'task'}
+                   'evidence_quote', 'reason', 'task', 'review_id'}
         normalized, baseline, changes, seen, new_names, simulated = [], [], [], set(), set(), {}
         for raw in decisions:
             if not isinstance(raw, dict) or set(raw) - allowed:
                 raise ContractError('unknown mail review fields')
-            pid = _text(raw.get('proposal_id'), 'proposal_id', 256)
+            if raw.get('proposal_id') and raw.get('review_id'):
+                raise ContractError('provide one review identity')
+            pid = _text(raw.get('review_id') or raw.get('proposal_id'), 'review identity', 256)
             if pid in seen:
                 raise ContractError('a proposal may appear only once per batch')
             seen.add(pid)
-            row = con.execute('SELECT * FROM event_proposals WHERE proposal_id=?', (pid,)).fetchone()
+            row = review_record(con, pid)
             if row is None or row['status'] not in ('pending', 'conflict'):
                 raise ConflictError('email review changed or was already resolved; refresh before deciding')
             proposal = dict(row)
@@ -135,6 +156,8 @@ class MailReviewService:
                 # Preserve the exact substring, including whitespace, for provenance.
                 if not isinstance(quote, str) or not quote.strip() or len(quote) > 512 or quote not in evidence['excerpt']:
                     raise ContractError('provide an exact supporting quote from the saved email evidence (up to 512 characters)')
+                if pid.startswith('unclassified:'):
+                    _manual_quote_start(evidence['excerpt'], quote)
                 payload = json.loads(proposal['payload_json']) if event_type == proposal['event_type'] else {}
                 validate_event_payload(ApplicationEventType(event_type), payload)
                 outcome = EVENT_OUTCOME.get(ApplicationEventType(event_type))
@@ -212,7 +235,7 @@ class MailReviewService:
             results = []
             for choice in plan['decisions']:
                 pid, decision = choice['proposal_id'], choice['decision']
-                original = dict(con.execute('SELECT * FROM event_proposals WHERE proposal_id=?', (pid,)).fetchone())
+                original = review_record(con, pid)
                 app_id = choice.get('application_id')
                 if choice.get('new_application'):
                     new = choice['new_application']
@@ -227,7 +250,9 @@ class MailReviewService:
                 if decision == 'record':
                     replacement = uuid.uuid4().hex
                     evidence = con.execute('SELECT excerpt FROM mail_evidence WHERE evidence_id=?', (original['evidence_id'],)).fetchone()
-                    quote = choice['evidence_quote']; start = evidence['excerpt'].index(quote)
+                    quote = choice['evidence_quote']
+                    start = (_manual_quote_start(evidence['excerpt'], quote) if pid.startswith('unclassified:')
+                             else evidence['excerpt'].index(quote))
                     payload = original['payload_json'] if choice['event_type'] == original['event_type'] else '{}'
                     con.execute("INSERT INTO event_proposals (proposal_id,dedupe_key,evidence_id,proposed_application_id,event_type,producer_kind,producer_version,confidence,candidate_application_ids_json,evidence_quote,span_start,span_end,payload_json,status,created_at) VALUES (?,?,?,?,?,'rule','user-reviewed-v1',1,?,?,?,?,?,'pending',?)",
                         (replacement, 'mail-review:'+pid, original['evidence_id'], app_id, choice['event_type'],
@@ -242,9 +267,14 @@ class MailReviewService:
                     self.ledger.lifecycle._create_task(con, app_id,
                         {**choice['task'], 'owner': 'applicant', 'evidence_id': original['evidence_id']}, context, stamp)
                 reason = f"{decision}: {choice['reason']}" + (f'; replacement {replacement}' if replacement else '')
-                con.execute("UPDATE event_proposals SET status='rejected',decided_at=? WHERE proposal_id=?", (stamp, pid))
-                con.execute('INSERT INTO event_proposal_decisions VALUES (?,?,?,?,?,?,?)',
-                    (uuid.uuid4().hex, pid, 'rejected', app_id, 'user', reason[:1000], stamp))
+                if pid.startswith('unclassified:'):
+                    con.execute("UPDATE mail_classification_reviews SET status='resolved',resolved_at=?,resolution_json=? WHERE review_id=?",
+                        (stamp, canonical_json(dict(decision=decision, application_id=app_id, actor_kind='user',
+                            reason=reason[:1000], replacement_proposal_id=replacement)), pid))
+                else:
+                    con.execute("UPDATE event_proposals SET status='rejected',decided_at=? WHERE proposal_id=?", (stamp, pid))
+                    con.execute('INSERT INTO event_proposal_decisions VALUES (?,?,?,?,?,?,?)',
+                        (uuid.uuid4().hex, pid, 'rejected', app_id, 'user', reason[:1000], stamp))
                 results.append({'proposal_id': pid, 'decision': decision, 'application_id': app_id,
                                 'replacement_proposal_id': replacement})
             return {'resolved': results, 'preview_hash': preview_hash}

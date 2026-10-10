@@ -75,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--output", type=Path, required=True)
     evaluation.add_argument("--producer-version", required=True)
     evaluation.add_argument("--dataset-kind", choices=("synthetic", "reviewed_private_holdout"), default="synthetic")
+    from .application_installation import add_arguments as installation_arguments
+    installation_arguments(commands.add_parser("application-installation", help="inspect or explicitly transition application ownership"))
+    from .application_candidate import add_arguments as candidate_arguments
+    candidate_arguments(commands.add_parser('candidate', help='inspect or exercise the isolated paused application redesign'))
     from .job_reviews.runner import add_arguments as review_runner_arguments
     review_runner_arguments(commands.add_parser('review-runner', help='operate isolated Codex review sessions'))
     from .job_reviews.service import FIELDS
@@ -108,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_mail.add_argument("--expected-revision", type=int, required=True)
     resolve_mail.add_argument("--idempotency-key", required=True)
     commands.add_parser("inference-usage", help="inspect platform inference reservations and limits")
+    allowance = commands.add_parser("inference-allowance-grant", help="grant additional tokens for the current UTC day and wake safe allowance waits")
+    allowance.add_argument("--budget-day", required=True)
+    allowance.add_argument("--tokens", type=int, required=True)
+    allowance.add_argument("--reason", required=True)
+    allowance.add_argument("--idempotency-key", required=True)
     commands.add_parser("inference-recovery", help="inspect unresolved provider invocations")
     inference = commands.add_parser("inference-reconcile", help="record a checked remote invocation outcome")
     inference.add_argument("invocation_id")
@@ -385,6 +394,13 @@ from job_search.dependency_health import dependency_health as _dependency_health
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == 'candidate':
+        from .application_candidate import command as candidate_command
+        try:
+            _json(candidate_command(args))
+            return 0
+        except (OSError, ValueError) as exc:
+            raise SystemExit(str(exc)) from None
     if args.command == 'review-runner':
         from .job_reviews.runner import command as review_runner_command
         try:
@@ -461,6 +477,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(str(exc)) from None
         return 0
     db_path = config.application_db
+    if args.command == "application-installation":
+        from .application_installation import command as installation_command
+        from .commands import DomainError
+        try:
+            _json(installation_command(config,args))
+            return 0
+        except (DomainError,OSError,ValueError) as exc:
+            raise SystemExit(str(exc)) from None
+    if config.application_backend == "owners" and args.command in {"mail-review","mail-understanding","verify","rebuild"}:
+        raise SystemExit("Use the Applications workspace and owner commands for this installation")
     if args.command == 'mail-review':
         from .mail.review import MailReviewService
         try:
@@ -476,7 +502,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not args.proposal_id:
                     raise ContractError('message requires --proposal-id')
                 result = review_message(ledger, _DashboardMailSource(config, ledger),
-                    {'kind':'event_proposal', 'id':args.proposal_id})
+                    {'kind':'mail_classification_review' if args.proposal_id.startswith('unclassified:') else 'event_proposal',
+                     'id':args.proposal_id})
             else:
                 # A saved preview includes both decisions and explanatory changes.
                 maximum = 2 * 1024 * 1024
@@ -564,9 +591,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "init":
         stamp = utc_now()
         prepare_database(db_path, stamp)
+        from .application_installation import require_backend, LEGACY_TASKS
+        require_backend(config)
         schedules = seed_default_schedules(
-            db_path, datetime.now(timezone.utc), config.environment(os.environ)
+            db_path, datetime.now(timezone.utc), config.environment(os.environ),
+            excluded_tasks=LEGACY_TASKS if config.application_backend == "owners" else (),
         )
+        if config.application_backend == "owners":
+            from .application_runtime import ApplicationRuntime
+            ApplicationRuntime(config.application_owner_db)
         _json(
             {
                 "database": str(db_path),
@@ -766,12 +799,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         _json(result)
         return 0
 
-    if args.command in {"inference-usage", "inference-recovery", "inference-reconcile"}:
-        from job_search.inference.usage import InvocationRecoveryService
+    if args.command in {"inference-usage", "inference-recovery", "inference-reconcile", "inference-allowance-grant"}:
+        from job_search.inference.usage import AllowanceService, InvocationRecoveryService
         from job_search.runtime_readiness import runtime_usage
         try:
             if args.command == "inference-usage":
                 result = runtime_usage(config)
+            elif args.command == "inference-allowance-grant":
+                result = AllowanceService(db_path).grant(budget_day=args.budget_day, tokens=args.tokens,
+                    reason=args.reason, command_id=args.idempotency_key, actor_kind="user")
             else:
                 recovery = InvocationRecoveryService(db_path)
                 result = {"items": recovery.list_invocations()} if args.command == "inference-recovery" else recovery.reconcile(
@@ -804,7 +840,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _json(result)
         return 0
     if args.command == "status":
-        result = dict(ledger.system_health())
+        from .application_gateway import build_application_gateway
+        applications=build_application_gateway(config,ledger) or ledger
+        result = dict(applications.system_health())
         result["automation"] = automation_health(db_path, datetime.now(timezone.utc))
         result["dependencies"] = _dependency_health(config)
         from job_search.runtime_readiness import runtime_readiness

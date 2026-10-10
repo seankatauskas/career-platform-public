@@ -58,3 +58,13 @@
   #attention .review-card-actions > button:first-child { margin-right: 0; }
   #attention .review-suggestion { padding: 12px; }
 }
+
+#attention .owner-review-fields { margin: 12px 0; min-width: 0; }
+#attention .owner-review-fields dd { margin: 4px 0 12px; overflow-wrap: anywhere; }
+#attention .owner-review-selection { display: inline-flex; align-items: center; gap: 8px; margin: 12px 0; }
+#attention .owner-review-selection input { width: auto; margin: 0; }
+
+#attention .owner-review-group-heading { margin: 24px 0 12px; font-size: 17px; }
+#attention .owner-processing-section { margin-top: 32px; }
+#attention .owner-processing-resolution { display: grid; gap: 8px; margin: 16px 0; }
+#attention .owner-processing-resolution textarea { width: 100%; min-width: 0; box-sizing: border-box; resize: vertical; }

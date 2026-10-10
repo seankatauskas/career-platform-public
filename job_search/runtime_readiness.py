@@ -13,10 +13,7 @@ from .runtime import RuntimeConfigV1
 
 def runtime_usage(config: RuntimeConfigV1) -> dict[str, Any]:
     from .inference.usage import UsagePolicy, usage_report
-    usage = usage_report(config.application_db)
-    limits = UsagePolicy.from_mapping(config.inference_usage_limits).mapping()
-    usage.update(limits=limits, configured=any(value is not None for value in limits.values()))
-    return usage
+    return usage_report(config.application_db, policy=UsagePolicy.from_mapping(config.inference_usage_limits))
 
 
 def runtime_readiness(
@@ -28,7 +25,7 @@ def runtime_readiness(
 
     report = dict(readiness_report(
         config.application_db, dependencies=dependencies if dependencies is not None else (None if use_snapshot else dependency_health(config)),
-        automation_enabled=automation_enabled,
+        automation_enabled=automation_enabled, application_backend=config.application_backend,
     ))
     if use_snapshot and dependencies is None:
         from .dependency_snapshot import read_snapshot
@@ -112,10 +109,17 @@ def runtime_readiness(
         "identity_verified": bool(re.fullmatch(r"[a-f0-9]{40}", sha)),
     }
     try:
-        from .chief_status import chief_status
-        chief, chief_capabilities = chief_status(config)
-        report.update(_report(report["checked_at"], report["capabilities"] + chief_capabilities, report["metrics"]))
-        report["chief_of_staff"] = chief
+        if config.application_backend == 'owners':
+            from .application_readiness import application_readiness
+            owner, capabilities = application_readiness(config)
+            report.update(_report(report["checked_at"], report["capabilities"] + capabilities, report["metrics"]))
+            report['application_owners'] = owner
+            report['metrics']['pending_reconciliation'] += owner.get('uncertain', 0)
+        else:
+            from .chief_status import chief_status
+            chief, chief_capabilities = chief_status(config)
+            report.update(_report(report["checked_at"], report["capabilities"] + chief_capabilities, report["metrics"]))
+            report["chief_of_staff"] = chief
     except (sqlite3.Error, ValueError):
         pass  # Existing database diagnostics explain uninitialized/older state.
     report["external_services_verified"] = False

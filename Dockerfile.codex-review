@@ -1,9 +1,11 @@
 # The resulting image digest is recorded in the prepared release manifest.
 # No application tree, databases, fixtures, skills, or operator configuration.
-FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+# ECR Public serves the same pinned official Python image without Docker Hub pulls.
+FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 LABEL org.career-platform.review.codex-version="0.160.0"
 LABEL org.career-platform.review.contract-version="2"
 LABEL org.career-platform.review.screening-version="1"
+LABEL org.career-platform.review.old-method-version="1"
 RUN python - <<'PY'
 import base64, hashlib, io, pathlib, tarfile, urllib.request
 url = 'https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-linux-x64.tgz'
@@ -28,6 +30,10 @@ RUN mkdir -p job_search/job_reviews /review /model /output && touch job_search/_
 COPY job_search/contracts.py ./job_search/
 COPY job_search/job_reviews/codex_runtime.py job_search/job_reviews/reviewer_mcp.py job_search/job_reviews/reviewer_api.py job_search/job_reviews/context.py job_search/job_reviews/brief.py job_search/job_reviews/contracts.py job_search/job_reviews/ordering.py ./job_search/job_reviews/
 COPY job_search/job_reviews/reviewer_rubric.md ./job_search/job_reviews/
+COPY job_search/job_reviews/native_client.py job_search/job_reviews/cards.py ./job_search/job_reviews/
+COPY job_search/job_reviews/old_method/__init__.py job_search/job_reviews/old_method/screen.py job_search/job_reviews/old_method/workspace.py job_search/job_reviews/old_method/entrypoint.py ./job_search/job_reviews/old_method/
+RUN mkdir -p job_search/collection && touch job_search/collection/__init__.py
+COPY job_search/collection/locations.py ./job_search/collection/
 ENV PYTHONPATH=/opt/reviewer PYTHONDONTWRITEBYTECODE=1 HOME=/tmp/review-home CODEX_HOME=/tmp/review-home
 USER 10001:10001
 ENTRYPOINT ["python", "-m", "job_search.job_reviews.codex_runtime"]

@@ -539,6 +539,34 @@ def test_keychain_existing_key_read_never_creates_missing_source_state() -> None
         assert persistence.value == ""
 
 
+def test_owner_bound_exports_fail_before_reading_keys_or_publishing_files() -> None:
+    from types import SimpleNamespace
+    from job_search.state_transfer import export_state
+    from job_search.portable_export import require_legacy_export_source
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source, destination = root / "source.sqlite", root / "export.sqlite"
+        with sqlite3.connect(source) as con:
+            con.execute("CREATE TABLE application_owner_binding(singleton INTEGER PRIMARY KEY)")
+            # Merely creating an empty binding table does not activate owners.
+            require_legacy_export_source(con)
+            con.execute("INSERT INTO application_owner_binding VALUES(1)")
+        source.chmod(0o600)
+        before = source.read_bytes()
+        expect(ContractError,lambda:export_portable_state(source_database=source,
+               destination_database=destination,portable_key_file=root/"does-not-exist"),"not supported")
+        expect(ContractError,lambda:export_state(SimpleNamespace(application_db=source,
+               application_backend="legacy"),destination,writers_stopped=True),"not supported")
+        expect(ValueError,lambda:export_state(SimpleNamespace(application_db=source,
+               application_backend="owners"),destination,writers_stopped=True),"unsupported")
+        assert source.read_bytes() == before
+        assert not destination.exists()
+        assert sorted(p.name for p in root.iterdir()) == [source.name]
+        with sqlite3.connect(":memory:") as con:
+            con.execute("CREATE TABLE installation_identity(identity TEXT)")
+            expect(ContractError,lambda:require_legacy_export_source(con),"not supported")
+
+
 def main() -> None:
     tests = [value for name, value in globals().items() if name.startswith("test_")]
     for test in sorted(tests, key=lambda value: value.__name__):

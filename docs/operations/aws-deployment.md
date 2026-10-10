@@ -409,30 +409,91 @@ Terraform workflow. The installation summary reports the release, SSM command, b
 timestamps; an unknown SSM result must be inspected before another deployment.
 A repeat request for an already installed healthy release does not reinstall it.
 
-Workers stop claiming work between jobs and acknowledge a drain while the dashboard
-stays available. The drain deadline is 70 minutes; exceeding it cancels the update
-before data changes and clears the drain request. Once drained, all writers stop,
-state is snapshotted, and the release is initialized. Local rollback snapshots are
-now uncompressed, private directories (`backups/<backup-id>.snapshot`), eliminating
-archive compression, archive hashing, and a redundant full archive copy during the
-pause. They still retain all durable state, Hermes history, and the toolchain;
-the existing credential/cache exclusions are unchanged. SQLite is copied through
-its consistent backup API. Each retained file has a size and SHA-256 in the
-manifest; the receipt's `sha256` commits to that manifest. The snapshot is fsynced
-and atomically published before its receipt is journaled and migration can begin.
-The receipt reports file count, retained bytes, and capture/manifest/publication
-timings, so the remaining pause can be measured rather than guessed.
-Scheduled off-host backups remain gzip archives, compressed after services resume.
-Initialization is restricted
-to the recorded operation. Downloads and capacity checks precede the outage.
-The target is under five minutes between `stopping` and successful service health;
-drain time is measured separately. This remains a target until measured on AWS.
-For a bounded, reproducible local comparison of the old paused archive pipeline
-and directory capture, run `python3 -m tests.benchmark_deployment_snapshot
---megabytes 64 --runs 2` from a development checkout. It uses only synthetic
-temporary data and reports local timings; it does not predict EBS or production
-downtime. Normal offline suites also inject corruption and kill child processes
-at snapshot/restore publication boundaries.
+Deployment first prepares private, speculative copies of files at least 1 MiB while
+services remain available, under the existing operations lock. These are scratch
+files, **not rollback points**. Their SQLite checks, hashes and flushes happen
+before downtime. Preparation uses no live SQLite connection and changes no source
+file. A torn database copy is discarded; an I/O or capacity failure aborts before
+stopping services. No new AWS infrastructure or permissions are required.
+
+Preparation hashes each buffer as it is copied, avoiding another destination
+read. It can reuse a successful SQLite check for **exactly those bytes** from the
+last completed deployment/rollback's retained snapshot. The private operation
+journal must commit to that snapshot's manifest digest, and the manifest must
+record the same verification method and SQLite version. Metadata must be regular,
+single-link files owned by the operations user with private permissions. Missing,
+old, damaged or untrusted metadata falls back to a fresh SQLite check. There is no
+separate persistent cache or cache of speculative preparations. The first deployment
+with this capability is cold; scheduled backups/recovery can also replace the
+journal anchor and cause a cold preparation. See [host preparation measurements](host-preparation-performance.md).
+
+Workers then stop claiming work between jobs and acknowledge a drain while the
+dashboard stays available. The drain deadline is 70 minutes; exceeding it cancels
+the update before data changes and clears the drain request. Once drained, all
+writers stop. Capture enumerates the stopped tree again, hashes each reuse
+candidate's **entire source**, and reuses its independently checked bytes only if
+the hash and size match. Equal size or timestamps alone never establish equality.
+SQLite with any nonempty WAL or rollback journal always uses the consistent backup
+API, including committed records absent from its main file. Changed, new, small,
+and failed speculative copies use ordinary paused capture and full verification.
+Deleted files are absent from the final manifest. Immutable predecessor archives
+still require their recorded original hash and retain read-only permissions.
+
+Local rollback snapshots are private directories
+(`backups/<backup-id>.snapshot`) retaining the same complete durable state, Hermes
+history and toolchain, with existing credential/cache exclusions. Each file has a
+size and SHA-256 in the manifest; the receipt's `sha256` commits to that manifest.
+SQLite checks and destination hashing for newly copied files run immediately after
+each copy, reducing repeated cold reads. Reused files were already checked and
+hashed during preparation. SQLite's backup API consumes database journal state;
+paired rollback journals are not copied beside the independent database backup.
+Unrelated files ending in `-journal` are retained. The complete snapshot is fsynced and atomically
+published, then its receipt is durably journaled, **before** secrets, ownership,
+release pointers or state-changing initialization are updated. Recovery still
+verifies every retained byte and SQLite database, makes independent staging
+copies, and uses the existing interrupted-operation journal and startup gate.
+
+Preparation conservatively requires free space for three payloads plus 256 MiB
+(preparation, final capture, recovery staging). Moving reusable files usually uses
+less, but capacity checks do not spend the recovery reserve. A crash during
+preparation leaves `snapshot-preparing-*` scratch directories; it has not changed
+the service gate or begun a state mutation. A crash during final capture follows
+the existing journal recovery procedure. Scratch directories are never trusted on
+retry or automatically pruned. Inspect abandoned staging only when the operations
+lock is idle. A scratch cleanup failure leaves the directory for that inspection;
+it does not turn a completed healthy deployment into a failed installation.
+
+Receipts include `preparation_timings_seconds`, reused/copied files and bytes, and
+paused `timings_seconds` for SQLite backup, file copy, SQLite checks, source and
+destination hashing, manifest and durable publication. `capture` includes copy,
+check and hash subtimings; do not sum it with them. Deployment results separately
+report total time through service health, total including cleanup, drain, stop,
+snapshot, runtime preparation, initializer, validation and startup. The conservative
+user-visible downtime interval is `downtime_started_at` (before stopping services)
+to `downtime_finished_at` (after service health); preparation, downloads, drain and
+cleanup are outside it. Service health is a local proxy for availability, not an
+external end-user request probe. Already-paused installations report zero downtime; `maintenance_window` still records
+the full stopped-state interval.
+The journal retains phase timestamps and snapshot receipts even after interruption.
+
+Preparation's `copy_and_hash` includes `hash_in_copy`; do not add those together.
+`preparation_validation` counts checked/reused SQLite validations, ordinary files,
+and discarded candidates. These are separate from final stopped-source reuse.
+Per-file sizes, validation decisions, cutover outcomes and stage timings live in
+the private snapshot manifest's `preparation.files`, keyed by relative path.
+They are deliberately absent from public deployment receipts. This lets an
+operator identify expensive databases and distinguish unchanged verified contents
+from files recaptured at cutover without exposing filenames in workflow output.
+Restore still recomputes all checksums and SQLite checks, ignoring validation reuse.
+
+Targets remain 2–5 minutes for routine deployments and ideally 1–2 minutes for
+code-only updates. They require an authorized AWS measurement; local storage and
+fictional workloads cannot establish production downtime. A changing large database
+can miss reuse and still require the full paused backup/check/hash path. Preparation
+also consumes disk bandwidth while users are active and can increase total work.
+Scheduled off-host backups retain the existing quiesced capture and post-resume gzip
+upload path. See [deployment performance evidence](deployment-performance.md) for
+alternatives, measurements, limitations and reproduction commands.
 
 A root-owned journal records intent before migration, secret publication, directory
 replacement and release switching. Container startup checks a separate read-only
@@ -591,7 +652,11 @@ requires a separate secret inventory entry. The optional `compose.mail.yaml` ove
 mounts them read-only into **core and dashboard**. Core uses them for mailbox
 processing; dashboard uses them to recover failed email analysis from the existing
 archive when Review loads. Both honor the remote-mail opt-in. The model worker,
-MCP, and document tools do not receive these mounts. Hermes's other environment
+MCP, and document tools do not receive these mounts in the legacy composition. With
+`application_backend: "owners"`, the additional `compose.applications.yaml` overlay
+mounts the dedicated mail profile, provider key, and archive key into the model
+worker for Understanding. See the [application release gate](../application-redesign/08-production-readiness.md)
+before selecting that backend. Hermes's other environment
 entries are never exposed to core or dashboard.
 
 Pause through the operations command, materialize secrets, and run a bounded mail
@@ -600,8 +665,16 @@ activating. That explicit opt-in authorizes mail and eligible attachment text to
 selected hosted model; it does not enable ranking, salary, or notifications. Model
 proposals still pass the existing policy/review gates. Configuration readiness is
 not evidence of a successful external request.
-For a status-only pilot, set `remote_mail_temporal_enabled: false`; verify temporal
-accuracy independently before enabling deadline/interview-time extraction.
+For a legacy status-only pilot, set `remote_mail_temporal_enabled: false`; verify
+temporal accuracy independently before enabling deadline/interview-time extraction.
+
+For `application_backend: "owners"`, the [redesign cutover procedure](../application-redesign/08-production-readiness.md)
+takes precedence over these legacy mail steps. Understanding requires at least
+8192 output tokens, ignores the old temporal/classifier/recruiting switches, and
+receives every message within the configured folders and watermark. Relevance is
+resolved inside Understanding. The user authorized the redesign cutover without
+a separate live provider pilot; retain required automated release checks and exact
+approval for individual external actions.
 
 Before rolling back to a release without dedicated mail support, disable remote mail
 and restore the earlier runtime secret version; otherwise the old worker would use
