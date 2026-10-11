@@ -1013,7 +1013,8 @@ const SETTINGS_LABELS = {
 let settingsLoadEpoch = 0;
 async function loadSettings() {
   if (state.applicationBackend === "owners") {
-    $('#settings a[href="#settings/chief"]').hidden = true;
+    $('#settings a[href="#settings/chief"] strong').textContent = 'Scheduled briefings';
+    $('#settings a[href="#settings/chief"] .meta').textContent = 'Choose briefing times, preview current facts, and view delivery history.';
     const records = $('#settings a[href="#settings/stored-records"]');
     if (records) {
       records.href = "#applications";
@@ -1187,7 +1188,7 @@ async function saveReviewBrief(event) {
 }
 
 async function loadSettingsPage(subpage = "") {
-  if (state.applicationBackend === "owners" && ["chief", "stored-records"].includes(subpage.split('?')[0])) {
+  if (state.applicationBackend === "owners" && ["stored-records"].includes(subpage.split('?')[0])) {
     location.hash = "#applications";
     return;
   }

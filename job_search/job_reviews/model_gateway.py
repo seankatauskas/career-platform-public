@@ -4,6 +4,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 import http.client
+import itertools
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -405,8 +407,25 @@ class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 @contextmanager
 def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFFORT,
                    uid=None, gid=None, transport=None, kind='primary', rubric_version='job-review-v1',
-                   telemetry_callback=None, purpose='detailed', native_codex=False):
+                   telemetry_callback=None, purpose='detailed', native_codex=False, diagnostic_callback=None):
     native_transport = None
+    diagnostics = threading.local()
+    request_numbers = itertools.count(1)
+
+    def rejected_response(data, error):
+        try:
+            diagnostics.rejection = native_protocol.schema_diagnostic(data, error)
+        except Exception:
+            diagnostics.rejection = {'diagnostic_unavailable': True}
+
+    def emit_diagnostic(record):
+        if diagnostic_callback is not None:
+            try:
+                diagnostic_callback({'timestamp': datetime.now(timezone.utc).isoformat(), **record})
+            except Exception:
+                # Diagnostic failures never change model execution or rejection.
+                pass
+
     if native_codex:
         from . import native_protocol
         if kind != 'old_method' or purpose != 'detailed':
@@ -414,7 +433,7 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
         request_validator = lambda value: native_protocol.validate_request(value, model, reasoning_effort)
         completion = native_protocol.completion
         if transport is None:
-            native_transport = native_protocol.NativeTransport()
+            native_transport = native_protocol.NativeTransport(failure_observer=rejected_response)
             transport = native_transport
     else:
         _scoped_tools(kind, rubric_version, purpose)
@@ -440,7 +459,12 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
         # Only explicit numeric counters cross this callback. Neither arbitrary
         # usage metadata nor response/error text is allowed into host telemetry.
         event = {'request_count': 1}
+        sequence = next(request_numbers)
+        diagnostics.rejection = None
+        data = None
+        outcome = 'failed'
         started = time.monotonic()
+        emit_diagnostic({'event': 'request_started', 'request_sequence': sequence, 'request_bytes': len(body)})
         emit_telemetry({'request_started_count': 1})
         try:
             status, data = transport(body, headers)
@@ -459,16 +483,33 @@ def gateway_server(socket_path, auth_owner, *, model=MODEL, reasoning_effort=EFF
                             counts[label] = details.get(field)
                     event.update({key: value for key, value in counts.items()
                                   if type(value) is int and 0 <= value < 2**63})
+            outcome = 'completed' if status == 200 else 'upstream_http_error'
             return status, data
         except (GatewayRejected, ValueError, TypeError, KeyError, UnicodeError) as error:
+            outcome = 'response_rejected'
+            if native_codex and diagnostics.rejection is None:
+                rejected_response(data, error)
             event.update(_response_rejection_metrics(error))
             raise
         except (OSError, http.client.HTTPException):
+            outcome = 'transport_failed'
             event['upstream_transport_failed_count'] = 1
             raise
         finally:
             event.setdefault('upstream_duration_ms', round((time.monotonic() - started) * 1000, 3))
             emit_telemetry(event)
+            record = {'event': 'request_finished', 'request_sequence': sequence,
+                      'outcome': outcome, 'metrics': event}
+            if diagnostics.rejection is not None:
+                record['rejection'] = diagnostics.rejection
+            if native_transport is not None:
+                observations = native_transport.observations
+                if type(observations.get('http_status')) is int:
+                    record['http_status'] = observations['http_status']
+                record['timings_ms'] = {phase: round((observations[phase] - observations['started']) / 1e6, 3)
+                    for phase in ('connected', 'headers', 'first_byte', 'body_complete', 'validated')
+                    if phase in observations and 'started' in observations}
+            emit_diagnostic(record)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):

@@ -36,3 +36,26 @@ def chief_status(config):
                 action='inspect_reconciliation' if state=='blocked' else 'review_activation' if not enabled else 'review_configuration'))
         result['interactions_configured'] = bool(config.interaction_token_file)
     return result, capabilities
+
+
+def owner_briefing_status(config, owner):
+    """Expose a missing scheduler separately from healthy Telegram transport."""
+    from .readiness import _capability
+    with closing(sqlite3.connect(config.application_db.resolve().as_uri() + '?mode=ro', uri=True)) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute('SELECT values_json FROM attention_preferences WHERE singleton=1').fetchone()
+        prefs = json.loads(row[0]) if row else {}
+        controls = dict(con.execute('SELECT capability,enabled FROM automation_controls'))
+        schedule = con.execute("SELECT enabled,next_due_at FROM schedule_specs WHERE task_kind='applications.briefing.tick'").fetchone()
+        latest = con.execute("SELECT b.local_date,b.slot,n.status delivery_status,n.delivered_at FROM attention_briefings b LEFT JOIN notification_outbox n USING(notification_id) ORDER BY b.scheduled_for DESC LIMIT 1").fetchone()
+    enabled = bool(prefs.get('enabled', True) and not prefs.get('shadow', True) and controls.get('notifications', True))
+    configured = bool(config.hermes_telegram_target and (config.hermes_notification_socket or config.hermes_executable))
+    paused = owner.get('paused', True) or owner.get('restore_review_required', False) or not enabled
+    ready = schedule is not None and bool(schedule['enabled']) and configured
+    state = 'paused' if paused else 'ready' if ready else 'blocked'
+    reason = 'briefings_paused' if paused else 'scheduled' if ready else 'briefing_schedule_or_delivery_unavailable'
+    result = {'schedule_enabled': bool(schedule and schedule['enabled']),
+              'next_tick_at': schedule['next_due_at'] if schedule else None,
+              'latest_briefing': dict(latest) if latest else None}
+    return result, [_capability('scheduled_briefings', state, configured=configured, enabled=enabled,
+                                reason=reason, action='inspect_briefing_schedule' if state == 'blocked' else 'none')]

@@ -13,8 +13,10 @@ from job_search.contracts import ContractError, payload_sha256
 from job_search.db import connect
 from job_search.integration import LocalJobCatalog
 from job_search.job_reviews.service import JobReviews
+from job_search.job_reviews.contracts import fingerprint
 from job_search.job_reviews.old_method.store import Store
-from job_search.job_reviews.old_method.workspace import Review, write_json
+from job_search.job_reviews.old_method.workspace import Review, validate_packet, write_json
+from job_search.job_reviews.old_method.window import DISCOVERY_WINDOW
 from job_search.job_reviews.old_method.screen import family, screen
 from job_search.job_reviews.old_method.runtime import command, read_output
 from job_search.job_reviews.codex_runtime import RuntimeConfig
@@ -87,16 +89,79 @@ class OldMethodTests(unittest.TestCase):
         self.assertEqual(family({'title': 'Product Engineer', 'description': 'Python Python'}), 'General software')
         self.assertEqual(family({'title': 'Software Engineer - Backend', 'description': ''}), 'Backend')
 
-    def test_strict_posted_window_excludes_updates_missing_and_closed(self):
-        self.insert('start', posted_at='2026-10-08T00:00:00Z')
-        self.insert('end', posted_at='2026-10-09T12:00:00Z')
+    def test_discovery_window_and_age_boundaries(self):
+        self.insert('start', first_seen='2026-10-08T00:00:00Z', posted_at='2026-10-07T23:00:00Z')
+        self.insert('end', first_seen='2026-10-09T12:00:00Z')  # exactly 24h old
+        self.insert('after', first_seen='2026-10-09T12:00:00.000001Z')
+        self.insert('outside_posted_window', first_seen='2026-10-08T01:00:00Z', posted_at='2026-10-07T23:00:00Z')
+        self.insert('too_old', first_seen='2026-10-09T12:00:00.000001Z', posted_at='2026-10-08T12:00:00Z')
+        self.insert('too_old_in_window', posted_at='2026-10-08T09:59:59.999999Z')
+        self.insert('future_posted', posted_at='2026-10-09T10:00:00.000001Z')
+        self.insert('same_instant', posted_at='2026-10-09T10:00:00Z')
+        self.insert('offset', first_seen='2026-10-09T05:00:00-05:00')
         self.insert('updated', posted_at='2025-01-01T00:00:00Z')
-        self.insert('missing', posted_at=None)
         self.insert('closed', closed_at='2026-10-09T10:00:00Z')
+        for field in ('posted_at', 'first_seen'):
+            for n, value in enumerate((None, '', 'invalid', '2026-10-09T10:00:00')):
+                self.insert(f'{field}_{n}', **{field: value})
         packet = self.store.packet(self.start())
-        self.assertEqual([j['id'] for j in packet['jobs']], ['a', 'end'])
+        self.assertEqual([j['id'] for j in packet['jobs']], ['outside_posted_window', 'a', 'offset', 'same_instant', 'end'])
+        self.assertEqual(packet['window_policy'], DISCOVERY_WINDOW)
+        validate_packet(packet)
         self.assertNotIn('applications', packet)
         self.assertNotIn('previous_lists', packet)
+
+    def test_adjacent_arbitrary_windows_split_discoveries_once(self):
+        self.insert('b', first_seen='2026-10-09T10:00:00.000001Z')
+        bounds = ['2026-10-01T00:00:00Z', '2026-10-09T10:00:00Z', '2026-10-09T12:00:00Z']
+        selected = []
+        for start, end in zip(bounds, bounds[1:]):
+            rid = self.store.create(start, end, execution=self.execution)['review_id']
+            selected.append([j['id'] for j in self.store.packet(rid)['jobs']])
+        self.assertEqual(selected, [['a'], ['b']])
+
+    def test_worker_rejects_invalid_discovery_membership_and_policy(self):
+        packet = self.store.packet(self.start())
+        for changes in ({'first_seen': None}, {'first_seen': '2026-10-10T12:00:00Z'},
+                        {'posted_at': '2026-10-07T00:00:00Z'}, {'posted_at': '2026-10-09T11:00:00Z'}):
+            bad = copy.deepcopy(packet)
+            bad['jobs'][0].update(changes)
+            bad['sources_sha256'] = payload_sha256([fingerprint(j) for j in bad['jobs']])
+            with self.subTest(changes=changes), self.assertRaisesRegex(ContractError, 'membership'):
+                validate_packet(bad)
+        packet['window_policy'] = 'unknown'
+        with self.assertRaisesRegex(ContractError, 'window policy'):
+            validate_packet(packet)
+
+    def test_publication_accepts_posted_before_window(self):
+        rid = self.store.create('2026-10-09T00:00:00Z', '2026-10-09T12:00:00Z', execution=self.execution)['review_id']
+        self.finish(rid)
+        self.assertEqual(self.store.publish(rid, self.observations(rid))['lists'][0]['job_count'], 1)
+
+    def test_publication_rechecks_discovery_membership_and_frozen_time(self):
+        rid = self.start(); self.finish(rid)
+        for seen in ('2026-10-09T12:00:00.000001Z', '2026-10-09T09:00:00Z', None):
+            with sqlite3.connect(self.jobs) as con:
+                con.execute('UPDATE jobs SET first_seen=?', (seen,))
+            with self.subTest(seen=seen), self.assertRaises(ContractError):
+                self.store.publish(rid, self.observations(rid))
+        self.assertEqual(self.store.status(rid)['status'], 'active')
+
+    def test_legacy_run_retains_packet_hash_and_posted_window_on_resume(self):
+        rid = self.start()
+        legacy = self.store.packet(rid)
+        del legacy['window_policy']
+        legacy['jobs'][0]['first_seen'] = '2026-10-10T12:00:00Z'
+        # Simulate a saved run created by the posted-window implementation.
+        with connect(self.ledger.store.db_path) as con:
+            meta = self.store.metadata(rid)
+            del meta['window_policy']
+            con.execute('UPDATE job_reviews SET metadata_json=? WHERE review_id=?', (json.dumps(meta), rid))
+            con.execute('UPDATE job_review_items SET snapshot_json=? WHERE review_id=?', (json.dumps(legacy['jobs'][0]), rid))
+        self.assertEqual(self.store.packet(rid), legacy)
+        self.assertEqual(payload_sha256(self.store.packet(rid)), payload_sha256(legacy))
+        self.finish(rid)
+        self.assertEqual(self.store.publish(rid, self.observations(rid))['lists'][0]['job_count'], 1)
 
     def test_freezes_resume_and_sources(self):
         rid = self.start()

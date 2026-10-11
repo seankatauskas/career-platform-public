@@ -1355,6 +1355,11 @@ def make_handler(
                 if path == "/api/v1/job-reviews/brief":
                     self._json(controller.job_reviews.call('brief'), session=session, new_session=new_session)
                     return
+                if path == "/api/v1/job-reviews/generation-status":
+                    query = parse_qs(parsed_url.query)
+                    args = {'review_id': query['review_id'][0]} if query.get('review_id') else {}
+                    self._json(controller.job_reviews.call('generation-status', args), session=session, new_session=new_session)
+                    return
                 if path.startswith("/api/v1/job-reviews/"):
                     rid = path[len("/api/v1/job-reviews/"):]
                     self._json(controller.job_reviews.call('status', {'review_id': rid}), session=session, new_session=new_session)

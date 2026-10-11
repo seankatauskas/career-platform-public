@@ -26,8 +26,12 @@ def build_application_gateway(config, operational_ledger):
     require_backend(config)
     from .application_runtime import ApplicationRuntime
     from .integration import LocalJobCatalog
-    return ApplicationGateway(ApplicationRuntime(config.application_owner_db), operational_ledger,
-                              catalog=LocalJobCatalog(config.jobs_db))
+    runtime = ApplicationRuntime(config.application_owner_db)
+    from .attention.owner_briefings import OwnerBriefingService
+    operational_ledger._attention = OwnerBriefingService(operational_ledger, runtime.queries,
+        dashboard_url=getattr(config, 'dashboard_https_origin', None))
+    operational_ledger.store.notification_validator = operational_ledger._attention.validate_delivery
+    return ApplicationGateway(runtime, operational_ledger, catalog=LocalJobCatalog(config.jobs_db))
 
 
 class ApplicationGateway:
@@ -37,6 +41,10 @@ class ApplicationGateway:
         if runtime.executor.path.resolve() == operational_ledger.store.db_path.resolve():
             raise ValueError("Application owners and operational state require separate databases")
         self.runtime, self.operational_ledger, self.catalog = runtime, operational_ledger, catalog
+        from .attention.owner_briefings import OwnerBriefingService
+        if not isinstance(getattr(operational_ledger, '_attention', None), OwnerBriefingService):
+            operational_ledger._attention = OwnerBriefingService(operational_ledger, runtime.queries)
+        operational_ledger.store.notification_validator = operational_ledger._attention.validate_delivery
 
     @staticmethod
     def _context(context):
@@ -348,6 +356,9 @@ class ApplicationGateway:
                               self.runtime.workflows.preview_association_correction(con, args["association_id"]))
                 return True, result
             raise DomainError("not_found", "Unknown application route")
+        if path in {'/api/v1/chief/preferences', '/api/v1/chief/preview', '/api/v1/chief/history'} or path.startswith('/api/v1/chief/briefing/'):
+            from .interactions.dashboard import read
+            return True, read(self.operational_ledger, path[len('/api/v1/chief/'):], {k: [str(v)] for k,v in args.items()})
         if path == "/api/v1/applications":
             if set(args) - {"limit", "cursor"}:
                 raise DomainError("invalid_input", "Unsupported application query fields")
@@ -398,6 +409,12 @@ class ApplicationGateway:
             "/api/v1/actions/", "/api/v1/reminders/", "/api/v1/attention/"))
 
     def http_command(self, path, body, key, actor_id):
+        if path == '/api/v1/chief/preferences':
+            from .contracts import MutationContext
+            from .interactions.dashboard import mutate
+            if set(body.get('changes', {})) - {'enabled', 'shadow', 'morning_time', 'evening_time', 'timezone', 'ai_enabled'}:
+                raise DomainError('invalid_input', 'Only scheduled briefing preferences are supported here')
+            return True, mutate(self.operational_ledger, 'preferences', body, MutationContext(key, 'user', 'dashboard', actor_id))
         if path.startswith("/api/v1/application-commands/"):
             return True, self.command(path.rsplit("/", 1)[-1], body, key, actor_id)
         if path.startswith("/api/v1/lifecycle/"):

@@ -13,10 +13,10 @@ GROUPS = {
     'outlook_actions': ('outlook.actions.execute',),
     # Owner reminder delivery is governed by installation activation and its
     # accepted reminder. This switch controls operational notifications only.
-    'notifications': ('notification.deliver', 'notification.reminders_due', 'notification.shortlist_evaluate'),
+    'notifications': ('applications.briefing.tick', 'notification.deliver', 'notification.reminders_due', 'notification.shortlist_evaluate'),
     'salary': ('opportunity.salary_drain',),
     'resume_generation': ('resume.optimize',),
-    'briefing_ai': ('briefing.compose', 'career.reply.context', 'career.reply.prepare'),
+    'briefing_ai': ('applications.briefing.compose', 'briefing.compose', 'career.reply.context', 'career.reply.prepare'),
     'outlook_send': ('career.actions.execute',),
     'calendar_commitments': ('career.calendar.sync',),
 }
@@ -47,7 +47,7 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
             or type(expected_revision) is not int or expected_revision < 0
             or not isinstance(command_id, str) or not command_id or len(command_id)>256):
         raise ValueError('invalid automation decision')
-    if getattr(config,'application_backend','legacy')=='owners' and capability in {'outlook_actions','outlook_send','calendar_commitments','briefing_ai'}:
+    if getattr(config,'application_backend','legacy')=='owners' and capability in {'outlook_actions','outlook_send','calendar_commitments'}:
         raise ValueError('Use application-installation activation and reviewed owner proposals for this installation')
     request = canonical_json({'capability':capability,'enabled':enabled,'revision':expected_revision})
     stamp = utc_now()

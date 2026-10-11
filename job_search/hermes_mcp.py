@@ -95,7 +95,7 @@ def _mcp_tools(adapter: HermesAdapter) -> Sequence[Mapping[str, Any]]:
     read_only = getattr(adapter, "read_only_tool_names", read_only)
     idempotent = getattr(adapter, "idempotent_tool_names", read_only | {
         "publish_curated_shortlist", "propose_reply", "propose_interview_slots",
-        "create_reminder", "cancel_reminder"})
+        "create_reminder", "cancel_reminder", "review_generate", "review_generation_resume"})
     destructive = getattr(adapter, "destructive_tool_names", {"cancel_reminder"})
     tools = []
     for definition in adapter.tool_definitions():

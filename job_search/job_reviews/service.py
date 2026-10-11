@@ -24,6 +24,9 @@ from .brief import SearchBriefMixin, current_search_brief
 
 # A narrow application interface shared by HTTP, MCP, and the CLI.
 FIELDS = {
+    'generate': ('initial_start', 'idempotency_key'),
+    'generation-status': ('review_id',),
+    'generation-resume': ('review_id', 'idempotency_key'),
     'benchmark-start': ('review_id', 'ordinals', 'label', 'idempotency_key'),
     'context': ('review_id', 'offset', 'limit', 'section'),
     'assessment': ('review_id', 'ordinal', 'kind', 'offset', 'limit'),
@@ -47,6 +50,7 @@ FIELDS = {
     'feedback': ('review_id', 'ordinal', 'note', 'idempotency_key'),
 }
 WRITES = {'benchmark-start', 'save-brief', 'calibrate', 'finalize', 'verify-availability', 'start', 'claim', 'assess', 'refresh-job', 'publish', 'abandon', 'feedback'}
+WRITES |= {'generate', 'generation-resume'}
 _MANAGED_MUTATIONS = {'calibrate', 'finalize', 'verify-availability', 'start', 'claim', 'job', 'assess', 'refresh-job', 'publish', 'abandon'}
 
 
@@ -75,6 +79,9 @@ class JobReviews(SearchBriefMixin, CalibrationMixin, VerificationMixin):
         self.curated = CuratedShortlists(db_path, catalog, application_gateway=application_gateway)
 
     def call(self, action, args=None):
+        from .old_method.generator import ACTIONS, Generator
+        if action in ACTIONS:
+            return Generator(self).call(action, args)
         if action == 'verify-availability':
             return self._verify_availability(args)
         with closing(connect(self.db_path)) as con, con:

@@ -174,6 +174,34 @@ try {
   assert.equal(await page.locator('#application-list .application-link').count(), 1);
   assert.equal(await page.locator('#application-count').innerText(), '1 application');
   await assertNoModelScores('#application-list');
+  const applicationOrderFixture = async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const base = body.applications.find(app => app.current_phase !== 'preparing');
+    body.applications = [
+      ['poshmark', '2026-10-08T22:49:00-05:00'],
+      ['watershed', '2026-10-05T16:45:00-05:00'],
+      ['chewy', '2026-10-07T23:34:00-05:00'],
+      ['missing', null],
+      // Its calendar date looks later, but its instant is earlier than Chewy's.
+      ['offset', '2026-10-08T00:00:00Z'],
+    ].map(([id, updated_at]) => ({...base, application_id: id,
+      employer_snapshot: id, title_snapshot: 'Sort fixture', updated_at}));
+    await route.fulfill({response, json: body});
+  };
+  await page.route('**/api/v1/applications', applicationOrderFixture);
+  await page.locator('#refresh-applications').click();
+  await page.waitForFunction(() => document.querySelectorAll('#application-list tbody tr').length === 5);
+  const applicationOrder = () => page.locator('#application-list .application-link').evaluateAll(
+    links => links.map(link => link.getAttribute('href').split('/')[1]));
+  assert.deepEqual(await applicationOrder(), ['poshmark', 'chewy', 'offset', 'watershed', 'missing']);
+  await page.fill('#application-search', 'Sort fixture');
+  assert.deepEqual(await applicationOrder(), ['poshmark', 'chewy', 'offset', 'watershed', 'missing']);
+  await page.fill('#application-search', '');
+  await page.unroute('**/api/v1/applications', applicationOrderFixture);
+  await page.locator('#refresh-applications').click();
+  await page.waitForFunction(() => document.querySelectorAll('#application-list tbody tr').length === 1);
+  report.checks.push('Applications sorts displayed update times newest first, including offsets and missing dates, with and without search.');
   assert.deepEqual(await page.locator('.sidebar a').allTextContents(), ['Applications', 'Shortlist', 'Review', 'Settings']);
   assert(!/Waypoint/.test(await page.locator('#application-list').innerText()));
   await page.fill('#application-search', 'Cedar');
@@ -220,13 +248,15 @@ try {
   assert.match(await page.locator('#workspace-documents').innerText(), /No resume was recorded/);
   report.checks.push('Stored drafts remain read-only under Settings; legacy resume links open Documents without generation controls.');
   await page.locator('.sidebar a[href="#shortlist"]').click();
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-source', 'model');
+  await page.locator('#shortlist-options > summary').click();
   await page.locator('.shortlist-advanced > summary').click();
   await page.selectOption('#policy','champion');
   await page.getByRole('button',{name:'Refresh shortlist'}).click();
   const role=page.locator('#shortlist-list .card').filter({hasText:'Northstar Labs'});
   await role.waitFor();
-  assert.equal(await page.getByRole('checkbox', {name:'Exclude recently applied companies'}).isChecked(), true);
+  assert.equal(await page.getByRole('checkbox', {name:'Exclude recently applied companies', includeHidden:true}).isChecked(), true);
   assert.equal(await role.locator('.shortlist-company-applied').count(), 0);
   assert.equal(await page.locator('#shortlist-list .card').filter({hasText:'Harbor Systems'}).locator('.shortlist-company-applied').count(), 0);
   assert.equal(await role.locator('time.posting-date').first().innerText(), 'Posted today');
@@ -626,7 +656,9 @@ for name in ['retry','dismiss']:
   await restrictedPage.getByRole('button',{name:'Dark mode',exact:true}).click();
   assert.equal(await restrictedPage.locator('html').getAttribute('data-theme'),'dark');
   await restrictedPage.goto(url+'/#shortlist');
+  if (!await restrictedPage.locator('#shortlist-options').evaluate(el => el.open)) await restrictedPage.locator('#shortlist-options > summary').click();
   await restrictedPage.selectOption('#shortlist-source', 'model');
+  await restrictedPage.locator('#shortlist-options > summary').click();
   await restrictedPage.waitForFunction(() => state.shortlist?.recommendations.some(job => job.recent_company_application));
   assert.equal(await restrictedPage.locator('#exclude-recent-companies').isChecked(), true);
   assert.equal(await restrictedPage.locator('#shortlist-list .card').count(), modelRoleCount - 1);
@@ -638,8 +670,10 @@ for name in ['retry','dismiss']:
   // Publish over the real authenticated MCP boundary while the dashboard is running.
   await page.goto(url+'/#shortlist');
   await advance('curated');
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-source', 'curated');
-  await page.getByRole('button',{name:'Refresh saved lists'}).click();
+  await page.locator('#shortlist-options > summary').click();
+  await page.getByRole('button',{name:'Refresh',exact:true}).click();
   await page.locator('.curated-explanation').first().waitFor();
   assert.equal(await page.locator('#shortlist-source').inputValue(), 'curated');
   assert.equal(await page.locator('#shortlist-form').isVisible(), false);
@@ -661,18 +695,24 @@ for name in ['retry','dismiss']:
   const freshPage = await freshContext.newPage();
   freshPage.on('pageerror', error => pageErrors.push(error.message));
   await freshPage.goto(url+'/#shortlist');
+  if (!await freshPage.locator('#shortlist-options').evaluate(el => el.open)) await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.selectOption('#shortlist-source', 'curated');
+  await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.locator('.curated-explanation').first().waitFor();
   assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), true);
   assert.equal(await freshPage.locator('#shortlist-list .card').count(), 1);
   assert.equal(await freshPage.locator('#shortlist-list .card .job-company').innerText(), 'Harbor Systems');
+  if (!await freshPage.locator('#shortlist-options').evaluate(el => el.open)) await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.selectOption('#shortlist-source', 'model');
+  await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.waitForFunction(() => state.shortlist?.source !== 'curated' && state.shortlist?.recommendations.some(job => job.recent_company_application));
   assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), true);
   assert.equal(await freshPage.locator('#shortlist-list .card').count(), modelRoleCount - 1);
   await freshPage.locator('#exclude-recent-companies').uncheck();
   assert.equal(await freshPage.locator('#shortlist-list .card').count(), modelRoleCount);
+  if (!await freshPage.locator('#shortlist-options').evaluate(el => el.open)) await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.selectOption('#shortlist-source', 'curated');
+  await freshPage.locator('#shortlist-options > summary').click();
   await freshPage.locator('.curated-explanation').first().waitFor();
   assert.equal(await freshPage.locator('#exclude-recent-companies').isChecked(), false);
   assert.equal(await freshPage.locator('#shortlist-list .card').count(), 2);
@@ -749,20 +789,30 @@ for name in ['retry','dismiss']:
     // never submit a new shortlist/ranking/publication request.
     const countRequest = request => { if (request.method() !== 'GET' && /\/api\/v1\//.test(request.url())) requests++; };
     page.on('request', countRequest);
+    if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
     await page.selectOption('#shortlist-sort', 'posted-newest');
+    await page.locator('#shortlist-options > summary').click();
     assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(), [...originalRanks].reverse());
     assert.deepEqual(await page.evaluate(()=>state.shortlist.recommendations.map(job=>String(job.rank).padStart(2,'0'))), originalRanks);
+    if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
     await page.selectOption('#shortlist-sort', 'original');
+    await page.locator('#shortlist-options > summary').click();
     assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(), originalRanks);
     page.off('request', countRequest);
     assert.equal(requests, 0, 'display sorting must not mutate data or rerank jobs');
   }
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-sort', 'posted-oldest');
+  await page.locator('#shortlist-options > summary').click();
   await page.reload(); await page.locator('.curated-explanation').first().waitFor();
   assert.equal(await page.locator('#shortlist-sort').inputValue(), 'posted-oldest');
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-sort', 'original');
+  await page.locator('#shortlist-options > summary').click();
   report.checks.push('Both sources sort by posting/update dates in either direction, retain original ranks/order, put missing dates last, avoid network writes and persist across reload.');
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-source', 'curated');
+  await page.locator('#shortlist-options > summary').click();
   await advance('curated');
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForFunction(() => document.querySelectorAll('#curated-list option').length === 3);
@@ -771,9 +821,13 @@ for name in ['retry','dismiss']:
   await page.reload(); await page.locator('.curated-explanation').first().waitFor();
   assert.equal(await page.locator('#curated-list').inputValue(), firstList);
   await assertCompanyApplied(role, applicationId, submittedAt);
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-source', 'model');
+  await page.locator('#shortlist-options > summary').click();
   await page.locator('#shortlist-form').waitFor({state:'visible'});
+  if (!await page.locator('#shortlist-options').evaluate(el => el.open)) await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-source', 'curated');
+  await page.locator('#shortlist-options > summary').click();
   await page.locator('.curated-explanation').first().waitFor();
   await page.locator('#shortlist-list .card').first().getByRole('button').first().click();
   await page.locator('#job-preview').filter({hasText:'Selected and ordered by Codex'}).waitFor();

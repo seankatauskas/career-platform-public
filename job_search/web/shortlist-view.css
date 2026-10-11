@@ -3,10 +3,10 @@
 .shortlist-toolbar label { min-width: 140px; }
 #curated-list-label { max-width: min(100%, 480px); }
 #curated-list { max-width: 100%; }
-.shortlist-company-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 0 12px; margin: 0 0 16px; }
+.shortlist-company-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin: 16px 0; }
 .shortlist-company-filter .check { min-width: 0; font-weight: 400; }
 .shortlist-company-filter input { flex-shrink: 0; }
-.shortlist-company-filter .help { margin: 0; }
+.shortlist-company-filter .help { margin: 0; font-size: 12px; }
 .shortlist-filters { border-top: 1px solid var(--line); padding: 16px 0; }
 .shortlist-filters > .controls { justify-content: flex-start; gap: 16px; }
 .shortlist-advanced { margin-top: 16px; }
@@ -38,7 +38,6 @@
 @media (max-width: 600px) {
   .shortlist-toolbar, .shortlist-filters .controls { align-items: stretch; }
   .shortlist-toolbar > label, .shortlist-filters .controls > label { flex: 1 1 160px; }
-  .shortlist-toolbar > button { flex: 1 1 auto; }
   .job-preview-header-actions { flex-direction: column; align-items: flex-end; gap: 8px; }
 }
 .agent-review-summary { border: 1px solid var(--line); padding: 16px; margin: 12px 0 20px; border-radius: 6px; }
@@ -47,5 +46,40 @@
 .agent-review-history { margin: 4px 0 20px; }
 .agent-review-history summary { color: var(--secondary-ink); cursor: pointer; font-size: 12px; }
 .agent-review-history button, .agent-review-entry { margin-top: 12px; }
-.agent-assessment h4 { font-size: 12px; margin-bottom: 4px; }
-.agent-assessment blockquote { border-left: 2px solid var(--line); margin: 8px 0; padding-left: 12px; font-size: 12px; }
+
+/* Keep the page about the roles. Secondary controls open only when requested. */
+.shortlist-heading { margin-bottom: 24px; align-items: center; }
+.shortlist-heading h2 { font-size: 28px; letter-spacing: -.8px; }
+.shortlist-toolbar { display: flex; align-items: flex-end; gap: 20px; padding-bottom: 0; margin-bottom: 12px; }
+#curated-list-label { flex: 1; max-width: 540px; min-width: 0; }
+#curated-list { width: 100%; }
+#curated-list, #refresh-curated, #generate-list, #list-generation-status.is-running { height: 40px; box-sizing: border-box; }
+.shortlist-options { position: relative; margin-left: auto; }
+.shortlist-options > summary { padding: 10px 2px 10px 14px; color: var(--secondary-ink); font-size: 13px; cursor: pointer; }
+.shortlist-options > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.shortlist-options-panel { position: absolute; z-index: 5; right: 0; top: calc(100% + 8px); width: 310px; max-width: calc(100vw - 48px); display: grid; gap: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; box-shadow: 0 12px 32px #0002; }
+.shortlist-options-panel .actions { flex-wrap: wrap; }
+#list-generator-form { justify-content: flex-start; margin: 12px 0; }
+#list-generation-status { display: flex; align-items: center; gap: 9px; min-height: 40px; min-width: 0; max-width: 320px; box-sizing: border-box; margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--secondary-ink); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#list-generation-status::before { content: ''; flex: 0 0 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+#list-generation-status.is-running { flex-shrink: 0; white-space: nowrap; }
+#list-generation-status.is-running::before { animation: generation-pulse 1.8s ease-in-out infinite; }
+@keyframes generation-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { #list-generation-status.is-running::before { animation: none; } }
+@media (max-width: 1000px) {
+  .shortlist-toolbar { flex-wrap: wrap; }
+  .shortlist-toolbar > #curated-list-label { flex: 1 1 100%; max-width: none; }
+  #list-generation-status { order: 1; flex-basis: 100%; max-width: none; }
+}
+#shortlist-window { margin: 0 0 24px; color: var(--muted); font-size: 12px; }
+#shortlist-company-filter-status { margin: 0 12px 0 0; font-size: 12px; color: var(--muted); }
+#refresh-curated, #generate-list { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .shortlist-heading { gap: 16px; margin-bottom: 20px; }
+  .shortlist-toolbar { align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+  .shortlist-toolbar > #curated-list-label { flex: 1 1 100%; max-width: none; }
+  .shortlist-company-filter { gap: 4px 12px; }
+  .shortlist-company-filter .check { font-size: 12px; }
+  #shortlist-company-filter-status { flex-basis: 100%; margin: 0; }
+  #curated-list { text-overflow: ellipsis; }
+}

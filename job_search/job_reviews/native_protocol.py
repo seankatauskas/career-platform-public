@@ -7,6 +7,7 @@ replacement authorization boundary for host-side execution.
 from __future__ import annotations
 
 import json
+import hashlib
 import http.client
 import ssl
 import threading
@@ -194,28 +195,36 @@ def validate_request(value, model=gateway.MODEL, effort='high'):
 def completion(data):
     """Validate native event identities and return the unchanged final object."""
     final, done, added = None, {}, {}
-    for event in gateway._upstream_events(data):
-        event_type = event.get('type')
-        if final is not None:
-            raise gateway.GatewayRejected('events followed completion', reason='output_consistency')
-        if event_type not in EVENTS:
-            raise gateway.GatewayRejected('unsupported native event', reason='unsupported_capability')
-        response = event.get('response', {})
-        if not isinstance(response, dict) or not isinstance(response.get('output', []), list):
-            raise gateway.GatewayRejected('invalid native response')
-        for item in response.get('output', []):
-            _item(item, output=True, partial=event_type != 'response.completed')
-        if event_type in ('response.output_item.added', 'response.output_item.done'):
-            index, item = event.get('output_index'), event.get('item')
-            target = added if event_type.endswith('added') else done
-            if type(index) is not int or index < 0 or index in target:
-                raise gateway.GatewayRejected('invalid native output index', reason='output_consistency')
-            _item(item, output=True, partial=target is added)
-            target[index] = item
-        if event_type == 'response.completed':
-            if response.get('status') != 'completed' or 'output' not in response:
-                raise gateway.GatewayRejected('invalid native completion', reason='incomplete_stream')
-            final = response
+    for event_index, event in enumerate(gateway._upstream_events(data)):
+        try:
+            event_type = event.get('type')
+            if final is not None:
+                raise gateway.GatewayRejected('events followed completion', reason='output_consistency')
+            if event_type in ('response.failed', 'error'):
+                raise gateway.GatewayRejected('upstream native response failed', reason='upstream_failed')
+            if event_type == 'response.incomplete':
+                raise gateway.GatewayRejected('native response incomplete', reason='incomplete_stream')
+            if event_type not in EVENTS:
+                raise gateway.GatewayRejected('unsupported native event', reason='unsupported_capability')
+            response = event.get('response', {})
+            if not isinstance(response, dict) or not isinstance(response.get('output', []), list):
+                raise gateway.GatewayRejected('invalid native response')
+            for item in response.get('output', []):
+                _item(item, output=True, partial=event_type != 'response.completed')
+            if event_type in ('response.output_item.added', 'response.output_item.done'):
+                index, item = event.get('output_index'), event.get('item')
+                target = added if event_type.endswith('added') else done
+                if type(index) is not int or index < 0 or index in target:
+                    raise gateway.GatewayRejected('invalid native output index', reason='output_consistency')
+                _item(item, output=True, partial=target is added)
+                target[index] = item
+            if event_type == 'response.completed':
+                if response.get('status') != 'completed' or 'output' not in response:
+                    raise gateway.GatewayRejected('invalid native completion', reason='incomplete_stream')
+                final = response
+        except gateway.GatewayRejected as error:
+            error.native_event_index = event_index
+            raise
     if final is None:
         raise gateway.GatewayRejected('native stream did not complete', reason='incomplete_stream')
     output = final['output']
@@ -257,10 +266,21 @@ def schema_diagnostic(data, error):
         'usage', 'object', 'sequence_number', 'item', 'output_index', 'response',
         'delta', 'item_id', 'content_index', 'summary_index', 'part', 'agent',
         'obfuscation', 'signature', 'end_turn', 'refusal', 'metadata',
-        'internal_chat_message_metadata_passthrough'))
+        'internal_chat_message_metadata_passthrough', 'error', 'code',
+        'incomplete_details', 'reason'))
+    diagnostic_events = EVENTS | frozenset(('response.failed', 'response.incomplete', 'error',
+        'response.queued', 'response.refusal.delta', 'response.refusal.done',
+        'response.compaction.delta', 'response.compaction.done'))
+    error_codes = frozenset(('server_error', 'rate_limit_exceeded', 'context_length_exceeded',
+        'invalid_prompt', 'invalid_request_error', 'content_filter', 'max_output_tokens',
+        'insufficient_quota', 'usage_limit_reached', 'subscription_sharing_usage_limit_exceeded',
+        'subscription_sharing_usage_unavailable', 'model_not_found', 'overloaded', 'steered'))
     item_types = frozenset(('message', 'reasoning', 'custom_tool_call', 'function_call',
         'custom_tool_call_output', 'function_call_output', 'output_text', 'input_text',
-        'summary_text', 'reasoning_text', 'refusal'))
+        'summary_text', 'reasoning_text', 'refusal', 'compaction', 'web_search_call',
+        'file_search_call', 'computer_call', 'code_interpreter_call', 'image_generation_call',
+        'local_shell_call', 'shell_call', 'apply_patch_call', 'mcp_call', 'mcp_list_tools',
+        'mcp_approval_request'))
 
     def shape(value):
         if not isinstance(value, dict):
@@ -270,6 +290,8 @@ def schema_diagnostic(data, error):
         kind = value.get('type')
         if isinstance(kind, str):
             result['type'] = kind if kind in item_types else 'unknown'
+            if kind not in item_types:
+                result['type_sha256'] = hashlib.sha256(kind.encode()).hexdigest()
         for key in ('input', 'arguments', 'call_id', 'encrypted_content',
                     'metadata', 'internal_chat_message_metadata_passthrough'):
             if key in value:
@@ -292,6 +314,11 @@ def schema_diagnostic(data, error):
                   'invalid native response': 'invalid_response',
                   'invalid native completion': 'invalid_completion',
                   'unapproved native tool': 'unapproved_tool',
+                  'unsupported native event': 'unsupported_event',
+                  'unsupported native capability': 'unsupported_item',
+                  'upstream native response failed': 'upstream_failed',
+                  'native response incomplete': 'incomplete_stream',
+                  'native stream did not complete': 'missing_completion',
               }.get(str(error), 'other'),
               'response_bytes': len(data) if isinstance(data, bytes) else 0,
               'events': [], 'truncated': False, 'event_count': 0, 'delta_count': 0}
@@ -302,7 +329,12 @@ def schema_diagnostic(data, error):
             if kind in EVENTS and kind.endswith('.delta'):
                 result['delta_count'] += 1
                 continue
-            entry = {'event': kind if kind in EVENTS else 'unknown', 'shape': shape(event)}
+            entry = {'event': kind if kind in diagnostic_events else 'unknown', 'shape': shape(event)}
+            if isinstance(kind, str) and kind not in diagnostic_events:
+                entry['event_sha256'] = hashlib.sha256(kind.encode()).hexdigest()
+            if kind == 'error':
+                code = event.get('code')
+                entry['error_code'] = code if isinstance(code, str) and code in error_codes else 'unknown'
             if 'item' in event:
                 entry['item'] = shape(event['item'])
                 item = event['item']
@@ -313,14 +345,22 @@ def schema_diagnostic(data, error):
             response = event.get('response')
             if isinstance(response, dict):
                 entry['response'] = shape(response)
+                for field, key in (('error', 'code'), ('incomplete_details', 'reason')):
+                    detail = response.get(field)
+                    if isinstance(detail, dict):
+                        code = detail.get(key)
+                        entry[field] = {key: code if isinstance(code, str) and code in error_codes else 'unknown'}
                 if isinstance(response.get('output'), list):
                     entry['output_count'] = len(response['output'])
                     entry['output'] = [shape(item) for item in response['output'][:20]]
+            if index == getattr(error, 'native_event_index', None):
+                result['rejected_event_index'] = index
+                result['rejected_event'] = entry
             if len(result['events']) < 100:
                 result['events'].append(entry)
             else:
                 result['truncated'] = True
-                if kind == 'response.completed':
+                if kind == 'response.completed' or kind not in EVENTS:
                     result['events'][-1] = entry
     except (ValueError, TypeError, AttributeError):
         result['framing_error'] = True
@@ -373,6 +413,7 @@ class NativeTransport:
                              'OpenAI-Beta': 'responses=experimental', **headers})
                 response = self._connection.getresponse()
                 observations['headers'] = time.monotonic_ns()
+                observations['http_status'] = response.status
                 if response.status != 200:
                     self._close()
                     return response.status, b''

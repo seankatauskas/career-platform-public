@@ -367,10 +367,13 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/job_reviews/old_method/__init__.py
 !job_search/job_reviews/old_method/__main__.py
 !job_search/job_reviews/old_method/entrypoint.py
+!job_search/job_reviews/old_method/generator.py
 !job_search/job_reviews/old_method/host.py
 !job_search/job_reviews/old_method/runtime.py
 !job_search/job_reviews/old_method/screen.py
 !job_search/job_reviews/old_method/store.py
+!job_search/job_reviews/old_method/titles.py
+!job_search/job_reviews/old_method/window.py
 !job_search/job_reviews/old_method/workspace.py
 # Isolated application candidate modules (no automatic activation).
 !job_search/application_candidate.py
@@ -437,3 +440,6 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/application_feedback.py
 
 !job_search/application_readiness.py
+
+!job_search/attention/owner_briefings.py
+!job_search/applications/understanding/briefing.py

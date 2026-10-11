@@ -40,6 +40,19 @@ const openApp = async () => {
   await page.locator('#owner-tasks').getByText('Prepare portfolio', {exact: true}).waitFor();
 };
 try {
+  await page.goto(`${fixture.url}/#settings/chief`);
+  await page.locator('#chief-preferences input[name="morning_time"]').waitFor();
+  await page.waitForFunction(() => document.querySelector('#chief-preview')?.textContent.includes('Your morning briefing'));
+  assert.equal(await page.locator('#chief-actions').isVisible(), false);
+  assert.equal(await page.locator('#chief-preferences select[name="mode"]').isVisible(), false);
+  assert.equal(await page.locator('#chief-status').textContent(), '');
+  assert(!reads.some(url => /chief\/(actions|candidates|commitments|delivery-recovery)/.test(url)));
+  await page.locator('#chief-preferences input[name="morning_time"]').fill('08:00');
+  await page.locator('#chief-preferences button[type="submit"]').click();
+  await page.getByText('Preferences saved.', {exact:true}).waitFor();
+  const savedBriefingPrefs = await page.evaluate(() => api('/api/v1/chief/preferences'));
+  assert.equal(savedBriefingPrefs.morning_time, '08:00');
+  mutations.length = 0;
   await page.goto(fixture.url);
   await page.locator('.application-link').filter({hasText: 'Platform Engineer'}).waitFor();
   assert.equal(new URL(page.url()).pathname, '/');
@@ -56,6 +69,39 @@ try {
   await page.waitForFunction(() => ownerReviewState.loaded);
   assert.match(await page.locator('#review-count').textContent(), /2/);
   await page.screenshot({path: path.join(output, 'applications.png'), fullPage: true});
+  // Owner API pages are ordered by ID; the table must sort the complete result by update time.
+  const base = await page.evaluate(() => state.applications[0]);
+  const orderRows = [
+    ['01-poshmark', '2026-10-08T22:49:00-05:00'],
+    ['02-watershed', '2026-10-05T16:45:00-05:00'],
+    ['03-chewy', '2026-10-07T23:34:00-05:00'],
+    ['04-missing', null],
+    ['05-offset', '2026-10-08T00:00:00Z'],
+  ].map(([id, updated_at]) => ({...base, application_id: id,
+    employer_snapshot: id, title_snapshot: 'Sort fixture', current_phase: 'active', updated_at}));
+  const orderPages = [];
+  const applicationOrderFixture = async route => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor');
+    orderPages.push(cursor);
+    await route.fulfill({json: {applications: cursor ? orderRows.slice(2) : orderRows.slice(0, 2),
+      next_cursor: cursor ? null : 'second-page', truncated: !cursor}});
+  };
+  await page.route('**/api/v1/applications{,?*}', applicationOrderFixture);
+  await page.locator('#refresh-applications').click();
+  await page.waitForFunction(() => document.querySelectorAll('#application-list tbody tr').length === 5);
+  const applicationOrder = () => page.locator('#application-list .application-link').evaluateAll(
+    links => links.map(link => link.getAttribute('href').split('/')[1]));
+  const expectedOrder = ['01-poshmark', '03-chewy', '05-offset', '02-watershed', '04-missing'];
+  assert.deepEqual(orderPages, [null, 'second-page']);
+  assert.deepEqual(await applicationOrder(), expectedOrder);
+  await page.fill('#application-search', 'Sort fixture');
+  await page.selectOption('#application-phase', 'active');
+  assert.deepEqual(await applicationOrder(), expectedOrder);
+  await page.fill('#application-search', '');
+  await page.selectOption('#application-phase', '');
+  await page.unroute('**/api/v1/applications{,?*}', applicationOrderFixture);
+  await page.locator('#refresh-applications').click();
+  await page.waitForFunction(() => document.querySelectorAll('#application-list tbody tr').length === 2);
   await page.locator('.sidebar a[href="#shortlist"]').click();
   await page.locator('#shortlist').getByText('A role to explore.', {exact: true}).waitFor();
   assert.equal(new URL(page.url()).pathname, '/');

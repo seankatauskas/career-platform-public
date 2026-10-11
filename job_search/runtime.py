@@ -1238,7 +1238,7 @@ def build_runtime(
     if config.application_backend == "owners":
         from .application_production import build_owner_handlers
         handlers = {kind: handler for kind,handler in handlers.items() if kind not in LEGACY_TASKS}
-        handlers.update(build_owner_handlers(config, environment, lane=lane, clock=clock))
+        handlers.update(build_owner_handlers(config, environment, lane=lane, clock=clock, ledger=ledger))
     handlers.update(task_overrides or {})
     outbox_handlers = {
         "recommendation.applied": preference_outbox_handler(gateway),

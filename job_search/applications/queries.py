@@ -229,6 +229,37 @@ class ApplicationQueries:
                 items.extend(rows)
         return {"items": items, "pages": pages, "truncated": any(p["truncated"] for p in pages.values())}
 
+    def briefing_records(self):
+        """Bounded portfolio in one read transaction, including accepted obligations.
+
+        Operational briefings must not infer tasks by rereading correspondence or
+        consult the frozen predecessor. Every collection reports omitted coverage.
+        """
+        with self.executor.read() as con:
+            coverage = {}
+            def collect(name, read):
+                items, cursor = [], None
+                for _ in range(10):
+                    page = read(cursor)
+                    items.extend(page['items'])
+                    cursor = page.get('next_cursor')
+                    if cursor is None:
+                        break
+                coverage[name + '_complete'] = cursor is None
+                return items
+            apps = collect('applications', lambda after: self.applications.list_applications(con, limit=100, after_id=after))
+            apps = [self._application(con, app) for app in apps]
+            records = {kind: collect(kind, lambda after, kind=kind: self.applications.query_records(
+                con, kind, current_only=True, statuses={'tasks': ['open'], 'interviews': ['scheduled']}.get(kind, []), limit=100, after_id=after))
+                for kind in ('tasks', 'interviews', 'assessments', 'offers', 'progress')}
+            review = collect('review', lambda after: self.understanding.list_pending(con, limit=100, after=after))
+            processing = self._current_processing(con, application_id=None, limit=100, after=None)
+            coverage['processing_complete'] = not processing['truncated']
+            return {'applications': apps, **records, 'review': review,
+                    'processing': processing['items'], 'coverage': coverage,
+                    'activation': {**self.executor.activation_status(con), 'restore_required': self.executor.restore_status(con)['required']},
+                    'installation_identity': self.executor.installation_identity(con)}
+
     def briefing(self, *, limit=20):
         _limit(limit)
         # The entire briefing uses one read snapshot; no classifier or mutation runs.

@@ -6,12 +6,41 @@ from pathlib import Path
 import secrets
 import stat
 import subprocess
+import threading
 
 from ...contracts import ContractError
 from ..auth_owner import NativeAuthOwner
 from ..codex_runtime import RuntimeConfig, WorkerHandle, docker_command, readiness, cleanup_inventory
 from ..model_gateway import gateway_server
 from ..runner import _private_dir, _write_json
+
+
+@contextmanager
+def diagnostic_log(root):
+    """Host-only bounded JSONL plus a durable last-failure record, never raw payloads."""
+    path = Path(root) / 'gateway.jsonl'
+    lock = threading.Lock()
+    # The attempt directory belongs to the host and is not mounted in the worker.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        written = 0
+        truncated = False
+        def record(value):
+            nonlocal written, truncated
+            encoded = json.dumps(value, separators=(',', ':'), allow_nan=False) + '\n'
+            with lock:
+                if value.get('event') == 'request_finished' and value.get('outcome') != 'completed':
+                    _write_json(Path(root) / 'gateway-failure.json', value)
+                size = len(encoded.encode())
+                if written + size <= 4 * 1024 * 1024:
+                    stream.write(encoded)
+                    written += size
+                elif not truncated:
+                    stream.write('{"event":"log_limit_reached"}\n')
+                    truncated = True
+                stream.flush()
+                os.fsync(stream.fileno())
+        yield record
 
 
 def read_output(path):
@@ -66,9 +95,9 @@ def worker(config, packet, root, previous=None, telemetry=None):
     # A short ephemeral socket path avoids AF_UNIX limits on per-release paths.
     sockets = _private_dir(config.runtime_dir / ('om_' + secrets.token_hex(6)))
     auth = NativeAuthOwner(config.auth_home, config.codex_executable)
-    with gateway_server(sockets/'model.sock', auth, model=rc.model, reasoning_effort=rc.reasoning_effort,
+    with diagnostic_log(root) as diagnostics, gateway_server(sockets/'model.sock', auth, model=rc.model, reasoning_effort=rc.reasoning_effort,
                         uid=rc.worker_uid, gid=rc.worker_gid, kind='old_method',
-                        native_codex=True, telemetry_callback=telemetry):
+                        native_codex=True, telemetry_callback=telemetry, diagnostic_callback=diagnostics):
         name = 'career-review-old-' + secrets.token_hex(8)
         streams = [(root / p).open('wb') for p in ('codex.jsonl', 'stderr.log')]
         handle = None

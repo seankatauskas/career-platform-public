@@ -1,17 +1,22 @@
 """Trusted OLD METHOD persistence and publication using the existing review ledger."""
 from contextlib import closing
+from collections import Counter
+from datetime import timedelta
 import json
 import secrets
+import sqlite3
 
 from ...contracts import ContractError, canonical_json, payload_sha256
 from ...db import connect
 from ..brief import current_search_brief
 from ..context import review_context
-from ..contracts import RUBRIC_VERSION, SELECTED, TARGETED, fingerprint, identifier, stamp, timestamp
+from ..contracts import REVIEW_JOB_FIELDS, RUBRIC_VERSION, SELECTED, TARGETED, fingerprint, identifier, stamp, timestamp
 from ..cards import visible_explanation
 from . import WORKFLOW
 from .screen import VERSION
 from .workspace import validate_result
+from .window import DISCOVERY_WINDOW, eligible, window_policy
+from .titles import list_title
 
 
 class Store:
@@ -29,10 +34,8 @@ class Store:
     def create(self, start, end, *, execution, publish=True):
         start, end = timestamp(start), timestamp(end)
         if not start < end <= timestamp(self.service.now()):
-            raise ContractError('posting window must increase and cannot end in the future')
-        # Existing read-only source projection. No prior review/list/application lookup.
-        jobs, counts = self.service._snapshot(start, end, None)
-        jobs = [j for j in jobs if not j.get('closed_at')]
+            raise ContractError('discovery window must increase and cannot end in the future')
+        jobs, counts = self._snapshot(start, end)
         context = review_context(self.service.context_provider())
         if not context.get('facts'):
             raise ContractError('approved career facts or an active resume are required')
@@ -42,7 +45,8 @@ class Store:
             context.update(rubric_version=RUBRIC_VERSION, search_brief=current_search_brief(con))
             context['feedback'] = [dict(r) for r in con.execute('SELECT sequence,note,created_at FROM job_review_feedback ORDER BY sequence DESC LIMIT 20')]
             metadata = {'workflow': WORKFLOW, 'execution_mode': 'isolated', 'phase': 'queued',
-                        'screen_version': VERSION, 'execution': execution, 'publish': publish,
+                        'screen_version': VERSION, 'window_policy': DISCOVERY_WINDOW,
+                        'execution': execution, 'publish': publish,
                         'source_counts': counts, 'omitted': [], 'assessment_count': 0}
             con.execute('INSERT INTO job_reviews(review_id,mode,window_start,window_end,created_at,updated_at,status,context_json,context_sha256,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)',
                         (rid, 'custom', stamp(start), stamp(end), now, now, 'active', canonical_json(context), payload_sha256(context), canonical_json(metadata)))
@@ -50,12 +54,68 @@ class Store:
                             [(rid, n, j['ats'], str(j['id']), canonical_json(j), fingerprint(j)) for n, j in enumerate(jobs, 1)])
         return self.status(rid)
 
+    def freeze_generation(self, rid, *, execution):
+        """Freeze queued inputs after older collection writes have completed.
+
+        Collector claims and completion use the application database. Inspect them
+        under its writer lock; a later claim cannot produce a pre-request discovery.
+        Wait past the collector's one-second timestamp precision as well.
+        """
+        with closing(connect(self.db_path)) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            run = self._run(con, rid)
+            meta = json.loads(run['metadata_json'])
+            if meta.get('inputs_ready'):
+                return True
+            if not meta.get('generation_stream') or run['status'] != 'active':
+                raise ContractError('not a pending generator run')
+            if timestamp(self.service.now()) <= timestamp(run['window_end']) + timedelta(seconds=1):
+                return False
+            if con.execute("SELECT 1 FROM work_items WHERE task_kind IN ('ats.new_only','ats.authoritative') AND status='running' LIMIT 1").fetchone():
+                return False
+        jobs, counts = self._snapshot(timestamp(run['window_start']), timestamp(run['window_end']))
+        context = review_context(self.service.context_provider())
+        if not context.get('facts'):
+            raise ContractError('approved career facts or an active resume are required')
+        with closing(connect(self.db_path)) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            current = self._run(con, rid)
+            meta = json.loads(current['metadata_json'])
+            if current['status'] != 'active' or meta.get('inputs_ready'):
+                raise ContractError('generator inputs already frozen or run no longer active')
+            context.update(rubric_version=RUBRIC_VERSION, search_brief=current_search_brief(con))
+            context['feedback'] = [dict(r) for r in con.execute('SELECT sequence,note,created_at FROM job_review_feedback ORDER BY sequence DESC LIMIT 20')]
+            meta.update(inputs_ready=True, execution=execution, source_counts=counts, phase='queued')
+            con.executemany('INSERT INTO job_review_items(review_id,ordinal,ats,job_id,snapshot_json,snapshot_sha256) VALUES(?,?,?,?,?,?)',
+                            [(rid, n, j['ats'], str(j['id']), canonical_json(j), fingerprint(j)) for n, j in enumerate(jobs, 1)])
+            con.execute('UPDATE job_reviews SET context_json=?,context_sha256=?,metadata_json=?,updated_at=? WHERE review_id=?',
+                        (canonical_json(context), payload_sha256(context), canonical_json(meta), self.service.now(), rid))
+        return True
+
+    def _snapshot(self, start, end):
+        """Read dates first; load descriptions only for eligible open discoveries."""
+        with closing(sqlite3.connect(self.service.catalog.jobs_db.as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN')
+            columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
+            if not {'ats', 'id', 'posted_at', 'first_seen', 'closed_at', 'description'}.issubset(columns):
+                raise ContractError('job catalog lacks required discovery provenance or descriptions')
+            identities = [(r['ats'], r['id']) for r in db.execute(
+                'SELECT ats,id,posted_at,first_seen,closed_at FROM jobs')
+                if eligible(dict(r), start, end)]
+            fields = ','.join(f for f in REVIEW_JOB_FIELDS if f in columns)
+            jobs = [dict(db.execute('SELECT ' + fields + ' FROM jobs WHERE ats=? AND id=?', key).fetchone())
+                    for key in identities]
+        jobs.sort(key=lambda j: (timestamp(j['first_seen']), j['ats'], str(j['id'])))
+        return jobs, {'total_eligible': len(jobs), 'by_platform': dict(Counter(j['ats'] for j in jobs))}
+
     def packet(self, rid):
         with closing(connect(self.db_path)) as con:
             run = self._run(con, rid)
             jobs = [json.loads(r[0]) for r in con.execute('SELECT snapshot_json FROM job_review_items WHERE review_id=? ORDER BY ordinal', (rid,))]
             meta = json.loads(run['metadata_json'])
             return {'workflow': WORKFLOW, 'review_id': rid, 'screen_version': meta['screen_version'],
+                    **({'window_policy': meta['window_policy']} if 'window_policy' in meta else {}),
                     'window_start': run['window_start'], 'window_end': run['window_end'],
                     'context': json.loads(run['context_json']), 'context_sha256': run['context_sha256'],
                     'sources_sha256': payload_sha256([fingerprint(j) for j in jobs]), 'jobs': jobs}
@@ -128,8 +188,11 @@ class Store:
                     continue
                 if fingerprint(current) != fingerprint(source):
                     raise ContractError('selected posting changed; start a fresh review for reassessment')
-                if not timestamp(packet['window_start']) < timestamp(current['posted_at']) <= timestamp(packet['window_end']):
+                policy = window_policy(packet)
+                if not eligible(current, timestamp(packet['window_start']), timestamp(packet['window_end']), policy):
                     raise ContractError('selected posting is outside the window')
+                if policy == DISCOVERY_WINDOW and timestamp(current['first_seen']) != timestamp(source['first_seen']):
+                    raise ContractError('selected discovery time changed; start a fresh review for reassessment')
                 observation = available.get((source['ats'], str(source['id'])))
                 if observation is None or observation['status'] != 'open':
                     omitted.append({'ordinal': n, 'reason': observation['status'] if observation else 'unverified'})
@@ -140,7 +203,7 @@ class Store:
                 rows = [r for r in selected if kind == 'broad' or r[1]['decision'] in TARGETED]
                 chunks = [rows[i:i+500] for i in range(0, len(rows), 500)] or [[]]
                 for part, chunk in enumerate(chunks, 1):
-                    payload = {'title': f'OLD METHOD | {kind.title()} | {run["window_start"]} to {run["window_end"]}' + (f' | Part {part}' if len(chunks)>1 else ''),
+                    payload = {'title': list_title(kind, run['window_start'], run['window_end'], part=part, parts=len(chunks)),
                                'window_start': run['window_start'], 'window_end': run['window_end'],
                                'idempotency_key': f'{rid}-{kind}-{part}',
                                'jobs': [{'ats': j['ats'], 'job_id': str(j['id']), 'explanation': visible_explanation(a)} for j, a in chunk]}

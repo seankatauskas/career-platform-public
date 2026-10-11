@@ -165,6 +165,11 @@ Compound views use owner query participants within a single read snapshot when
 consistency matters. The assembler may combine DTOs but not repeat business rules
 or cross-query private tables. Persisted briefing delivery/history is operational
 state; its application facts still come from the shared query surface.
+`ApplicationQueries.briefing_records` supplies the bounded snapshot;
+`applications/understanding/briefing.py` owns grounded presentation and model
+selection. `attention/owner_briefings.py` schedules, persists, and revalidates the
+brief before operational notification delivery. Neither presentation nor delivery
+can mutate accepted records or implicitly accept pending interpretations.
 
 Retain existing `/api/v1` routes and MCP tool names where their meaning is compatible,
 using thin adapters into the new operations. Add typed request/result contracts for

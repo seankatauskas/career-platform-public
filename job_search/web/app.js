@@ -172,7 +172,7 @@ async function loadConsoleView() {
         consoleState.restoreListScroll = false;
       }
     }
-    else if (view === "shortlist") await loadSavedShortlists();
+    else if (view === "shortlist") await Promise.all([loadSavedShortlists(), loadListGeneration()]);
     else if (view === "review") { await Promise.all([loadApplications(), loadReviewQueue()]); renderReviewQueue(); }
     else if (view === "ops") await loadHealth();
     else if (view === "career") await Promise.all([loadCareerProfile(), loadSavedResumes()]);

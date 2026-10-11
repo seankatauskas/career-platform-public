@@ -60,9 +60,11 @@ def host_runtime_probe(image):
 
     job = {'ats': 'ashby', 'id': 'probe', 'title': 'Software Engineer', 'company': 'example',
            'location': 'United States', 'description': 'Build Python APIs.',
-           'posted_at': '2026-10-08T12:00:00Z', 'closed_at': None}
+           'posted_at': '2026-10-07T23:00:00Z',
+           'first_seen': '2026-10-08T12:00:00Z', 'closed_at': None}
     context = {'facts': [{'fact_id': 'f1', 'source': 'resume', 'text': 'Synthetic fixture'}]}
     packet = {'workflow': 'old-method-v1', 'review_id': 'probe', 'screen_version': 'old-method-screen-v1',
+              'window_policy': 'first-seen-posted-24h-v1',
               'window_start': '2026-10-08T00:00:00Z', 'window_end': '2026-10-09T00:00:00Z',
               'jobs': [job], 'context': context, 'context_sha256': payload_sha256(context),
               'sources_sha256': payload_sha256([fingerprint(job)])}

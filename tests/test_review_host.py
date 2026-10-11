@@ -88,12 +88,16 @@ class ReviewHostTests(unittest.TestCase):
         (self.release / 'deploy/aws').mkdir(parents=True)
         unit_source = Path(__file__).resolve().parents[1] / 'deploy/aws' / host.UNIT
         (self.release / 'deploy/aws' / host.UNIT).write_text(unit_source.read_text())
+        for name in host.GENERATOR_UNITS:
+            (self.release / 'deploy/aws' / name).write_text((unit_source.parent / name).read_text())
         run = Mock(return_value='')
         with patch.object(host, '_native_codex', return_value=Path('/verified/bin/codex')):
             result = host.prepare(self.c, self.release, self.m, run, systemd_root=units)
         self.assertFalse(result['schedule_enabled'])
         self.assertIsNone(result['schedule_calendar'])
         self.assertFalse((units / host.TIMER).exists())
+        self.assertTrue((units / host.GENERATOR_UNITS[0]).exists())
+        self.assertIn((['systemctl', 'enable', '--now', host.GENERATOR_UNITS[1]],), [c.args for c in run.call_args_list])
         self.assertIn((['systemctl', 'disable', '--now', host.TIMER],), [c.args for c in run.call_args_list])
         runner = json.loads((self.data / 'operations/review-config' / self.release.name / 'runner.json').read_text())
         self.assertFalse(runner['schedule_enabled'])

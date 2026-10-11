@@ -73,6 +73,13 @@ function renderApplicationTable() {
   const matches = scoped.filter(app => (!phase || app.current_phase === phase)
     && `${app.employer_snapshot} ${app.title_snapshot}`.toLowerCase().includes(query)
     && (!needsReview || reviewItemsForApplication(app.application_id).length));
+  // Keep the displayed dates newest first even when the API returns a different order.
+  const updatedTime = app => {
+    const time = Date.parse(app.updated_at);
+    return Number.isFinite(time) ? time : -Infinity;
+  };
+  matches.sort((a, b) => updatedTime(b) - updatedTime(a)
+    || a.application_id.localeCompare(b.application_id));
   if (!matches.length) {
     root.append(node("p", "empty", scoped.length ? "No applications match these filters." : state.applicationBackend === 'owners' ? "No applications tracked yet. Find your next role in Shortlist." : "No submitted applications yet. Find your next role in Shortlist."));
     return;

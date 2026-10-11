@@ -18,25 +18,13 @@ try {
   const requests=[]; page.on('request', request=>requests.push({url:request.url(),method:request.method()}));
   await page.route('**/*', route => route.request().url().startsWith(ready.url) ? route.continue() : route.abort());
   await page.goto(ready.url + '/#shortlist/' + ready.lists[1].list_id);
-  await page.locator('#agent-review-status').getByText('Reviewed by Codex', {exact:true}).waitFor();
-  assert.equal(await page.locator('#agent-review-details').evaluate(el => el.open), false);
-  assert.equal(await page.locator('#agent-review-summary').getByText('Reviewed by agents', {exact:true}).isVisible(), false);
-  assert.equal(await page.getByRole('button', {name:'Refresh review progress'}).isVisible(), false);
-  await page.getByText('Review details', {exact:true}).click();
-  await page.locator('#agent-review-summary').getByText('Reviewed by agents', {exact:true}).waitFor();
-  assert.match(await page.locator('#agent-review-summary').innerText(), /2 of 2 postings assessed/);
-  assert.match(await page.locator('#agent-review-summary').innerText(), /Strict posting window/);
-  await page.getByText('Assessment evidence', {exact:true}).click();
-  await page.locator('.agent-assessment').getByText('Python API experience', {exact:true}).waitFor();
-  assert.match(await page.locator('.agent-assessment').innerText(), /Python APIs/);
-  await page.getByRole('button', {name:'Refresh review progress'}).click();
-  await page.locator('.agent-review-entry').first().locator('summary').click();
-  await page.locator('#agent-review-history').getByText('Review in progress', {exact:true}).waitFor();
-  assert.match(await page.locator('#agent-review-history').innerText(), /0 of 2 postings assessed/);
+  await page.locator('#shortlist-list .card').first().waitFor();
+  assert.equal(await page.locator('#agent-review-details').count(), 0);
+  assert.equal(await page.locator('#shortlist-options').evaluate(el => el.open), false);
+  assert.equal(await page.locator('#shortlist-list details').count(), 0);
+  await page.locator('#shortlist-options > summary').click();
   await page.selectOption('#shortlist-sort', 'posted-newest');
   assert.equal(await page.locator('#shortlist-list .card').count(), 1);
-  await page.getByText('Review details', {exact:true}).click();
-  assert.equal(await page.locator('#agent-review-details').evaluate(el => el.open), false);
   const requestsBeforeCards=requests.length;
   await page.evaluate(()=>{
     ++shortlistLoadEpoch;
@@ -60,12 +48,6 @@ try {
       search_brief:{revision:2,brief:{broad_geography:'us',targeted_geography:'us',conditional_order:'technical_fit'}},
     }}});
   });
-  await page.getByText('Review details',{exact:true}).click();
-  assert.match(await page.locator('#agent-review-summary').innerText(),/9 approved career facts and 4 resume excerpts/);
-  assert.match(await page.locator('#agent-review-summary').innerText(),/Unapproved profile edits were excluded/);
-  assert.match(await page.locator('#agent-review-summary').innerText(),/Broad: United States · Targeted: United States/);
-  assert.match(await page.locator('#agent-review-summary').innerText(),/Conditional roles keep their technical fit order/);
-  await page.getByText('Review details',{exact:true}).click();
   assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(),['01','02','03','04','05']);
   assert.equal(await page.locator('.shortlist-related-group').count(),1);
   assert.equal(await page.locator('.shortlist-related-group .card').count(),2);
@@ -76,7 +58,7 @@ try {
   assert.match(await first.innerText(),/Citizenship is unconfirmed/);
   assert.match(await first.innerText(),/Working C\+\+ is required/);
   assert.match(await first.innerText(),/Open on the employer board/);
-  assert.equal(await first.locator('.ranking-details').evaluate(el=>el.open),false);
+  assert.equal(await first.locator('.ranking-details').count(),0);
   assert.equal((await first.innerText()).match(/Citizenship is unconfirmed/g).length,1);
   assert.equal((await page.locator('[data-job-id="fixture-1"]').innerText()).match(/Learnable platform gap/g).length,1);
   const legacy=page.locator('[data-job-id="fixture-2"]');
@@ -99,6 +81,7 @@ try {
     assert.deepEqual(await page.evaluate(()=>state.shortlist.recommendations.map(job=>[job.id,job.rank])),identities);
   }
   await page.selectOption('#shortlist-sort','original');
+  await page.locator('#shortlist-options > summary').click();
   await page.evaluate(()=>{
     state.shortlist.recommendations[0].recent_company_application={application_id:'previous',applied_at:'2026-10-01T12:00:00Z'};
     renderShortlist(state.shortlist,true);
@@ -115,7 +98,7 @@ try {
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth), true);
   await page.screenshot({path:'.cache/agent-review-browser/mobile.png',fullPage:true});
   assert.deepEqual(errors, []);
-  console.log('ok: inline fit and caveats, evidence, sibling groups, alternatives, preserved date sorts and IDs, settings-compatible cards, and mobile layout');
+  console.log('ok: inline fit and caveats, no evidence dropdowns, sibling groups, alternatives, preserved date sorts and IDs, settings-compatible cards, and mobile layout');
 } finally {
   await browser.close(); fixture.kill('SIGTERM');
 }

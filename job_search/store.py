@@ -2506,7 +2506,7 @@ class LedgerStore:
             ).fetchall()
             from .attention import AttentionService
             saved = next((row for row in candidates
-                          if AttentionService.validate_delivery(con, dict(row), now)), None)
+                          if getattr(self, 'notification_validator', AttentionService.validate_delivery)(con, dict(row), now)), None)
             if saved is None:
                 con.commit()
                 return None
@@ -2559,7 +2559,7 @@ class LedgerStore:
                 con.execute("UPDATE notification_outbox SET status='pending',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE notification_id=?", (notification_id,))
                 return False
             from .attention import AttentionService
-            return AttentionService.validate_delivery(con, dict(row), now)
+            return getattr(self, 'notification_validator', AttentionService.validate_delivery)(con, dict(row), now)
 
     def complete_notification(
         self,

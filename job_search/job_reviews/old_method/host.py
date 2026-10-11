@@ -1,6 +1,6 @@
 """Trusted asynchronous orchestration; source-only worker, host-only publication."""
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import threading
 import time
 
 from ...contracts import ContractError
+from ...db import connect
 from ...maintenance import require_start, draining
 from ...runtime import load_runtime_config
 from ..availability import check_boards
@@ -63,19 +64,23 @@ def serialized(config, stopped):
         lock.__exit__(None, None, None)
 
 
-def run_review(config, store, rid, *, launch=worker, availability=check_boards):
+def run_review(config, store, rid, *, launch=worker, availability=check_boards, already_locked=False):
     stopped = threading.Event()
     previous_signals = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous_signals[sig] = signal.signal(sig, lambda *_: stopped.set())
     try:
-        with serialized(config, stopped):
+        with nullcontext() if already_locked else serialized(config, stopped):
             require_start('review-runner')
             status = store.status(rid)
             if status['status'] == 'published' or status['phase'] == 'qualified':
                 return status
             meta = store.metadata(rid)
+            if meta.get('generation_stream') and not meta.get('inputs_ready'):
+                if not store.freeze_generation(rid, execution=execution(config)):
+                    return store.status(rid)
+                meta = store.metadata(rid)
             if meta['execution'] != execution(config):
                 raise ContractError('resume requires the frozen execution profile and image')
             packet = store.packet(rid)
@@ -142,9 +147,33 @@ def run_review(config, store, rid, *, launch=worker, availability=check_boards):
             signal.signal(sig, old)
 
 
+def drain_generation(config, store, **kwargs):
+    """Consume at most one explicit request. Never create a review on a timer."""
+    from .generator import SCOPE, STREAM
+    try:
+        with runner_lock(config.state_dir):
+            require_start('review-runner')
+            with closing(connect(store.db_path)) as con:
+                row = con.execute("SELECT review_id FROM job_reviews WHERE " + SCOPE +
+                    " AND status='active' AND json_extract(metadata_json,'$.phase') IN ('awaiting_inputs','queued','running','validating') ORDER BY sequence LIMIT 1",
+                    (WORKFLOW, STREAM)).fetchone()
+            if row is None:
+                return {'phase': 'idle'}
+            rid = row['review_id']
+            try:
+                return run_review(config, store, rid, already_locked=True, **kwargs)
+            except Exception as exc:
+                store.update(rid, phase='failed', error=str(exc) if isinstance(exc, ContractError) else type(exc).__name__)
+                return store.status(rid)
+    except ContractError as exc:
+        if str(exc) == 'another review invocation is already running':
+            return {'phase': 'busy'}
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('submit', 'run', 'status', 'resume', 'export'))
+    parser.add_argument('action', choices=('submit', 'run', 'status', 'resume', 'export', 'drain-generation'))
     parser.add_argument('--runner-config', type=Path, required=True)
     parser.add_argument('--review-id')
     parser.add_argument('--window-start')
@@ -156,7 +185,9 @@ def main(argv=None):
     try:
         config = load_runner_config(args.runner_config)
         store = Store(build_authority(config).service)
-        if args.action == 'submit':
+        if args.action == 'drain-generation':
+            result = drain_generation(config, store)
+        elif args.action == 'submit':
             if not args.window_start or not args.window_end:
                 raise ContractError('explicit window_start and window_end are required')
             with runner_lock(config.state_dir):

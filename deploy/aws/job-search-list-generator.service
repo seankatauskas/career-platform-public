@@ -1,0 +1,23 @@
+[Unit]
+Description=Process requested Career Platform job lists
+After=network-online.target docker.service job-search-data.service
+Requires=docker.service job-search-data.service
+ConditionPathExists=/opt/job-search/current/job_search/review_host.py
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/job-search/current
+ExecStart=/usr/bin/python3 -m job_search.review_host drain-generation --workflow old-method-v1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/job-search
+TimeoutStartSec=4300
+TimeoutStopSec=660
+KillSignal=SIGTERM
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal

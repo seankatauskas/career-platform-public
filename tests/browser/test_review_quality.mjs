@@ -28,7 +28,7 @@ try {
   assert.match(await first.innerText(),/active clearance/);
   assert.match(await first.innerText(),/Production ownership/);
   assert.equal((await first.innerText()).match(/Next step:/g).length,1);
-  assert.equal(await first.locator('.ranking-details').evaluate(el=>el.open),false);
+  assert.equal(await first.locator('.ranking-details').count(),0);
   assert.deepEqual(await page.locator('#shortlist-list .rank').allTextContents(),['01','02','03','04']);
   await mkdir('.cache/review-quality',{recursive:true});
   await page.screenshot({path:'.cache/review-quality/broad-desktop.png',fullPage:true});

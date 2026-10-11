@@ -1046,7 +1046,7 @@ function initializeDiscoveryViews() {
     location.hash = $("#curated-list").value ? `#shortlist/${$("#curated-list").value}` : "#shortlist";
     loadSavedShortlists();
   });
-  $("#refresh-curated").addEventListener("click", () => loadSavedShortlists());
+  $("#refresh-curated").addEventListener("click", () => { loadSavedShortlists(); loadListGeneration(); });
   $("#older-curated").addEventListener("click", () => loadSavedShortlists(true));
   $("#refresh-attention").addEventListener("click", loadReviewQueue);
   window.addEventListener("focus", () => {

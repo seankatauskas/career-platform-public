@@ -120,7 +120,7 @@ def _seed(config,clock,environment):
     from .scheduler import utc_stamp
     from .contracts import canonical_json
     now=clock();stamp=utc_stamp(now)
-    kinds={'applications.tick':1,'application.dispatch':1,'application.feedback.dispatch':1}
+    kinds={'applications.tick':1,'application.dispatch':1,'application.feedback.dispatch':1, 'applications.briefing.tick':1}
     if config.remote_mail_inference_enabled or environment.get("OUTLOOK_CLIENT_ID"):
         kinds['applications.mail.dispatch']=1
     if environment.get("OUTLOOK_CLIENT_ID"):
@@ -129,14 +129,39 @@ def _seed(config,clock,environment):
         from .activation import disabled_tasks
         disabled=set(disabled_tasks(con))
         for kind,minutes in kinds.items():
+            schedule = {'kind':'interval','minutes':minutes}
+            if kind == 'applications.briefing.tick':
+                schedule.update(priority=95, max_attempts=3)
             con.execute("INSERT INTO schedule_specs(schedule_key,task_kind,schedule_json,enabled,coalesce,next_due_at,updated_at,enabled_since) VALUES(?,?,?,?,1,?,?,?) ON CONFLICT(schedule_key) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at",
-                (kind,kind,canonical_json({'kind':'interval','minutes':minutes}),int(kind not in disabled),utc_stamp(now+timedelta(minutes=minutes)),stamp,stamp))
+                (kind,kind,canonical_json(schedule),int(kind not in disabled),utc_stamp(now+timedelta(minutes=minutes)),stamp,stamp))
 
 
-def build_owner_handlers(config,environment,*,lane,clock):
+def build_owner_handlers(config,environment,*,lane,clock,ledger=None):
     from .application_runtime import ApplicationRuntime
     runtime=ApplicationRuntime(config.application_owner_db,clock=lambda:clock().isoformat().replace('+00:00','Z'))
+    from .service import JobSearchLedger
+    from .attention.owner_briefings import OwnerBriefingService
+    ledger = ledger or JobSearchLedger(config.application_db)
+    attention = OwnerBriefingService(ledger, runtime.queries, now_provider=clock,
+        dashboard_url=config.dashboard_https_origin)
+    ledger._attention = attention
+    ledger.store.notification_validator = attention.validate_delivery
     handlers={}
+    def briefing_tick(payload, context):
+        if not context.heartbeat(): raise RetryableTaskError('Worker lease lost')
+        result = attention.process_tick()
+        from .db import connect
+        with connect(config.application_db) as con:
+            control = con.execute("SELECT enabled FROM automation_controls WHERE capability='briefing_ai'").fetchone()
+        enabled = config.briefing_ai_enabled and config.briefing_inference_config is not None and (control is None or control['enabled'])
+        followups = tuple(FollowUpTask('applications.briefing.compose', {'briefing_id': bid}, lane='model', priority=95,
+            max_attempts=1, dedupe_key='owner-briefing:' + bid) for bid in result['generation_pending']) if enabled else ()
+        return TaskResult(result, followups)
+    def compose_briefing(payload, context):
+        if not context.heartbeat(): raise RetryableTaskError('Worker lease lost')
+        from .chief_runtime import build_generation_provider
+        attention.generation_provider = build_generation_provider(config)
+        return attention.generate_briefing(str(payload['briefing_id']))
     mail_cache={}
     def mail(kind):
         def handle(payload,context):
@@ -146,9 +171,11 @@ def build_owner_handlers(config,environment,*,lane,clock):
             return mail_cache[kind](payload,context)
         return handle
     if lane=='model':
+        handlers['applications.briefing.compose'] = compose_briefing
         handlers['applications.mail.understand']=mail('applications.mail.understand')
         return handlers
     _seed(config,clock,environment)
+    handlers['applications.briefing.tick'] = briefing_tick
     for kind in ('applications.mail.dispatch','applications.mail.project','applications.mail.outgoing'):
         handlers[kind]=mail(kind)
     sync_cache={}

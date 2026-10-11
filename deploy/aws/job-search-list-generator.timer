@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for explicitly requested Career Platform job lists
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+Unit=job-search-list-generator.service
+
+[Install]
+WantedBy=timers.target

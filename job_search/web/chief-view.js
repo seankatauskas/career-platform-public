@@ -62,7 +62,7 @@ function initializeChief() {
     if (!chiefPreferences) return;
     const form = event.currentTarget;
     const changes = {};
-    for (const element of form.elements) if (element.name) changes[element.name] = element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value;
+    for (const element of form.elements) if (element.name && !element.disabled) changes[element.name] = element.type === "checkbox" ? element.checked : element.type === "number" ? Number(element.value) : element.value;
     const button = form.querySelector("button"); button.disabled = true;
     try { chiefPreferences = await chiefMutation("preferences",{changes,expected_revision:chiefPreferences.revision}); $("#chief-status").textContent="Preferences saved."; }
     catch(error) { $("#chief-status").textContent = `${error.message} Refresh to load the latest preferences before saving again.`; }
@@ -192,7 +192,7 @@ async function loadChiefHistory(append=false) {
   const target=$("#chief-history");if(!append) target.replaceChildren();
   if(!(result.items || []).length && !append) target.append(node("p","meta","Your saved briefings will appear here."));
   for(const row of result.items || []) {
-    const entry=node("details","chief-card");entry.append(node("summary","",`${row.title || "Briefing"} · ${row.local_date || opsTime(row.created_at)} · ${row.status || "saved"}`));
+    const entry=node("details","chief-card");entry.append(node("summary","",`${row.title || "Briefing"} · ${row.local_date || opsTime(row.created_at)} · ${row.delivery_status || row.status || "saved"}`));
     const body=node("div");entry.append(body);let loaded=false;
     entry.addEventListener("toggle",async()=>{if(entry.open && !loaded) {try {renderChiefBriefing(body,await api(`/api/v1/chief/briefing/${encodeURIComponent(row.briefing_id)}`));loaded=true;} catch(error) {body.textContent=error.message;}}});target.append(entry);
   }
@@ -201,13 +201,23 @@ async function loadChiefHistory(append=false) {
 
 async function loadChief(briefingId=null) {
   const epoch=++chiefEpoch;$("#chief-refresh").disabled=true;$("#chief-status").textContent="Loading your chief of staff…";
-  const results=await Promise.allSettled([api("/api/v1/chief/preferences"),loadChiefActions(),api("/api/v1/chief/candidates"),loadChiefHistory(),previewChief(),loadChiefCommitments(),loadChiefDeliveryRecovery()]);
+  const owners = state.applicationBackend === 'owners';
+  if (owners) {
+    $('#settings-chief .section-heading h2').textContent = 'Scheduled briefings';
+    $('#settings-chief .section-note').textContent = 'Start and finish your day with accepted next steps, upcoming interviews, and decisions waiting for review.';
+    for (const id of ['chief-actions', 'chief-attention', 'chief-commitments', 'chief-delivery-recovery']) $(`#${id}`).closest('section').hidden = true;
+    const supported = new Set(['enabled', 'shadow', 'morning_time', 'evening_time', 'timezone', 'ai_enabled']);
+    for (const input of $('#chief-preferences').elements) if (input.name && !supported.has(input.name)) { input.disabled = true; input.closest('label').hidden = true; }
+    $('#chief-preferences details').hidden = true;
+    $('#chief-preferences .meta').textContent = 'Monday morning looks ahead; Friday evening recaps activity. Review proposed changes in Review. Delivery recovery is available in Operations.';
+  }
+  const results=await Promise.allSettled([api("/api/v1/chief/preferences"),owners ? Promise.resolve() : loadChiefActions(),owners ? Promise.resolve() : api("/api/v1/chief/candidates"),loadChiefHistory(),previewChief(),owners ? Promise.resolve() : loadChiefCommitments(),owners ? Promise.resolve() : loadChiefDeliveryRecovery()]);
   if(epoch!==chiefEpoch)return;
   if(results[0].status==="fulfilled") {
     chiefPreferences=results[0].value;const form=$("#chief-preferences");
     for(const element of form.elements) if(element.name && element.name in chiefPreferences) {if(element.type==="checkbox") element.checked=Boolean(chiefPreferences[element.name]);else element.value=chiefPreferences[element.name];}
   }
-  if(results[2].status==="fulfilled") renderChiefAttention(results[2].value);
+  if(!owners && results[2].status==="fulfilled") renderChiefAttention(results[2].value);
   const errors=results.filter(r=>r.status==="rejected");$("#chief-status").textContent=errors.length ? `Some information could not be loaded. ${errors[0].reason.message}` : "";$("#chief-refresh").disabled=false;
   if(typeof briefingId==='string' && /^[A-Za-z0-9._:-]{1,256}$/.test(briefingId)) {
     try {renderChiefBriefing($("#chief-preview"),await api(`/api/v1/chief/briefing/${encodeURIComponent(briefingId)}`));$("#chief-preview").scrollIntoView({block:"start"});}

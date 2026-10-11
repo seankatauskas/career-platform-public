@@ -438,7 +438,7 @@ try {
   assert.doesNotMatch(await page.locator('#workspace-review-notices').textContent(), /historical record|read-only/);
   assert.equal(await page.locator('#workspace-review-notices a').getAttribute('href'),'#review/proposal/proposal%3Atracking?application=app%3Atracking');
   await page.evaluate(() => loadSettings());
-  assert.equal(await page.locator('#settings a[href="#settings/chief"]').evaluate(link => link.hidden),true);
+  assert.equal(await page.locator('#settings a[href="#settings/chief"]').evaluate(link => link.hidden),false);
   assert.equal(await page.locator('#settings-home a[href="#applications"]').textContent(),'Tracked applicationsOpen notes, tasks, evidence, and application reviews.→');
   assert.doesNotMatch(await page.evaluate(() => readableResumeReason('application_not_preparing')),/left preparation/);
   report.checks.push('Owner tracking records remain active applications in legacy document entry points and link to current state and review.');

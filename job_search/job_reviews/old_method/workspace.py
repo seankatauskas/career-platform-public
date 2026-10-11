@@ -9,6 +9,7 @@ from ..contracts import RUBRIC_VERSION, SELECTED, fingerprint, validate_assessme
 from ..cards import visible_explanation
 from . import WORKFLOW
 from .screen import VERSION, screen
+from .window import eligible, window_policy
 
 
 def write_json(path, value):
@@ -29,10 +30,13 @@ def validate_packet(packet):
         raise ContractError('invalid old-method context or workflow')
     from ..contracts import timestamp
     start, end = timestamp(packet['window_start']), timestamp(packet['window_end'])
+    if not start < end:
+        raise ContractError('invalid frozen window')
+    policy = window_policy(packet)
     keys = set()
     for row in packet['jobs']:
         key = (row['ats'], str(row['id']))
-        if key in keys or row.get('closed_at') or not start < timestamp(row['posted_at']) <= end:
+        if key in keys or not eligible(row, start, end, policy):
             raise ContractError('invalid frozen posting membership')
         keys.add(key)
     if packet['sources_sha256'] != payload_sha256([fingerprint(j) for j in packet['jobs']]):

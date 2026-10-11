@@ -114,6 +114,10 @@ def runtime_readiness(
             owner, capabilities = application_readiness(config)
             report.update(_report(report["checked_at"], report["capabilities"] + capabilities, report["metrics"]))
             report['application_owners'] = owner
+            from .chief_status import owner_briefing_status
+            briefing_status, briefing_capabilities = owner_briefing_status(config, owner)
+            report['scheduled_briefings'] = briefing_status
+            report.update(_report(report['checked_at'], report['capabilities'] + briefing_capabilities, report['metrics']))
             report['metrics']['pending_reconciliation'] += owner.get('uncertain', 0)
         else:
             from .chief_status import chief_status

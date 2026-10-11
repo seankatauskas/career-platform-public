@@ -4,6 +4,47 @@ Hermes shares an attention service with the dashboard and background workers. So
 events become auditable attention candidates; the attention policy decides whether
 they belong in a briefing, deserve an interruption, or are obsolete.
 
+## Owner-backed scheduled briefings
+
+The `owners` backend runs `applications.briefing.tick` every minute and prepares
+07:00/19:00 America/Chicago briefings five minutes ahead, including weekends.
+`applications.briefing.compose` runs separately on the model lane. The core tick
+finalizes at the scheduled time with a deterministic fallback if inference is
+unavailable, invalid, late, paused, or over budget. A slot expires after 90 minutes;
+starting a worker later does not send an obsolete morning briefing.
+
+`applications/queries.py::briefing_records` reads accepted tasks, upcoming
+interviews, submissions, assessments/offers, pending proposals and processing
+coverage through public owner APIs in one read snapshot. Applications/Understanding
+owns the presentation policy and grounded model selection in
+`applications/understanding/briefing.py`. It cannot create accepted obligations,
+approve a proposal, or execute a career action. Pending interpretations are labeled
+as reviews. It does not run another email classifier. Queries and previews never
+invoke a model.
+
+Attention owns the operational slot, snapshot, generation receipt and notification
+handoff. The existing Telegram outbox owns retries and delivery receipts. Owner
+identity, activation, restore review, preferences, expiry and current facts are
+rechecked before sending; a changed payload gets a replacement only before any
+uncertain external attempt. Legacy attention and composition tasks remain frozen.
+No application database schema or provider permission changes are needed.
+
+The dedicated briefing inference profile and its existing budget remain required;
+mail inference credentials are not borrowed. Monday briefs include accepted
+interviews for the coming week; Friday activity counts use the week's window.
+Personal Outlook calendar coverage is explicitly unavailable on this path, and
+missing mail coverage is not reported as complete. Collection bounds are visible
+in the saved snapshot. The briefing does not revive legacy unsolicited alerts or
+automatic reply preparation. Those older capabilities below describe the legacy
+backend; accepted owner reminders continue through their existing delivery path.
+
+Settings → Scheduled briefings restores timing, enable/preview-only and AI
+preferences, previews, and saved history. Review remains the place for application
+and email decisions; Operations retains notification reconciliation. Readiness
+reports `scheduled_briefings` separately from Telegram health, so a missing
+scheduler is visible. Regression coverage is `tests.test_owner_briefings` and the
+owner dashboard browser check.
+
 ## Starting behavior
 
 - Daily briefings at **07:00 and 19:00 America/Chicago**, including weekends.

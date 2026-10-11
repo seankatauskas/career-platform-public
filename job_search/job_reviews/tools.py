@@ -2,6 +2,9 @@
 from .service import FIELDS, WRITES
 
 DESCRIPTIONS = {
+    'generate': 'On explicit user request, queue an asynchronous Codex job list from the last successfully published generator cutoff through now. First use requires initial_start (ISO timestamp with timezone). Returns the active run on duplicate requests. Publishes broad and targeted lists; invokes the remote model but never applies for jobs.',
+    'generation-status': 'Read list generator progress, covered-through time, and published list links. No model invocation.',
+    'generation-resume': 'On explicit user request, resume a failed or interrupted list generator run with its original window and saved work.',
     'brief': 'Read the saved user-confirmed search scope and its revision.',
     'save-brief': 'Save explicit user search preferences with revision protection.',
     'calibration': 'Read all selected assessments for final cross-batch ordering, in bounded pages.',
@@ -40,6 +43,7 @@ def property_schema(field):
 
 
 REQUIRED = {
+    'generate': (), 'generation-status': (), 'generation-resume': ('review_id',),
     'brief': (), 'save-brief': ('brief', 'expected_revision'),
     'calibration': ('review_id',),
     'calibrate': ('review_id', 'ordinal', 'basis_sha256', 'position'),
@@ -64,3 +68,4 @@ TOOL_DEFINITIONS = tuple({
 } for action, description in DESCRIPTIONS.items())
 TOOL_NAMES = tuple(t['name'] for t in TOOL_DEFINITIONS)
 READ_TOOLS = {'review_' + a.replace('-', '_') for a in ('brief', 'calibration', 'context', 'assessment', 'list', 'batch', 'status', 'preview')}
+READ_TOOLS.add('review_generation_status')

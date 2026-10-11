@@ -66,6 +66,9 @@ class ReviewClient:
             raise ContractError('unknown review action')
         csrf = self._request('/api/v1/session')['csrf_token']
         result = bounded(self._request('/api/v1/job-reviews/' + action, args, csrf))
+        if action in ('generate', 'generation-status', 'generation-resume') and result.get('review_id'):
+            result['dashboard_url'] = self.origin + '/' + result['dashboard_path']
+            result['status_url'] = self.origin + result['status_path']
         if action == 'publish':
             for item in result.get('lists', []):
                 item['dashboard_url'] = self.origin + '/' + item['dashboard_path']

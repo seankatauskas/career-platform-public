@@ -25,7 +25,7 @@ list_career_replies propose_career_reply request_career_reply review_career_repl
 list_resume_standards compare_resumes_for_job list_applications list_attention_items get_application_timeline
 get_application_resume get_application_resume_content list_interviews explain_status search_mail get_mail_message
 get_sanitized_evidence propose_reply propose_interview_slots create_reminder list_reminders cancel_reminder
-get_action_status system_health'''.split())
+get_action_status system_health review_generate review_generation_status review_generation_resume'''.split())
 DEFAULT_ALLOWED_TOOLS = frozenset('mcp_job_search_'+name for name in CAREER_TOOLS)
 COMMAND_TEXT_PATTERN = r'(yes(?: send it)?|send it|no|cancel|got it|ack(?:nowledge)?|snooze 1 ?h(?:our)?)[.!]*'
 

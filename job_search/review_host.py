@@ -22,6 +22,7 @@ from .operation_journal import OpsError, write_json
 WORKER_LABEL = 'org.career-platform.review.worker=true'
 UNIT = 'job-search-review.service'
 TIMER = 'job-search-review.timer'
+GENERATOR_UNITS = ('job-search-list-generator.service', 'job-search-list-generator.timer')
 
 
 def application_projection(value, data_root, release):
@@ -156,7 +157,18 @@ def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system
     if timer.exists() or timer.is_symlink():
         run(['systemctl', 'disable', '--now', TIMER])
         timer.unlink()
+    for name in GENERATOR_UNITS:
+        source_unit = release / 'deploy/aws' / name
+        if source_unit.is_symlink() or not source_unit.is_file():
+            raise OpsError('release is missing list generator service')
+        destination = systemd_root / name
+        if destination.is_symlink():
+            raise OpsError('list generator service unit is a symlink')
+        destination.write_text(source_unit.read_text().replace('/var/lib/job-search', str(d)).replace('/opt/job-search', c['release_root']))
+        destination.chmod(0o644)
     run(['systemctl', 'daemon-reload'])
+    # Poll the durable request queue only. This never schedules new reviews.
+    run(['systemctl', 'enable', '--now', GENERATOR_UNITS[1]])
     return {'status': 'prepared', 'schedule_enabled': False, 'schedule_calendar': None}
 
 
@@ -225,7 +237,7 @@ def status(c):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--operations-config', type=Path, default=Path('/etc/job-search/operations.json'))
-    parser.add_argument('action', choices=('login', 'readiness', 'run', 'status', 'submit', 'resume', 'export'))
+    parser.add_argument('action', choices=('login', 'readiness', 'run', 'status', 'submit', 'resume', 'export', 'drain-generation'))
     parser.add_argument('--workflow', choices=('managed', 'old-method-v1'), default='managed')
     args, remaining = parser.parse_known_args(argv)
     try:
