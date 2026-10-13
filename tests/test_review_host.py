@@ -77,6 +77,49 @@ class ReviewHostTests(unittest.TestCase):
         with self.assertRaises(OpsError):
             host._native_codex(self.c, REVIEW_IMAGE, run)
 
+    def test_new_image_exports_share_only_identical_verified_files(self):
+        content = {"codex": b'fixture-codex', "helper": b'helper-one'}
+        def run(args, **kwargs):
+            if args[:2] == ['docker', 'create']:
+                return 'c' * 64
+            if args[:2] == ['docker', 'cp']:
+                stage = Path(args[-1])
+                (stage / 'bin').mkdir()
+                for name, value in content.items():
+                    (stage / 'bin' / name).write_bytes(value)
+                (stage / 'SHA256SUMS').write_text(hashlib.sha256(content['codex']).hexdigest() + '  bin/codex\n')
+            return 'codex-cli 0.160.0' if args[-1] == '--version' else ''
+        first = host._native_codex(self.c, REVIEW_IMAGE, run)
+        second = host._native_codex(self.c, REVIEW_IMAGE[:-64] + 'd' * 64, run)
+        self.assertNotEqual(first, second)
+        self.assertTrue(os.path.samefile(first, second))
+        self.assertTrue(os.path.samefile(first.parent / 'helper', second.parent / 'helper'))
+        self.assertEqual(host._verify_native(first.parent.parent), first)
+        content['codex'] = b'changed-codex'
+        content['helper'] = b'helper-two'
+        third = host._native_codex(self.c, REVIEW_IMAGE[:-64] + 'e' * 64, run)
+        self.assertFalse(os.path.samefile(first, third))
+        self.assertFalse(os.path.samefile(first.parent / 'helper', third.parent / 'helper'))
+        self.assertEqual(first.read_bytes(), b'fixture-codex')
+
+    def test_export_sharing_ignores_unsafe_old_cache(self):
+        root = self.data / 'cache'
+        candidate = root / ('a' * 64)
+        stage = root / 'stage'
+        for directory in (candidate, stage):
+            (directory / 'bin').mkdir(parents=True)
+            (directory / 'bin/codex').write_bytes(b'codex')
+            (directory / 'SHA256SUMS').write_text(hashlib.sha256(b'codex').hexdigest() + '  bin/codex\n')
+        external = self.root / 'outside'
+        external.write_bytes(b'codex')
+        (candidate / 'bin/codex').unlink()
+        (candidate / 'bin/codex').symlink_to(external)
+        host._share_native_files(stage, root)
+        self.assertFalse(os.path.samefile(stage / 'bin/codex', external))
+        (stage / 'unsafe').symlink_to(external)
+        with self.assertRaises(OpsError):
+            host._share_native_files(stage, root)
+
     def test_prepare_defaults_to_no_timer_and_does_not_modify_private_application_config(self):
         (self.data / 'private').mkdir()
         source = self.data / 'private/config.json'

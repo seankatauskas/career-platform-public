@@ -400,6 +400,12 @@ volume lock. Avoid ad-hoc Compose writes while an operation is running.
 
 ### Routine updates and interrupted operations
 
+Reviewer executable exports keep their image-specific paths, but byte-identical,
+verified files share disk storage across releases. Only trusted host cache files
+are shared; application state and rollback snapshots retain independent copies.
+This prevents each application release from adding another full copy of the
+unchanged reviewer runtime to the data volume.
+
 Keep development data separate from production. Use the
 [local development preview](../development.md) while using AWS for real applications.
 Feature sessions hand off reviewed changes without deploying independently.

@@ -1,9 +1,9 @@
 {
   "predecessor": {
-    "release_id": "09bc24659ea728c1a9830c3e8266001a23099c31-65",
-    "source_sha": "09bc24659ea728c1a9830c3e8266001a23099c31"
+    "release_id": "8b6bdde2309ba6583b6c9598f36541f8484c8bf7-66",
+    "source_sha": "8b6bdde2309ba6583b6c9598f36541f8484c8bf7"
   },
   "schema_compatibility": "career-application-owners-1-v1",
-  "test_baseline_sha": "09bc24659ea728c1a9830c3e8266001a23099c31",
+  "test_baseline_sha": "8b6bdde2309ba6583b6c9598f36541f8484c8bf7",
   "version": 1
 }

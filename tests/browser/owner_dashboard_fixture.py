@@ -1,6 +1,7 @@
 """Fictional production dashboard backed by the application owners; no workers."""
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from job_search.application_gateway import ApplicationGateway
@@ -59,6 +60,9 @@ def main():
             return {identity: {'ats': identity[0], 'posted_at': '2026-09-15T12:00:00Z'}
                     for identity in identities if identity == ('greenhouse', '12345')}
     gateway = ApplicationGateway(runtime, ledger, catalog=DatedCatalog())
+    # Monday intentionally renders a week-ahead brief. Keep this morning-preview
+    # fixture on Tuesday so the assertion does not depend on the runner's date.
+    ledger.attention.clock = lambda: datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
     controller = DashboardController(ledger, FakePreferences(), jobs=DatedCatalog(), application_gateway=gateway, demo_mode=True)
     shortlist = controller.curated.publish({'title': 'Fictional shortlist', 'idempotency_key': 'shortlist',
         'jobs': [{'ats': 'greenhouse', 'job_id': 'shortlisted-role', 'explanation': 'A role to explore.'}]})

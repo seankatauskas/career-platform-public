@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import filecmp
 import hashlib
 import json
 import os
@@ -79,12 +80,56 @@ def _native_codex(c, image, run):
             stage.joinpath('bin/codex').chmod(0o755)
             stage.joinpath('bin').chmod(0o755)
             stage.joinpath('SHA256SUMS').chmod(0o444)
+            _share_native_files(stage, root)
             # TemporaryDirectory tolerates its path being atomically moved.
             os.replace(stage, destination)
     binary = _verify_native(destination)
     if run([str(binary), '--version']).strip() != 'codex-cli 0.160.0':
         raise OpsError('unexpected native Codex version')
     return binary
+
+
+def _share_native_files(stage, root):
+    """Keep image-specific paths while sharing identical immutable export bytes.
+
+    Runs under the host operations lock during release preparation. Only verified,
+    root-owned exports qualify; snapshots and application data never enter here.
+    """
+    staged = []
+    for path in stage.rglob('*'):
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise OpsError('unsafe native Codex export entry')
+        staged.append(path)
+    for candidate in sorted(root.iterdir()):
+        if not re.fullmatch(r'[a-f0-9]{64}', candidate.name):
+            continue
+        try:
+            _verify_native(candidate)
+        except (OpsError, OSError):
+            continue  # An old damaged cache must not poison a fresh export.
+        for path in list(staged):
+            source = candidate / path.relative_to(stage)
+            parents = [source, *list(source.parents)[:len(source.relative_to(candidate).parts)]]
+            try:
+                if any(p.is_symlink() or p.stat().st_uid != os.geteuid() or p.stat().st_mode & 0o022 for p in parents):
+                    continue
+                a, b = path.stat(), source.stat()
+                if not stat.S_ISREG(b.st_mode) or (a.st_size, a.st_mode, a.st_uid, a.st_gid) != (b.st_size, b.st_mode, b.st_uid, b.st_gid):
+                    continue
+                filecmp.clear_cache()
+                if not filecmp.cmp(path, source, shallow=False):
+                    continue
+                temporary = path.with_name(path.name + '.shared')
+                os.link(source, temporary)
+                os.replace(temporary, path)
+                staged.remove(path)
+            except FileNotFoundError:
+                continue
+        if not staged:
+            break
 
 
 def _verify_native(root):
