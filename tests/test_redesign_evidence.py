@@ -130,7 +130,7 @@ class EvidenceTest(unittest.TestCase):
         with self.executor.read() as con:
             self.assertEqual(self.under.list_pending(con)["items"], [])
         proposals = self.project(analysis)
-        self.assertEqual({p["operation"] for p in proposals}, {"link_message", "confirm_submission", "record_request"})
+        self.assertEqual({p["operation"] for p in proposals}, {"link_message", "record_submission_receipt", "record_request"})
         self.assertEqual(len(proposals), 3)
         link = next(p for p in proposals if p["operation"] == "link_message")
         for p in proposals:

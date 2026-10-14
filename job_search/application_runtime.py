@@ -36,6 +36,17 @@ class ApplicationRuntime:
         return self.executor.run(context,operation,payload,lambda tx:self._dispatch(tx,operation,payload))
 
     def _dispatch(self,tx,operation,payload):
+        if operation == "retry_processing_automatically":
+            issue = self.understanding.get_processing_issue(tx.connection, payload["issue_id"])
+            current = self.correspondence.get(tx.connection, issue["source_id"])
+            if current["revision"] != issue["revision"] or current["source_sha256"] != issue["sha256"]:
+                raise DomainError("version_conflict", "Recovery source changed")
+            return self.understanding.retry_automatically(tx, **payload)
+        if operation == "configure_browser_recording":
+            return self.applications.configure_browser_recording(tx, payload)
+        if operation in {"correct_review_target", "migrate_review_group", "refresh_review_group"}:
+            from .applications.review import ReviewService
+            return getattr(ReviewService(self), operation)(tx, **payload)
         if operation in INTERNAL_OPERATIONS:
             return self.workflows.apply_internal(tx,operation,payload)
         if operation in {"retry_processing", "resolve_processing"}:
@@ -64,9 +75,7 @@ class ApplicationRuntime:
             return source
         if operation=="record_browser_observation":
             observation=self.applications.record_browser_observation(tx,payload)
-            submissions=self.applications.list_records(tx.connection,observation["application_id"],"submissions",current_only=True)
-            attempt=self.applications.get_browser_attempt(tx.connection,observation["device_id"],observation["attempt_ref"],limit=200)
-            proposals=self.understanding.project_browser(tx,observation=observation,submissions=submissions,attempt=attempt)
+            proposals=self.workflows.process_browser(tx, observation)
             self._finish_work(tx,"applications","analyze_browser",observation["id"])
             return {"observation":observation,"review":proposals}
         if operation=="propose_changes":
@@ -157,6 +166,34 @@ class ApplicationRuntime:
         with self.executor.read() as con:
             if source["direction"]!="incoming":
                 return {"status":"not_incoming","proposals":[]}
+            sources = [SourceText(message_id, source["revision"], source["source_sha256"], source["text"])]
+            thread = self.correspondence.preceding_thread(con, message_id, revision=source["revision"])
+            thread_targets, thread_links, thread_chars = [], [], 0
+            thread_reasons = []
+            if not thread["coverage"]["complete"]:
+                thread_reasons.append("earlier_messages_outside_bound")
+            for previous in thread["items"]:
+                evidence = self.correspondence.evidence(con, previous["id"], revision=previous["revision"],
+                    archive=archive, allowed_accounts=allowed_accounts)
+                text = evidence["text"]
+                if text is None or not evidence["coverage"]["complete"] or thread_chars + len(text) > 60000:
+                    thread_reasons.append("earlier_message_unavailable_or_outside_bound")
+                    continue
+                sources.append(SourceText(previous["id"], previous["revision"], previous["source_sha256"],
+                    text, direction=previous["direction"], role="thread"))
+                thread_chars += len(text)
+                linked = self.correspondence.association(con, previous["id"])
+                if linked:
+                    thread_targets.append(linked["application_id"])
+                    thread_links.append(linked)
+        if candidate_coverage is not None:
+            from .application_mail import capture_candidates
+            retrieved = capture_candidates(self, message_id, source["text"],
+                thread_text="\n".join(s.text for s in sources[1:]), thread_application_ids=thread_targets)
+            candidate_ids = retrieved["candidate_ids"]
+            if not retrieved["coverage"]["complete"]:
+                reasons.append("incomplete_candidate_coverage")
+        with self.executor.read() as con:
             association=self.correspondence.association(con,message_id)
             identities=list(dict.fromkeys(candidate_ids))
             if association and association["application_id"] not in identities:
@@ -167,6 +204,11 @@ class ApplicationRuntime:
             apps=[self.applications.get_application(con,identity) for identity in identities]
             versions={"application:"+app["id"]:app["version"] for app in apps}
             versions["message:"+message_id]=source["version"]
+            for previous in thread["items"]:
+                if any(s.source_id == previous["id"] for s in sources):
+                    versions["message:" + previous["id"]] = previous["version"]
+            for linked in thread_links:
+                versions["association:" + linked["id"]] = linked["version"]
             association=self.correspondence.association(con,message_id)
             if association:
                 versions["association:"+association["id"]]=association["version"]
@@ -174,16 +216,22 @@ class ApplicationRuntime:
             previews={"closure_previews":{},"interview_previews":{},"records":{},
                       "mail_projection":{"message_id":message_id,"revision":source["revision"],
                           "target_application_id":target_application_id,"association_required":association is None}}
+            previews["thread_associations"] = [{k: linked[k] for k in ("message_id", "application_id")} for linked in thread_links]
+            previews["thread_coverage"] = {"complete": not thread_reasons, "reasons": sorted(set(thread_reasons)),
+                "scope": "earlier_messages_in_same_account_and_thread", "selected": len(sources) - 1,
+                "message_limit": 10, "character_limit": 60000}
             if processing_retry is not None:
                 # A human retry is a new analysis attempt even when the previous
                 # valid response was uncertain. Deliveries of this same queued
                 # attempt still share one fingerprint and successful result.
                 previews["processing_attempt"]={"issue_id":processing_retry["issue_id"],
                     "version":processing_retry["expected_version"],"analysis_id":processing_retry["analysis_id"]}
+                if "replaces" in processing_retry:
+                    previews["review_refresh"] = processing_retry["replaces"]
             for app in apps:
                 closure=self.applications.preview_closure(con,app["id"])
                 previews["closure_previews"][app["id"]]={"expected_version":closure["expected_version"],"expected_records":closure["expected_records"]}
-                for kind in ("interviews","assessments","offers","submissions"):
+                for kind in ("interviews","assessments","offers","submissions","receipts","tasks"):
                     records=self.applications.query_records(con,kind,application_id=app["id"],current_only=True,limit=100)
                     if records["truncated"]:
                         reasons.append("incomplete_"+kind+"_coverage")
@@ -197,7 +245,7 @@ class ApplicationRuntime:
                 coverage.update(complete=False,reasons=list(dict.fromkeys(reasons)))
             if heartbeat is not None and not heartbeat():
                 raise RuntimeError("Understanding worker lease was lost")
-            context=AnalysisInput((SourceText(message_id,source["revision"],source["source_sha256"],source["text"]),),
+            context=AnalysisInput(tuple(sources),
                 tuple({"id":app["id"],"job":self.applications.get_job(con,app["job_id"]),
                        "lifecycle": {key: app[key] for key in ("disposition", "outcome", "pursuit_no")}} for app in apps),
                 versions,coverage,previews)
@@ -210,6 +258,7 @@ class ApplicationRuntime:
             analysis_id=claim["analysis_id"]
         else:
             output,failure,provider_error=None,None,None
+            validation_diagnostic=None
             try:
                 def renew_claim():
                     return self.executor.run(context_for("analyze_observation",uuid.uuid4().hex),"analyze_observation",
@@ -228,6 +277,7 @@ class ApplicationRuntime:
                         reason_code=exc.reason_code,retry_at=exc.retry_at))
                 raise
             except DomainError as exc:
+                validation_diagnostic=getattr(exc,"validation_diagnostic",None)
                 output=None
                 failure=exc.code if exc.code in {"incomplete_coverage", "context_budget_exceeded", "invalid_json",
                     "evidence_mismatch", "output_truncated", "output_too_large", "invalid_output"} else "invalid_output"
@@ -242,7 +292,7 @@ class ApplicationRuntime:
             try:
                 analysis=self.executor.run(context_for("record_analysis",claim["token"]),"record_analysis",
                     {"claim":claim,"output":output,"failure":failure},lambda tx:self.understanding.store_analysis(
-                        tx,context=context,model_version=model_version,output=output,failure_code=failure,claim=claim,retry=processing_retry,prompt_version=prompt_version))
+                        tx,context=context,model_version=model_version,output=output,failure_code=failure,claim=claim,retry=processing_retry,prompt_version=prompt_version,validation_diagnostic=validation_diagnostic))
             except DomainError as exc:
                 if exc.code!="invalid_input":
                     raise
@@ -283,10 +333,31 @@ class ApplicationRuntime:
                 self.understanding.supersede_processing_source(tx,source_id=current["id"],latest_revision=current["revision"])
                 self._finish_work(tx,"understanding","project_analysis",analysis_id)
                 return {"status":"superseded","analysis_id":analysis_id,"proposals":[]}
+            refresh = analysis["descriptor"].get("context", {}).get("review_refresh")
+            if refresh is not None:
+                from .applications.review import ReviewService
+                group = next((g for g in ReviewService(self)._inventory(tx.connection)
+                              if g["id"] == "email:" + current["id"]), None)
+                pending = {p["id"]: p["version"] for p in (group or {}).get("proposals", [])}
+                if pending != {p["id"]: p["version"] for p in refresh}:
+                    self.understanding.record_projection(tx, analysis_id=analysis_id, status="superseded")
+                    self._finish_work(tx,"understanding","project_analysis",analysis_id)
+                    return {"status":"superseded", "analysis_id":analysis_id, "proposals":[]}
+                if (not analysis["descriptor"]["coverage"]["complete"] and analysis["output"]["relevance"] != "unrelated"
+                        or analysis["output"]["relevance"] == "uncertain"):
+                    self.understanding.record_projection(tx, analysis_id=analysis_id, status="succeeded")
+                    self._finish_work(tx,"understanding","project_analysis",analysis_id)
+                    return {"status":"needs_context", "analysis_id":analysis_id, "proposals":[]}
             result=self.understanding.project_requests(tx,analysis_id=analysis_id,
                 application_id=projection["target_application_id"],message_id=projection["message_id"],
                 association_required=projection["association_required"])
             result["proposals"] = self.workflows.reconcile_projected_changes(tx, result["proposals"])
+            if refresh is not None:
+                retained = {p["id"] for p in result["proposals"]}
+                for previous in refresh:
+                    if previous["id"] not in retained:
+                        self.understanding.reconcile(tx, proposal_id=previous["id"], expected_version=previous["version"],
+                            reason="Replaced by refreshed analysis " + analysis_id)
             self.understanding.record_projection(tx,analysis_id=analysis_id,status="succeeded")
             self._finish_work(tx,"understanding","project_analysis",analysis_id)
             self._finish_work(tx,"correspondence","understand_message",projection["revision"])

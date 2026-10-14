@@ -19,7 +19,7 @@ def stage(connection, application_id):
         value, legacy = "offer", "offer"
     elif has("interviews", ("requested", "scheduled", "completed")) or has("progress", ("active",), "AND json_extract(data,'$.kind')='interview_request'"):
         value, legacy = "interviewing", "interviewing"
-    elif has("submissions", ("confirmed",)) or has("assessments", ("requested", "submitted", "completed")) or has("progress", ("active",), "AND json_extract(data,'$.kind')='recruiter_contact'"):
+    elif has("receipts", ("confirmed",)) or has("submissions", ("confirmed",)) or has("assessments", ("requested", "submitted", "completed")) or has("progress", ("active",), "AND json_extract(data,'$.kind')='recruiter_contact'"):
         value, legacy = "active", "active"
     elif has("submissions", ("attempted",)):
         value, legacy = "submitted", "awaiting_confirmation"
@@ -33,7 +33,7 @@ def preview_correction(connection, application_id, references):
     result = []
     for ref in references:
         kind = ref.get("kind")
-        if kind not in {"submissions", "tasks", "interviews", "assessments", "offers", "progress", "reminders"}:
+        if kind not in {"receipts", "submissions", "tasks", "interviews", "assessments", "offers", "progress", "reminders"}:
             db.fail("invalid_input", "Unsupported correction target")
         before = db.record(connection, kind, ref.get("id"))
         if before["application_id"] != app["id"]:
@@ -75,7 +75,7 @@ def correct(tx, value):
         kind = item["kind"]
         data = db.data_of(before, kind)
         data["correction_reason"] = value.reason
-        status = "retracted" if kind in {"submissions", "progress", "offers"} else "cancelled"
+        status = "retracted" if kind in {"receipts", "submissions", "progress", "offers"} else "cancelled"
         if kind == "tasks" and before["status"] == "completed":
             # Explicitly preserve completion history while retracting its relevance.
             status = "superseded"

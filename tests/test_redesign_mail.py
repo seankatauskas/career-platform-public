@@ -233,7 +233,7 @@ class ProductionMailTest(unittest.TestCase):
         self.assertEqual(workspace["records"]["tasks"]["items"], [])
         with self.runtime.executor.read() as con:
             proposals = self.runtime.understanding.list_pending(con, application_id=self.app["id"])["items"]
-        self.assertEqual({p["operation"] for p in proposals}, {"link_message", "confirm_submission", "record_request"})
+        self.assertEqual({p["operation"] for p in proposals}, {"link_message", "record_submission_receipt", "record_request"})
         self.assertTrue(all(p["status"] == "pending" for p in proposals))
         self.assertEqual(self.run_incoming(), [])
         private = "private-person@example.test"
@@ -358,12 +358,10 @@ class ProductionMailTest(unittest.TestCase):
     def test_review_retry_runs_model_lane_once_and_preserves_failed_attempt(self):
         message = self.ingest()
         self.analyzer.failure = DomainError("evidence_mismatch", "safe diagnosis")
-        with self.assertRaises(PermanentTaskError):
-            self.run_incoming()
+        self.assertEqual(self.run_incoming()[0]["status"], "recovery_queued")
         with self.runtime.executor.read() as con:
             issue = self.runtime.understanding.processing_for_source(con, message["id"], message["revision"])
-        self.human.command("retry_processing", {"issue_id": issue["issue_id"], "expected_version": issue["version"],
-            "expected_analysis_id": issue["analysis_id"], "reason": "Retry after exact quote anchoring fix"}, "retry-mail")
+        self.assertEqual(issue["status"], "retry_queued")
         retries = [item for item in self.scheduled() if item.payload["kind"] == "retry_processing"]
         self.assertEqual(len(retries), 1)
         self.assertEqual(retries[0].lane, "model")
@@ -381,11 +379,10 @@ class ProductionMailTest(unittest.TestCase):
     def test_manual_resolution_while_retry_model_runs_fences_its_result(self):
         message = self.ingest()
         self.analyzer.failure = DomainError("invalid_json", "safe diagnosis")
-        with self.assertRaises(PermanentTaskError): self.run_incoming()
+        self.assertEqual(self.run_incoming()[0]["status"], "recovery_queued")
         with self.runtime.executor.read() as con:
             issue = self.runtime.understanding.processing_for_source(con, message["id"], message["revision"])
-        queued = self.human.command("retry_processing", {"issue_id": issue["issue_id"], "expected_version": issue["version"],
-            "expected_analysis_id": issue["analysis_id"], "reason": "Retry the failed analysis"}, "retry-mail")
+        queued = issue
         retry = next(item for item in self.scheduled() if item.payload["kind"] == "retry_processing")
         self.analyzer.failure = None
         original = self.analyzer.analyze

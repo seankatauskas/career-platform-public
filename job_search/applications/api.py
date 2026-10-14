@@ -67,6 +67,18 @@ class ApplicationOperations:
         with tx.scope("applications"):
             return submissions.attach_answers(tx, db.input_as(AttachSubmissionAnswers, value))
 
+    def recording_policy(self, connection):
+        from .recording_policy import get
+        return get(connection)
+
+    def configure_browser_recording(self, tx, value):
+        from .recording_policy import configure
+        return configure(tx, **value)
+
+    def record_submission_receipt(self, tx, value):
+        with tx.scope("applications"):
+            return submissions.receipt(tx, value)
+
     def get_browser_attempt(self, connection, device_id, attempt_ref, *, limit=100):
         result = submissions.browser_attempt(connection, device_id, attempt_ref, limit=limit)
         if result is not None:
@@ -268,7 +280,7 @@ class ApplicationOperations:
         app = db.application(connection, application_id)
         result = []
         truncated = False
-        for kind in ("tasks", "submissions", "interviews", "assessments", "offers", "reminders", "progress"):
+        for kind in ("tasks", "submissions", "receipts", "interviews", "assessments", "offers", "reminders", "progress"):
             rows = connection.execute("SELECT id FROM app_" + kind + " WHERE application_id=? AND " + clause + " ORDER BY id LIMIT ?", (app["id"], *parameters, limit + 1)).fetchall()
             for row in rows:
                 if len(result) == limit:

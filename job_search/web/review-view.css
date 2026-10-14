@@ -68,3 +68,9 @@
 #attention .owner-processing-section { margin-top: 32px; }
 #attention .owner-processing-resolution { display: grid; gap: 8px; margin: 16px 0; }
 #attention .owner-processing-resolution textarea { width: 100%; min-width: 0; box-sizing: border-box; resize: vertical; }
+
+.evidence-group .review-proposed-change { border-top: 1px solid var(--line, #ccc); padding-top: 1rem; margin-top: 1rem; }
+.review-target form { display: grid; gap: .8rem; margin: 1rem 0; }
+.review-target label { display: grid; gap: .3rem; }
+.review-target textarea, .review-target select { width: 100%; max-width: 100%; }
+.browser-recording-preference { margin-bottom: 1rem; }

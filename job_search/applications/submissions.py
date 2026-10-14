@@ -21,8 +21,10 @@ def summary(connection, application_id):
         SUM(CASE WHEN json_extract(data,'$.attempt_link.status')='unresolved' THEN 1 ELSE 0 END) AS unresolved_attempts
         FROM app_submissions WHERE application_id=? AND pursuit_no=? AND status IN ('attempted','confirmed')""",
         (app["id"], app["pursuit_no"])).fetchone()
+    receipt = connection.execute("SELECT MIN(COALESCE(json_extract(data,'$.occurred_at'),created_at)) FROM app_receipts WHERE application_id=? AND pursuit_no=? AND status='confirmed'", (app["id"], app["pursuit_no"])).fetchone()[0]
+    confirmed = min(filter(None, (row["confirmed_at"], receipt)), default=None)
     unresolved = row["unresolved_attempts"] or 0
-    return {"submitted_at": row["submitted_at"], "confirmed_at": row["confirmed_at"], "unresolved_attempts": unresolved,
+    return {"submitted_at": row["submitted_at"], "confirmed_at": confirmed, "unresolved_attempts": unresolved,
             "warnings": [{"code": "unresolved_submission_attempt", "message":
                 "A historical submission record has no verified link to a browser attempt. Browser captures remain separate until that link is reviewed."}] if unresolved else []}
 
@@ -202,3 +204,25 @@ def record(tx, value, *, confirming=False):
             feedback.update({("recommendation_"+k if k in {"session_id","impression_id","model_run_id","policy_id","rank"} else k):v for k,v in provenance.items()})
             tx.enqueue("applications", "submission_feedback", app["id"] + ":" + str(app["pursuit_no"]), {"application_id": app["id"], "pursuit_no": app["pursuit_no"], "submission_id": after["id"], "feedback":feedback})
     return after
+
+
+def receipt(tx, value):
+    """Email receipt is application-level evidence, never a fabricated click/attempt."""
+    if set(value) - {"application_id", "evidence", "occurred_at", "submission_id", "expected_version"}:
+        db.fail("invalid_input", "Unknown receipt field")
+    app = db.application(tx.connection, value.get("application_id"), require_open=True)
+    evidence = value.get("evidence")
+    if not isinstance(evidence, list) or not 1 <= len(evidence) <= 20 or any(
+            not isinstance(e, dict) or e.get("owner") != "correspondence" or not e.get("source_id") or not e.get("revision") or not e.get("sha256") for e in evidence):
+        db.fail("invalid_input", "Receipt requires preserved email evidence")
+    db.instant(value.get("occurred_at"), optional=True)
+    if value.get("submission_id"):
+        record = db.record(tx.connection, "submissions", value["submission_id"])
+        db.check_version(record, value.get("expected_version"))
+        if record["application_id"] != app["id"] or record["pursuit_no"] != app["pursuit_no"]:
+            db.fail("invalid_input", "Receipt belongs to another submission")
+    signature = sha256(db.encode({"sources": sorted({(e["source_id"], str(e["revision"])) for e in evidence}), "pursuit": app["pursuit_no"]}).encode()).hexdigest()
+    previous = tx.connection.execute("SELECT id FROM app_receipts WHERE application_id=? AND json_extract(data,'$.signature')=? AND status='confirmed'", (app["id"], signature)).fetchone()
+    if previous:
+        return db.record(tx.connection, "receipts", previous[0])
+    return db.insert(tx, "receipts", app, "confirmed", {**value, "signature": signature}, "record_submission_receipt")

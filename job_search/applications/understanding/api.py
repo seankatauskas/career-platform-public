@@ -39,8 +39,14 @@ SCHEMA += processing.SCHEMA
 SCHEMA_MIGRATIONS = {("understanding", hashlib.sha256(_PREVIOUS_SCHEMA.encode()).hexdigest(),
                       hashlib.sha256(SCHEMA.encode()).hexdigest()): (processing.SCHEMA, processing.BACKFILL)}
 
+_RECOVERY_PREVIOUS = SCHEMA
+SCHEMA += processing.RETRY_SCHEMA
+_RECOVERY_STEPS = tuple(statement.strip() for statement in processing.RETRY_SCHEMA.split(";") if statement.strip())
+SCHEMA_MIGRATIONS = {(owner, old, hashlib.sha256(SCHEMA.encode()).hexdigest()): (*steps, *_RECOVERY_STEPS)
+                     for (owner, old, _), steps in SCHEMA_MIGRATIONS.items()}
+SCHEMA_MIGRATIONS[("understanding", hashlib.sha256(_RECOVERY_PREVIOUS.encode()).hexdigest(), hashlib.sha256(SCHEMA.encode()).hexdigest())] = _RECOVERY_STEPS
 
-OPERATIONS = frozenset({"link_message", "correct_association", "confirm_submission", "record_request",
+OPERATIONS = frozenset({"record_submission_receipt","link_message", "correct_association", "confirm_submission", "record_request",
     "create_task", "record_assessment", "update_assessment", "record_offer", "decide_offer",
     "schedule_interview", "reschedule_interview", "cancel_interview", "close_application",
     "complete_task", "cancel_task", "snooze_task", "correct_progress", "combine_jobs", "add_note", "record_progress",
@@ -62,6 +68,7 @@ def _proposal(row):
 
 
 class UnderstandingOperations:
+    retry_automatically = staticmethod(processing.retry_automatically)
     get_processing_issue = staticmethod(processing.get)
     processing_issues = staticmethod(processing.page)
     processing_for_source = staticmethod(processing.for_source)
@@ -108,6 +115,8 @@ class UnderstandingOperations:
                 raise DomainError("invalid_input", "Retry failure must identify its exact reviewed source")
             descriptor["context"]["processing_attempt"] = {"issue_id":retry["issue_id"],
                 "version":retry["expected_version"], "analysis_id":retry["analysis_id"]}
+            if "replaces" in retry:
+                descriptor["context"]["review_refresh"] = retry["replaces"]
         fingerprint = digest(descriptor)
         analysis_id = "analysis_" + uuid.uuid4().hex
         with tx.scope("understanding"):
@@ -237,7 +246,7 @@ class UnderstandingOperations:
             return {"status":"deferred","retry_at":retry_at}
 
     def store_analysis(self, tx, *, context, model_version, output=None, failure_code=None,
-                       prompt_version="1", schema_version="1", claim=None, retry=None):
+                       prompt_version="1", schema_version="1", claim=None, retry=None, validation_diagnostic=None):
         processing.check_retry(tx.connection, retry)
         key = digest({"input": context.fingerprint(), "model": model_version,
                       "prompt": prompt_version, "schema": schema_version})
@@ -261,6 +270,15 @@ class UnderstandingOperations:
             tx.connection.execute("INSERT INTO understand_analyses VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                   (analysis_id, key, context.fingerprint(), encode(context.descriptor()), schema_version,
                                    prompt_version, model_version, status, encode(validated) if validated else None, failure_code, tx.now))
+            if validation_diagnostic is not None:
+                allowed_reasons = {"invalid_span", "invalid_identity", "invalid_source_or_bounds", "quote_not_unique", "quote_not_found"}
+                if (failure_code != "evidence_mismatch" or not isinstance(validation_diagnostic, dict)
+                    or set(validation_diagnostic) != {"category", "position", "reason"}
+                    or validation_diagnostic["category"] not in {"associations", "facts", "requests", "temporal_facts"}
+                    or type(validation_diagnostic["position"]) is not int or not 0 <= validation_diagnostic["position"] < 20
+                    or validation_diagnostic["reason"] not in allowed_reasons):
+                    raise DomainError("invalid_input", "Invalid bounded validation diagnostic")
+                tx.connection.execute("INSERT INTO understand_validation_diagnostics VALUES(?,?)", (analysis_id, encode(validation_diagnostic)))
             if validated:
                 for category in ("associations", "facts", "requests", "temporal_facts"):
                     for position, content in enumerate(validated[category]):
@@ -333,21 +351,50 @@ class UnderstandingOperations:
             if finding is None:
                 raise DomainError("invalid_input", "Projection references missing finding")
             content = finding["content"]
+            refresh = analysis["descriptor"].get("context", {}).get("review_refresh")
+            reviewed_conflicts = []
+            if refresh is not None:
+                primary = analysis["descriptor"]["context"]["mail_projection"]["message_id"]
+                decided = tx.connection.execute("""SELECT p.id,p.operation,p.application_id,f.category,f.content FROM understand_proposals p
+                    JOIN understand_findings f ON f.id=p.finding_id
+                    JOIN understand_analyses a ON a.id=f.analysis_id
+                    WHERE COALESCE(json_extract(a.descriptor,'$.context.mail_projection.message_id'),
+                        json_extract(a.descriptor,'$.sources[0].source_id'))=? AND p.status IN ('applied','rejected')""", (primary,)).fetchall()
+                semantic = lambda value: {k: v for k, v in value.items() if k not in {"evidence", "confidence", "actionable_source"}}
+                equivalent = None
+                for previous in decided:
+                    previous_content = json.loads(previous["content"])
+                    same_operation = previous["operation"] == projection["operation"]
+                    same_kind = previous["category"] == finding["category"] and previous_content["kind"] == content["kind"]
+                    if not (same_operation or same_kind):
+                        continue
+                    if (same_operation and previous["application_id"] == projection.get("application_id")
+                            and (projection["operation"] == "link_message" or semantic(previous_content) == semantic(content))):
+                        equivalent = previous["id"]
+                    else:
+                        reviewed_conflicts.append("compare_prior:" + previous["id"])
+                if equivalent:
+                    result.append(self.get(tx.connection, equivalent))
+                    continue
             if finding["category"] == "requests" and (
                     not content["actionable_source"] or content["requirement"] != "required" or content["responsible_party"] != "applicant"):
                 continue
-            blockers = []
+            blockers = list(dict.fromkeys(reviewed_conflicts))
             if not analysis["descriptor"]["coverage"]["complete"]:
                 blockers.append("incomplete_evidence_coverage")
             with tx.scope("understanding"):
                 # Same source/kind with changed semantics must be compared, even when
                 # the model rewrites wording or offsets. New authored mail has new refs.
-                prior = tx.connection.execute("SELECT p.id FROM understand_findings f JOIN understand_proposals p ON p.finding_id=f.id WHERE f.comparison_key=? AND f.lineage_key<>? LIMIT 1",
-                                              (finding["comparison_key"], finding["lineage_key"])).fetchone()
+                refreshing = {p["id"] for p in analysis["descriptor"].get("context", {}).get("review_refresh", [])}
+                priors = tx.connection.execute("SELECT p.id,p.status FROM understand_findings f JOIN understand_proposals p ON p.finding_id=f.id WHERE f.comparison_key=? AND f.lineage_key<>?",
+                                              (finding["comparison_key"], finding["lineage_key"])).fetchall()
+                prior = next((p for p in priors if p["status"] != "superseded" and not (p["id"] in refreshing and p["status"] == "pending")), None)
                 if prior:
                     blockers.append("compare_prior:" + prior["id"])
             lineage = digest({"finding": finding["lineage_key"], "target": projection.get("application_id"),
                               "operation": projection["operation"]})
+            if refreshing:
+                lineage = digest({"lineage": lineage, "refresh_analysis": analysis_id})
             result.append(self.propose(tx, **projection, analysis_id=analysis_id,
                 evidence=content["evidence"], lineage_key=lineage, blockers=blockers))
         return {"analysis_id": analysis_id, "proposals": result}
@@ -371,6 +418,14 @@ class UnderstandingOperations:
             if any(item[k] != observation[k] for k in ("application_id", "device_id", "attempt_ref")):
                 raise DomainError("invalid_input", "Browser attempt context identifies another target")
         validate(observation)
+        def canonical_proposal(tx, **value):
+            result = self.propose(tx, **value)
+            expected = {"input": value["input"], "application_id": value["application_id"],
+                "evidence": value["evidence"], "expected_versions": value.get("expected_versions", {}),
+                "dependencies": value.get("dependencies", []), "blockers": value.get("blockers", [])}
+            if any(result[k] != v for k, v in expected.items()):
+                raise DomainError("invalid_input", "Stored browser proposal differs from the preserved evidence recipe")
+            return result
         def ref(item):
             return {"source_id": item["id"], "owner": "applications",
                     "revision": str(item.get("version", 1)), "sha256": item["source_digest"],
@@ -410,7 +465,7 @@ class UnderstandingOperations:
             if decided:
                 return {"proposals": [decided[-1]]}
             payload = {"submission_id": existing["id"], "expected_version": existing["version"], "observation_id": observation["id"]}
-            proposal = self.propose(tx, operation="attach_submission_answers", input=payload,
+            proposal = canonical_proposal(tx, operation="attach_submission_answers", input=payload,
                 application_id=observation["application_id"], evidence=[ref(observation)],
                 expected_versions={"submission:" + existing["id"]: existing["version"]},
                 lineage_key=digest({"browser_capture": observation["id"], "target": payload}))
@@ -483,7 +538,7 @@ class UnderstandingOperations:
             if previous is None or previous["status"] != "superseded":
                 break
             lineage = digest({"browser_projection": lineage, "superseded": previous["id"], "version": previous["version"]})
-        proposal = self.propose(tx, operation=operation, input=payload, application_id=selected["application_id"],
+        proposal = canonical_proposal(tx, operation=operation, input=payload, application_id=selected["application_id"],
             evidence=evidence, expected_versions=expected, lineage_key=lineage, blockers=blockers)
         supersede(pending, proposal)
         return {"proposals": [proposal]}
@@ -498,9 +553,25 @@ class UnderstandingOperations:
         analysis = self.get_analysis(tx.connection, analysis_id)
         if analysis["output"] and analysis["output"].get("relevance") == "unrelated":
             return {"analysis_id": analysis_id, "proposals": [], "status": "unrelated"}
+        from .reconciliation import only_nonactionable, non_actionable_contact, verification, non_actionable_request
+        if only_nonactionable(analysis["findings"]):
+            return {"analysis_id": analysis_id, "proposals": [], "status": "nonactionable"}
+        association_findings = [f for f in analysis["findings"] if f["category"] == "associations"
+                                and f["content"]["kind"] == "application" and f["content"].get("target_id")]
+        # A fact's selected target already expresses a proposed association. Use
+        # its preserved evidence for the prerequisite instead of asking a human
+        # to repair a missing duplicate model field. This grants no acceptance.
+        supported = association_findings or [f for f in analysis["findings"]
+            if f["category"] in {"facts", "requests"} and f["content"].get("target_id")
+            and f["content"]["actionable_source"]
+            and not (non_actionable_contact(f["content"]) or verification(f["content"]) or non_actionable_request(f["content"]))
+            and (f["category"] != "requests" or f["content"].get("requirement") == "required"
+                 and f["content"].get("responsible_party") == "applicant")]
         if application_id is None:
             targets = {f["content"].get("target_id") for f in analysis["findings"]
                        if f["category"] == "associations" and f["content"]["kind"] == "application"}
+            if not targets:
+                targets = {f["content"]["target_id"] for f in supported}
             if len(targets) == 1:
                 application_id = next(iter(targets))
         def relevant_versions(target, payload=None):
@@ -511,8 +582,7 @@ class UnderstandingOperations:
                     if reference == "application:" + str(target) or reference.startswith(("message:","association:")) or reference in record_refs}
         dependencies, result = [], []
         if association_required and application_id and message_id:
-            candidates = [f for f in analysis["findings"] if f["category"] == "associations" and
-                          f["content"].get("target_id") == application_id]
+            candidates = [f for f in supported if f["content"].get("target_id") == application_id]
             if candidates:
                 linked = self.project_analysis(tx, analysis_id=analysis_id, projections=[{
                     "finding_id": candidates[0]["id"], "operation": "link_message",
@@ -525,6 +595,9 @@ class UnderstandingOperations:
                    "assessment": "complete_assessment", "documents": "send_document", "follow_up": "follow_up", "other": "other"}
         for finding in analysis["findings"]:
             content = finding["content"]
+            from .reconciliation import non_actionable_contact, verification, non_actionable_request
+            if non_actionable_request(content) or finding["category"] == "facts" and (non_actionable_contact(content) or verification(content)):
+                continue
             target = content.get("target_id") or application_id
             projection = None
             recipe_blockers = []
@@ -537,6 +610,17 @@ class UnderstandingOperations:
                               "evidence": content["evidence"]}}
             elif finding["category"] == "facts" and content["actionable_source"]:
                 operation, payload, recipe_blockers = fact_recipe(finding, target, analysis["descriptor"])
+                from .reconciliation import receipt_fact
+                valid_submission = any(r["id"] == payload.get("submission_id") for r in
+                    analysis["descriptor"].get("context", {}).get("records", {}).get(target, {}).get("submissions", []))
+                if receipt_fact(content) and not valid_submission:
+                    operation = "record_submission_receipt"
+                    payload = {k: v for k, v in payload.items() if k in {"application_id", "evidence", "occurred_at"}}
+                    if target:
+                        recipe_blockers = [b for b in recipe_blockers if b != "needs_target"]
+                for key, record_kind in (("submission_id", "submissions"), ("interview_id", "interviews"), ("assessment_id", "assessments"), ("offer_id", "offers")):
+                    if payload.get(key) and not any(r["id"] == payload[key] for r in analysis["descriptor"].get("context", {}).get("records", {}).get(target, {}).get(record_kind, [])):
+                        recipe_blockers.append("requires_target_record_resolution")
                 projection = {"finding_id": finding["id"], "operation": operation, "application_id": target,
                     "dependencies": dependencies, "expected_versions": relevant_versions(target,payload),
                     "input": payload}
@@ -588,6 +672,37 @@ class UnderstandingOperations:
             dependencies=old["dependencies"], analysis_id=old["analysis_id"], finding_id=old["finding_id"],
             lineage_key=digest({"replaces": proposal_id, "version": expected_version, "input": input}),
             blockers=[b for b in old["blockers"] if b not in resolved_blockers])
+
+    def set_dependencies(self, tx, proposal_id, dependencies):
+        if getattr(tx, "authorized_operation", None) not in {"correct_review_target", "migrate_review_group"}:
+            raise DomainError("not_authorized", "Dependency rebinding requires target correction")
+        before = self.get(tx.connection, proposal_id)
+        if before["status"] != "pending" or proposal_id in dependencies:
+            raise DomainError("invalid_input", "Invalid replacement dependencies")
+        if before["dependencies"] == dependencies:
+            return before
+        for identifier in dependencies:
+            self.get(tx.connection, identifier)
+        with tx.scope("understanding"):
+            tx.connection.execute("UPDATE understand_proposals SET dependencies=?,version=version+1 WHERE id=?", (encode(dependencies), proposal_id))
+            tx.record("understanding", proposal_id, "rebind_review_dependencies", before, self.get(tx.connection, proposal_id))
+
+    def reconcile(self, tx, *, proposal_id, expected_version, reason, applied=False):
+        """Bounded workflow retirement; never grants authority to inferred proposals."""
+        operation = getattr(tx, "authorized_operation", None)
+        if operation not in {"record_browser_observation", "migrate_review_group", "project_analysis", "correct_review_target"}:
+            raise DomainError("not_authorized", "Reconciliation requires its owning workflow")
+        if applied and operation not in {"record_browser_observation", "migrate_review_group"}:
+            raise DomainError("not_authorized", "This workflow cannot accept findings")
+        with tx.scope("understanding"):
+            before = self.get(tx.connection, proposal_id)
+            if before["status"] != "pending" or before["version"] != expected_version:
+                raise DomainError("version_conflict", "Proposal changed before reconciliation")
+            tx.connection.execute("UPDATE understand_proposals SET version=version+1,status=?,reason=? WHERE id=?",
+                ("applied" if applied else "superseded", reason, proposal_id))
+            after = self.get(tx.connection, proposal_id)
+            tx.record("understanding", proposal_id, "reconcile_review", before, after)
+            return after
 
     def supersede_restatement(self, tx, *, proposal_id, expected_version, reason):
         """Projection workflow receipt; never applies a lifecycle change or approval."""

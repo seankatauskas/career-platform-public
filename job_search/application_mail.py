@@ -272,7 +272,7 @@ class OwnerMailCoordinator:
         return ProcessingResult(processed, 0, 0)
 
 
-def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200):
+def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200, thread_text="", thread_application_ids=()):
     """Bounded retrieval is context, never an accepted association."""
     if not 1 <= limit <= 20 or not limit <= scan_limit <= 200:
         raise ValueError("Invalid candidate retrieval bounds")
@@ -280,15 +280,41 @@ def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200):
         page = runtime.applications.list_applications(con, limit=scan_limit)
         associated = runtime.correspondence.association(con, message_id)
         ranked = []
+        import re
         normalized = text.casefold()
+        history = thread_text.casefold()
+        def employer_matches(name, body):
+            # Legal suffixes and punctuation vary between the catalog and ATS.
+            # Whole tokens also allow short names without substring collisions.
+            tokens = re.findall(r"[a-z0-9]+", name.casefold())
+            while tokens and tokens[-1] in {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation"}:
+                tokens.pop()
+            if not tokens or len("".join(tokens)) < 3:
+                return False
+            # Slugs can join display-name words (examplerobotics versus
+            # Example Robotics). Permit separators between letters, retaining
+            # whole-name boundaries so Suno never matches Sunology.
+            return bool(re.search(r"\b" + r"[^a-z0-9]*".join(map(re.escape, "".join(tokens))) + r"\b", body))
         for app in page["items"]:
             job = runtime.applications.get_job(con, app["job_id"])
-            score = sum(bool(job.get(key)) and str(job[key]).casefold() in normalized for key in ("employer", "title"))
+            employer = str(job.get("employer") or (job.get("recorded_snapshot") or {}).get("employer") or "")
+            employer_match = employer_matches(employer, normalized)
+            title_match = bool(job.get("title")) and str(job["title"]).casefold() in normalized
+            source_match = any(str(s["source_id"]).casefold() in normalized for s in job.get("sources", []) if len(str(s["source_id"])) >= 6)
+            # ATS employer fields can be board slugs (for example acmecareers).
+            # A complete, multiword role title is a retrieval hint, not proof of
+            # employer identity. Let the analyzer inspect plausible candidates
+            # instead of making its target enum empty before it sees the email.
+            title_hint = title_match and len(re.findall(r"[a-z0-9]+", str(job.get("title") or "").casefold())) >= 3
+            score = (8 * source_match + 4 * employer_match + int(title_hint)
+                     + 2 * employer_matches(employer, history) + int(app["id"] in thread_application_ids))
             ranked.append((score, app["id"]))
         ranked.sort(key=lambda item: (-item[0], item[1]))
         # No match is useful context. Arbitrary applications add no evidence and
         # turn unrelated mail into an oversized, falsely incomplete analysis.
         matches = [identity for score, identity in ranked if score]
+        # Reviewed thread links are retrieval hints, never automatic associations.
+        matches += [identity for identity in dict.fromkeys(thread_application_ids) if identity not in matches]
         if associated:
             matches = [associated["application_id"]] + [identity for identity in matches if identity != associated["application_id"]]
     return {"candidate_ids": matches[:limit], "coverage": {"complete": not page["truncated"] and len(matches) <= limit,
@@ -398,7 +424,13 @@ def build_application_mail_handlers(runtime, archive, account_id, analyzer, mode
         if result.get("status") in {"busy", "source_unavailable"}:
             raise RetryableTaskError("Application mail evidence is temporarily unavailable", retry_after_seconds=60)
         if result.get("status") == "failed":
-            raise PermanentTaskError("Application mail analysis failed validation")
+            with runtime.executor.read() as con:
+                issue = runtime.understanding.processing_for_source(con, payload["message_id"], payload["revision"])
+            recovery = runtime.command(runtime.result_context("retry_processing_automatically", "recovery:" + issue["analysis_id"]),
+                "retry_processing_automatically", {"issue_id": issue["issue_id"], "expected_version": issue["version"],
+                "expected_analysis_id": issue["analysis_id"], "model_version": model_version, "prompt_version": getattr(analyzer, "prompt_version", "1")})
+            runtime.executor.complete_work(work["id"], owner=value["owner"], kind=value["kind"])
+            return {"status": "recovery_queued" if recovery["status"] == "retry_queued" else "needs_review", "analysis_id": issue["analysis_id"]}
         if retry:
             runtime.executor.complete_work(work["id"], owner=value["owner"], kind=value["kind"])
         return {"status": "processed", "analysis_id": result.get("analysis_id"), "proposal_count": len(result.get("proposals", ())) }

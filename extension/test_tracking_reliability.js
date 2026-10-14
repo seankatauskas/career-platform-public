@@ -129,7 +129,40 @@ async function currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThe
   }
 }
 
-const tests=[pendingConnectionChangesPreserveAnswers,explicitDisconnectCanDiscardLocalData,permissionRevocationDoesNotErasePendingAnswers,incorrectSaveAcknowledgmentCannotDiscardAnswers,requestFallbackPreservesDraftAfterNavigation,unrelatedRequestsCannotCreateAttempts,currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThem];
+async function nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers() {
+  const listeners={}, timers=[], messages=[];
+  let now=10000, answer='original';
+  const form={}, button={innerText:'Submit',type:'submit',form,closest:()=>form};
+  const document={title:'Fixture',documentElement:{},
+    querySelector:()=>({textContent:'Fixture'}),
+    addEventListener:(name,fn)=>{(listeners[name] ||= []).push(fn);}};
+  const adapter={supports:()=>true,describe:()=>({descriptors:[]})};
+  const context=vm.createContext({document,location:{href:'https://fixture.test/job',hostname:'fixture.test'},
+    window:{addEventListener:()=>{}},MutationObserver:class {observe() {}},
+    Date:class extends Date {static now(){return now;}},
+    setTimeout:fn=>timers.push(fn),clearTimeout:()=>{},
+    chrome:{runtime:{sendMessage:async message=>{messages.push(structuredClone(message));return {connected:true};},onMessage:{addListener:()=>{}}}},
+    JobTracking:{identify:()=>({board:'fixture'}),sameJob:(a,b)=>!!a&&!!b,outcome:()=>null},
+    JobAutofillAshby:adapter,JobAutofillGreenhouse:adapter,JobAutofillLever:adapter,
+    JobAutofillCommon:{snapshot:()=>[]},
+    JobAnswerCapture:{collect:()=>({version:1,fields:[{field_key:'answer',value:answer}],omitted_fields:0,truncated_values:0})}});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'tracking_content.js'),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const click=()=>listeners.click[0]({isTrusted:true,target:{closest:()=>button}});
+  const submit=()=>listeners.submit[0]({submitter:button,target:form});
+  const captures=()=>messages.filter(m=>m.type==='trackingAttempt');
+  click();now+=5000;submit();
+  assert.equal(captures().length,1,'one native gesture is one capture even after a slow handler');
+  timers.splice(0).forEach(fn=>fn());
+  now+=2000;click();answer='changed by site';now+=5000;submit();
+  assert.equal(captures().length,3,'changed values within the same gesture must still be captured');
+  assert.equal(captures()[2].answer_snapshot.fields[0].value,'changed by site');
+  timers.splice(0).forEach(fn=>fn());
+  now+=2000;submit();
+  assert.equal(captures().length,4,'a later keyboard submission is a separate attempt');
+}
+
+const tests=[pendingConnectionChangesPreserveAnswers,explicitDisconnectCanDiscardLocalData,permissionRevocationDoesNotErasePendingAnswers,incorrectSaveAcknowledgmentCannotDiscardAnswers,requestFallbackPreservesDraftAfterNavigation,unrelatedRequestsCannotCreateAttempts,currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThem,nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers];
 (async()=>{
   let failures=0;
   for(const test of tests) {

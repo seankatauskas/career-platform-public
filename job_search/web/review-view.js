@@ -92,7 +92,7 @@ function renderReviewSuggestion(item, detail) {
   return section;
 }
 function getReviewItems() {
-  if (typeof state !== "undefined" && state.applicationBackend === "owners") return ownerReviewNormalized();
+  if (typeof state !== "undefined" && state.applicationBackend === "owners") return typeof ownerReviewCardItems === "function" ? ownerReviewCardItems() : ownerReviewNormalized();
   const groups = consoleState.reviews.filter(item => item.kind === "mail_analysis" && item.analysis?.mode === "shared" && !item.analysis?.replay_id && item.analysis?.current !== false);
   const groupedProposals = new Set(groups.flatMap(item => (item.analysis.findings || []).filter(f => f.projection).map(f => `${f.projection.kind}:${f.projection.id}`)));
   const rows = [...consoleState.reviews.filter(item => item.kind !== "action_proposal" && [undefined, "review", "pending", "conflict", "failed"].includes(item.status)
@@ -110,7 +110,7 @@ function getReviewItems() {
 }
 function reviewItemsForApplication(id) {
   // Candidate matches are context for review, never confirmed application links.
-  return getReviewItems().filter(item => item.applicationId === id);
+  return getReviewItems().filter(item => item.applicationId === id || item.applicationIds?.includes(id));
 }
 function reviewHref(item) { return `#review/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`; }
 let reviewAttentionLoaded = false;

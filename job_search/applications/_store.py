@@ -67,6 +67,25 @@ SCHEMA_MIGRATIONS = {("applications", sha256(_PRE_SNAPSHOT_SCHEMA.encode()).hexd
                      sha256(SCHEMA.encode()).hexdigest()): (_JOB_SNAPSHOTS_SCHEMA,)}
 
 
+# Additive, checksum-bound upgrades preserve all supported predecessor schemas.
+from .recording_policy import SCHEMA as _POLICY_SCHEMA
+_before_review_schema = SCHEMA
+_receipt_schema = """
+CREATE TABLE IF NOT EXISTS app_receipts (
+ id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES app_applications(id),
+ pursuit_no INTEGER NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
+ data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS app_receipts_application ON app_receipts(application_id,pursuit_no,status);
+"""
+SCHEMA += _POLICY_SCHEMA + _receipt_schema
+_review_steps = tuple(statement.strip() for statement in (_POLICY_SCHEMA + _receipt_schema).split(";") if statement.strip())
+SCHEMA_MIGRATIONS = {(owner, old, sha256(SCHEMA.encode()).hexdigest()): steps + _review_steps
+    for (owner, old, previous), steps in SCHEMA_MIGRATIONS.items()}
+SCHEMA_MIGRATIONS[("applications", sha256(_before_review_schema.encode()).hexdigest(), sha256(SCHEMA.encode()).hexdigest())] = _review_steps
+KINDS += ("receipts",)
+ID_FIELDS["receipts"] = "receipt_id"
+
+
 def fail(code, message):
     raise DomainError(code, message)
 

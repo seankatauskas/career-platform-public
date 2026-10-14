@@ -1,7 +1,7 @@
 (function() {
   'use strict';
   let job = null, connected = false, attempted = false, lastSignal = '', scheduled = false, digest = '', initialOutcome = null;
-  let draftTimer=null, pendingDraft=null, pageEpoch=0, lastAttemptAt=0, lastAttemptSnapshot='';
+  let draftTimer=null, pendingDraft=null, pageEpoch=0, lastAttemptAt=0, lastAttemptSnapshot='', nativeClick=null;
   function describePage() {
     const title = document.querySelector('h1')?.textContent?.trim() || document.title;
     return {page_url:location.href, title:title.slice(0,500), employer:job?.board || '', resume_sha256:digest};
@@ -13,7 +13,7 @@
     const epoch=++pageEpoch;
     const current = JobTracking.identify(location.href);
     if (!current) { job=null; pendingDraft=null; clearTimeout(draftTimer); return; }
-    if (!JobTracking.sameJob(current,job)) { attempted=false; digest=''; lastSignal=''; initialOutcome=null; pendingDraft=null; lastAttemptAt=0; lastAttemptSnapshot=''; clearTimeout(draftTimer); }
+    if (!JobTracking.sameJob(current,job)) { attempted=false; digest=''; lastSignal=''; initialOutcome=null; pendingDraft=null; lastAttemptAt=0; lastAttemptSnapshot=''; nativeClick=null; clearTimeout(draftTimer); }
     job=current;
     const result=await send('trackingPage');
     if(epoch!==pageEpoch) return;
@@ -46,13 +46,13 @@
   function changed() {
     snapshotDraft(); clearTimeout(draftTimer); draftTimer=setTimeout(flushDraft,300);
   }
-  function attempt() {
+  function attempt(sameGesture=false) {
     if(!job) return;
     snapshotDraft(); flushDraft();
     const snapshot=JobAnswerCapture.collect(document), signature=JSON.stringify(snapshot);
     // A native click is immediately followed by submit; retain only one identical
     // snapshot, but still capture values changed by a site's submit handler.
-    if(Date.now()-lastAttemptAt<1500 && signature===lastAttemptSnapshot) return;
+    if((sameGesture || Date.now()-lastAttemptAt<1500) && signature===lastAttemptSnapshot) return;
     lastAttemptAt=Date.now(); lastAttemptSnapshot=signature;
     initialOutcome=JobTracking.outcome(document,location.href,job);
     attempted=true; lastSignal='';
@@ -74,12 +74,21 @@
   document.addEventListener('click',event=>{
     if(!event.isTrusted) return;
     const button=event.target.closest('button,input[type="submit"],[role="button"]');
-    if(isFinalButton(button)) attempt();
+    if(isFinalButton(button)) {
+      // Native submit is the click's default action in this event-loop task.
+      // Slow site handlers cannot turn that same gesture into a new capture.
+      const gesture={form:button.form || button.closest('form')};
+      nativeClick=gesture;
+      setTimeout(()=>{if(nativeClick===gesture) nativeClick=null;},0);
+      attempt();
+    }
     else if(button) { snapshotDraft(); flushDraft(); }
   },true);
   document.addEventListener('submit',event=>{
+    const sameGesture=!!nativeClick && nativeClick.form===event.target;
+    nativeClick=null;
     const button=event.submitter || event.target.querySelector('button[type="submit"],input[type="submit"]');
-    if(isFinalButton(button)) attempt();
+    if(isFinalButton(button)) attempt(sameGesture);
   },true);
   document.addEventListener('invalid',()=>{if(attempted) send('trackingOutcome',{signal:'validation_error'});},true);
   document.addEventListener('input',changed,true);

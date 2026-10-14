@@ -4,9 +4,9 @@ from datetime import datetime
 from .context import CommandContext, DomainError
 
 
-HUMAN_DECISIONS = frozenset({"review_changes", "authorize_action", "reject_action",
+HUMAN_DECISIONS = frozenset({"refresh_review_group", "configure_browser_recording", "correct_review_target", "migrate_review_group","review_changes", "authorize_action", "reject_action",
     "retry_processing", "resolve_processing", "revoke_action", "correct_association", "combine_jobs", "delegate_operation", "replace_proposal"})
-BOOKKEEPING = frozenset({"record_message", "record_browser_observation", "analyze_observation",
+BOOKKEEPING = frozenset({"retry_processing_automatically","record_message", "record_browser_observation", "analyze_observation",
     "record_analysis", "project_analysis", "propose_changes", "prepare_reply", "prepare_calendar_change",
     "claim_action", "begin_write", "finish_attempt", "reconcile_action", "reconcile_result",
     "acknowledge_result", "apply_action_result", "execute_action", "expire_actions",
@@ -22,7 +22,7 @@ def authorize(context: CommandContext, operation: str, payload_digest: str, now:
     if operation in HUMAN_DECISIONS and principal.kind != "human":
         raise DomainError("not_authorized", "This decision requires human authority")
     if operation in BOOKKEEPING:
-        if operation in {"apply_action_result", "import_snapshot", "claim_action", "begin_write",
+        if operation in {"retry_processing_automatically", "apply_action_result", "import_snapshot", "claim_action", "begin_write",
                          "finish_attempt", "reconcile_result", "acknowledge_result", "execute_action",
                          "claim_reminder", "record_delivery", "expire_actions", "run_scheduled", "queue_due_reminders"} and principal.kind != "worker":
             raise DomainError("not_authorized", "This operation requires a bounded worker capability")

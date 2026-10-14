@@ -32,7 +32,7 @@ def _proof(runtime, con, reference, account_id):
         if reference["kind"] == "understand_message":
             if set(payload) != {"message_id","revision"} or reference["key"] != revision:
                 return None
-        elif (set(payload) != {"issue_id","expected_version","analysis_id","message_id","revision","sha256"}
+        elif (set(payload) - {"replaces"} != {"issue_id","expected_version","analysis_id","message_id","revision","sha256"}
                 or type(payload["expected_version"]) is not int
                 or reference["key"] != payload["issue_id"] + ":" + str(payload["expected_version"])):
             return None

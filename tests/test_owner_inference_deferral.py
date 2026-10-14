@@ -44,10 +44,8 @@ class OwnerInferenceDeferralTest(unittest.TestCase):
         self.source = self.ingest()
         original = self.scheduled()[0]
         self.analyzer.failure = DomainError("invalid_output","fictional validation failure")
-        with self.assertRaises(PermanentTaskError):
-            self.handlers[original.task_kind](original.payload,self.context)
+        self.assertEqual(self.handlers[original.task_kind](original.payload,self.context)["status"], "recovery_queued")
         self.analyzer.failure = None
-        self.decision("retry_processing")
 
     def model_worker(self, *, limit=1):
         return Worker(self.operational,task_handlers=self.handlers,lane="model",now_provider=lambda:self.now,

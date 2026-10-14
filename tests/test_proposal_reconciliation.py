@@ -65,11 +65,15 @@ class ProposalReconciliationTest(unittest.TestCase):
             'occurred_at': '2026-10-02T12:00:00Z'})
         self.assertEqual(result['proposals'][0]['status'], 'pending')
 
-    def test_uncertain_association_is_not_dismissed(self):
+    def test_selected_fact_target_requires_a_pending_link_before_reconciliation(self):
         record = self.submission()
         result = self.analyze_fact('submission', {k: record[k] for k in ('submission_id', 'status', 'occurred_at')}, link=False)
         self.assertEqual(result['proposals'][0]['status'], 'pending')
-        self.assertIn('unresolved_association', result['proposals'][0]['blockers'])
+        link = next(p for p in result['proposals'] if p['operation'] == 'link_message')
+        change = next(p for p in result['proposals'] if p['operation'] != 'link_message')
+        self.assertEqual(change['dependencies'], [link['id']])
+        self.assertEqual(change['status'], 'pending')
+        self.assertEqual(change['blockers'], [])
 
     def test_closing_during_analysis_does_not_discard_stale_context(self):
         def close():

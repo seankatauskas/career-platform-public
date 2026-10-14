@@ -57,3 +57,7 @@ The single-lead, input-only workflow uses `python3 -m job_search.review_host sub
 --workflow old-method-v1 --window-start START --window-end END`. See the
 [OLD METHOD runbook](operations/old-method-reviews.md) for status, resume, qualification,
 and the canonical local screening interface.
+
+## Grouped review migration
+
+Use `python -m job_search.review_migration --help` for private preview/apply manifests on the existing owners database. See [the grouped review runbook](operations/grouped-evidence-review.md) for policy opt-in, stale previews, recovery, and release sequencing.

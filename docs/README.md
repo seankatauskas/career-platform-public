@@ -24,6 +24,9 @@ The generated [OpenWiki](../openwiki/quickstart.md) describes the original colle
 
 ## Interface
 
+- [Grouped evidence review](operations/grouped-evidence-review.md): source cards, browser recording, bounded recovery, and resumable backlog migration.
+- [Review interaction proposal](review-interaction-design.md): simpler card actions with optional adjustment and audit details; proposed UX, not implemented.
+
 - [Resolve email reviews](mail-review.md): manual corrections, application matching,
   missing records, explicit next steps, and agent-assisted batch resolution.
 

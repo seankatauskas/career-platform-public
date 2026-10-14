@@ -68,7 +68,7 @@ class ApplicationQueries:
     def workspace_page(self, application_id, group, *, limit=25, cursor=None):
         """Page one workspace collection with a cursor bound to its application."""
         _limit(limit)
-        if group not in {"notes", "tasks", "submissions", "interviews", "assessments", "offers", "reminders", "schedules", "progress", "review", "conversation", "actions", "results"}:
+        if group not in {"notes", "tasks", "receipts", "submissions", "interviews", "assessments", "offers", "reminders", "schedules", "progress", "review", "conversation", "actions", "results"}:
             raise DomainError("invalid_input", "Unsupported workspace collection")
         with self.executor.read() as con:
             app = self.applications.get_application(con, application_id)
@@ -98,7 +98,7 @@ class ApplicationQueries:
             app = {**app, "submission_summary": self.applications.submission_summary(con, app["id"])}
             identities=self.applications.application_identities(con,app["id"])
             groups = {kind: _page(self.applications.list_records(con, app["id"], kind, limit=limit), self._workspace_identity(app["id"], kind))
-                      for kind in ("notes", "tasks", "submissions", "interviews", "assessments", "offers", "reminders", "schedules", "progress")}
+                      for kind in ("notes", "tasks", "receipts", "submissions", "interviews", "assessments", "offers", "reminders", "schedules", "progress")}
             analysis = self.understanding.coverage(con, application_id=app["id"], limit=limit)
             return {"application": app, "job": self.applications.get_job(con, app["job_id"]),
                 "resolved_from": application_id if app["id"] != application_id else None,

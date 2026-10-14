@@ -56,7 +56,7 @@ def fact_recipe(finding, target, descriptor):
         if not _member(status, {"attempted", "confirmed", "failed", "retracted"}):
             status = None
             blockers.append("needs_mapping")
-        operation = "confirm_submission" if status in {None, "confirmed"} else "record_submission"
+        operation = "confirm_submission" if status == "confirmed" else "record_submission"
         payload.update(value)
         payload["status"] = status
         if value.get("occurred_at") and not _instant(value["occurred_at"]):

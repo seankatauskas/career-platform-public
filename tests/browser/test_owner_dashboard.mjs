@@ -143,21 +143,24 @@ try {
   await page.goto(fixture.url + '/#applications');
   await page.waitForFunction(() => ownerReviewState.loaded && state.applications.length === 2);
   await page.evaluate(({applicationId, secondId}) => {
-    ownerReviewState.pages.proposals = {next_cursor: 'more-items'};
+    ownerReviewState.pages.groups = {next_cursor: 'more-items'};
     ownerReviewState.items.push({kind: 'processing', processing: {analysis_id: 'processing:visible',
       status: 'failed', candidate_ids: [applicationId, secondId], coverage: {complete: false}}});
+    ownerReviewState.groups.push({id:'email:processing-visible',source_type:'email',applications:[],application:null,proposals:[],processing:[ownerReviewState.items.at(-1).processing],evidence:[]});
     renderOwnerReviewQueue();
   }, {applicationId: fixture.application_id, secondId: fixture.second_id});
-  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email needs processing'}).count(), 0,
+  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email processing needs attention'}).count(), 0,
     'Unlinked processing stays in global Review, not on matching candidate cards');
   assert(await page.evaluate(() => ownerReviewNormalized().some(item => item.id === 'processing:visible')));
   await page.evaluate(applicationId => {
     const issue = ownerReviewState.items.find(item => item.processing?.analysis_id === 'processing:visible');
     issue.application_id = applicationId;
+    const group=ownerReviewState.groups.find(g=>g.id==='email:processing-visible');
+    group.application={id:applicationId};group.applications=[group.application];
     renderOwnerReviewQueue();
   }, fixture.application_id);
-  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email needs processing'}).count(), 1);
-  assert.equal(await undatedCard.locator('.pending-note').filter({hasText: 'Email needs processing'}).count(), 0);
+  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email processing needs attention'}).count(), 1);
+  assert.equal(await undatedCard.locator('.pending-note').filter({hasText: 'Email processing needs attention'}).count(), 0);
   await page.locator('#application-needs-review').check();
   assert.equal(await page.locator('#application-review-filter-label').textContent(), 'Needs review (loaded items)');
   await page.locator('#application-list').getByText(/This filter covers the review items loaded so far/).waitFor();

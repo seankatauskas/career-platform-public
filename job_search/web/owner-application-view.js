@@ -113,7 +113,7 @@ function renderOwnerApplicationWorkspace(data) {
   ownerApplicationForm(notes, 'Add a note', 'text', 'add_note', appId);
   root.append(tasks, notes);
   const records = node('section'); records.id = 'owner-records'; records.append(node('h4', '', 'Application lifecycle'));
-  for (const kind of ['submissions', 'interviews', 'assessments', 'offers', 'reminders', 'schedules', 'progress']) {
+  for (const kind of ['submissions', 'receipts', 'interviews', 'assessments', 'offers', 'reminders', 'schedules', 'progress']) {
     const page = data.records?.[kind]; if (!page?.items.length) continue;
     const section = node('details', 'lifecycle-form'); section.append(node('summary', '', stageLabel(kind)));
     ownerApplicationPage(section, page, appId, kind, record => section.append(ownerApplicationRecord(record))); records.append(section);

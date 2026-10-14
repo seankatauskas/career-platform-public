@@ -4,7 +4,7 @@ from dataclasses import replace
 from job_search.commands import DomainError,digest
 
 
-INTERNAL_OPERATIONS = frozenset({"save_job", "add_note", "create_task", "record_request",
+INTERNAL_OPERATIONS = frozenset({"record_submission_receipt","save_job", "add_note", "create_task", "record_request",
     "complete_task", "cancel_task", "snooze_task", "record_submission", "confirm_submission", "attach_submission_answers",
     "schedule_interview", "reschedule_interview", "cancel_interview", "record_assessment",
     "update_assessment", "record_offer", "decide_offer", "record_progress", "correct_progress",
@@ -19,6 +19,37 @@ class ApplicationWorkflows:
         self.correspondence = correspondence
         self.understanding = understanding
         self.actions = actions
+
+    def process_browser(self, tx, observation):
+        from .recording_policy import eligibility
+        policy = self.applications.recording_policy(tx.connection)
+        def project(item):
+            submissions = self.applications.list_records(tx.connection, item["application_id"], "submissions", current_only=True, limit=200)
+            attempt = self.applications.get_browser_attempt(tx.connection, item["device_id"], item["attempt_ref"], limit=200)
+            return self.understanding.project_browser(tx, observation=item, submissions=submissions, attempt=attempt)
+        result = project(observation)
+        if not policy["enabled"]:
+            return result
+        if tx.authorized_operation not in {"record_browser_observation", "migrate_review_group"}:
+            raise DomainError("not_authorized", "Browser recording requires trusted ingestion")
+        results = []
+        def accept(proposals):
+            for original in proposals:
+                proposal = self.understanding.get(tx.connection, original["id"])
+                if eligibility(self.applications, tx.connection, proposal):
+                    results.append(proposal)
+                    continue
+                self.check_versions(tx.connection, proposal["expected_versions"])
+                self.apply_internal(tx, proposal["operation"], proposal["input"])
+                results.append(self.understanding.reconcile(tx, proposal_id=proposal["id"], expected_version=proposal["version"],
+                    reason="Automatically recorded under " + policy["policy_version"] + " revision " + str(policy["version"]), applied=True))
+        accept(result.get("proposals", []))
+        attempt = self.applications.get_browser_attempt(tx.connection, observation["device_id"], observation["attempt_ref"], limit=200)
+        if attempt and not attempt["coverage"].get("truncated"):
+            for capture in attempt["observations"]:
+                if capture["activity"] == "answer_capture":
+                    accept(project(capture).get("proposals", []))
+        return {"proposals": results, "policy": policy}
 
     def recover_processing(self, tx, operation, value):
         if set(value) != {"issue_id", "expected_version", "expected_analysis_id", "reason"}:
@@ -137,6 +168,17 @@ class ApplicationWorkflows:
             return self.correct_association(tx,value)
         if operation=="combine_jobs":
             return self.combine_jobs(tx,value)
+        if operation == "record_submission_receipt":
+            value = {**value, "evidence": [dict(e) for e in value.get("evidence", [])]}
+            for ref in value.get("evidence", []):
+                source = self.correspondence.get(tx.connection, ref["source_id"], ref["revision"])
+                latest = self.correspondence.get(tx.connection, source["id"])
+                if latest["revision"] != source["revision"]:
+                    raise DomainError("version_conflict", "Receipt source revision changed")
+                link = self.correspondence.association(tx.connection, source["id"])
+                if ref.get("sha256", source["source_sha256"]) != source["source_sha256"] or not link or link["application_id"] != value["application_id"]:
+                    raise DomainError("dependency_unresolved", "Receipt requires the reviewed email association")
+                ref.update(owner="correspondence", sha256=source["source_sha256"])
         if operation == "link_message":
             self.applications.get_application(tx.connection,value["application_id"])
             return self.correspondence.link_message(tx,**value)
@@ -196,7 +238,7 @@ class ApplicationWorkflows:
         try:
             while remaining:
                 progressed=False
-                for proposal_id,(proposal,decision) in list(remaining.items()):
+                for proposal_id,(proposal,decision) in sorted(remaining.items(), key=lambda item: item[1][0]["operation"] == "close_application"):
                     accepting=decision["decision"]=="accept"
                     if accepting:
                         unresolved=False

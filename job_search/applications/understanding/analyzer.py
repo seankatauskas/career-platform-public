@@ -17,8 +17,11 @@ ANALYSIS_FAILURE_REASONS = {
 }
 
 
-def _fail(code):
-    raise DomainError(code, ANALYSIS_FAILURE_REASONS[code])
+def _fail(code, diagnostic=None):
+    error = DomainError(code, ANALYSIS_FAILURE_REASONS[code])
+    if diagnostic is not None:
+        error.validation_diagnostic = diagnostic
+    raise error
 
 
 def model_payload(context):
@@ -39,13 +42,15 @@ def model_payload(context):
         candidates.append({"id": candidate["id"], "job": summary,
             "lifecycle": {key: value for key, value in candidate.get("lifecycle", {}).items()
                           if key in {"disposition", "outcome", "pursuit_no"}}})
-    semantic_fields = {"id", "status", "kind", "created_at", "occurred_at"} | set().union(*FACT_FIELDS.values())
+    semantic_fields = {"id", "status", "kind", "created_at", "occurred_at", "description", "due_at"} | set().union(*FACT_FIELDS.values())
     records = {application_id: {
         kind: [{key: value for key, value in record.items() if key in semantic_fields} for record in items]
         for kind, items in groups.items()}
         for application_id, groups in context.context.get("records", {}).items()}
     return {"sources": [asdict(source) for source in context.sources], "candidates": candidates,
             "coverage": dict(context.coverage), "records": records,
+            "thread_associations": context.context.get("thread_associations", []),
+            "thread_coverage": context.context.get("thread_coverage", {"complete": False}),
             "association": dict(context.context.get("mail_projection", {}))}
 
 
@@ -60,24 +65,25 @@ def _anchor_evidence(value, context):
         findings = value.get(group)
         if not isinstance(findings, list):
             continue
-        for finding in findings:
+        for position, finding in enumerate(findings):
             if not isinstance(finding, dict) or not isinstance(finding.get("evidence"), list):
                 continue
             for span in finding["evidence"]:
                 if not isinstance(span, dict) or set(span) != {"source_id", "revision", "start", "end", "quote"}:
-                    _fail("evidence_mismatch")
+                    _fail("evidence_mismatch", {"category": group, "position": position, "reason": "invalid_span"})
                 source_id, revision, quote = span["source_id"], span["revision"], span["quote"]
                 if not isinstance(source_id, str) or not isinstance(revision, str):
-                    _fail("evidence_mismatch")
+                    _fail("evidence_mismatch", {"category": group, "position": position, "reason": "invalid_identity"})
                 text = sources.get((source_id, revision))
                 if text is None or not isinstance(quote, str) or not 1 <= len(quote) <= 512 or type(span["start"]) is not int or type(span["end"]) is not int:
-                    _fail("evidence_mismatch")
+                    _fail("evidence_mismatch", {"category": group, "position": position, "reason": "invalid_source_or_bounds"})
                 start, end = span["start"], span["end"]
                 if 0 <= start < end <= len(text) and text[start:end] == quote:
                     continue
                 found = text.find(quote)
                 if found < 0 or text.find(quote, found + 1) >= 0:
-                    _fail("evidence_mismatch")
+                    _fail("evidence_mismatch", {"category": group, "position": position,
+                        "reason": "quote_not_found" if found < 0 else "quote_not_unique"})
                 span["start"], span["end"] = found, found + len(quote)
 
 
@@ -104,6 +110,14 @@ def understanding_schema(context):
     facts = []
     for kind, fields in FACT_FIELDS.items():
         properties = {field: _nullable(text) for field in sorted(fields)}
+        if kind == "submission":
+            properties["status"] = {"type": ["string", "null"], "enum": [
+                "attempted", "submitted", "received", "confirmed", "failed", "retracted", "pending_verification", None]}
+        record_field = {"submission": "submission_id", "assessment": "assessment_id", "interview": "interview_id", "offer": "offer_id"}.get(kind)
+        if record_field:
+            ids = [record["id"] for groups in context.context.get("records", {}).values()
+                   for record in groups.get(kind + "s", [])]
+            properties[record_field] = {"type": ["string", "null"], "enum": list(dict.fromkeys(ids)) + [None]}
         if "participants" in properties:
             properties["participants"] = _nullable({"type": "array", "items": text, "maxItems": 100})
         if "employer_confirmed" in properties:
@@ -114,7 +128,7 @@ def understanding_schema(context):
             # this transport field is decoded back into the existing domain DTO.
             properties["terms"] = _nullable({"type": "string", "description": "JSON-encoded object containing exact evidenced offer terms; null when unknown."})
         facts.append(_object({"kind": {"type": "string", "enum": [kind]},
-            "value": {"anyOf": [text, _object(properties)]}, **common}))
+            "value": _object(properties) if kind == "submission" else {"anyOf": [text, _object(properties)]}, **common}))
     groups = {
         "associations": _object({"kind": {"type": "string", "enum": sorted(KINDS["associations"])}, **common}),
         "facts": {"anyOf": facts},
@@ -141,7 +155,7 @@ def _unique_object(pairs):
 
 
 class SharedAnalyzer:
-    prompt_version = "3"
+    prompt_version = "6"
 
     def __init__(self, provider, *, max_output_tokens=8192):
         self.provider = provider
@@ -156,10 +170,28 @@ class SharedAnalyzer:
             "An automated application receipt or recruiting-team signature does not establish personal recruiter contact. "
             "An employer reviewing an application is not an applicant assessment; assessments are tests or exercises. "
             "Application received is a submission confirmation, never a terminal outcome. "
+            "Marketing newsletters and recruiting-team signatures are not recruiter contact. "
+            "Security/verification codes are transient portal steps, not submission confirmations. "
+            "An email thanking the applicant for completing an application is a receipt, not a request to complete it. "
+            "An employer promising a response within a week creates no applicant deadline. "
+            'For actual receipts use value {"status":"confirmed","submission_id":null,"occurred_at":null}; status is exactly "confirmed". '
+            "A personal recruiter_contact requires substantive personal communication. "
+            "For each application-targeted fact include the supporting application association unless already accepted. "
+            "Sources marked thread are earlier context only. Use them to identify the application and interpret the current email, "
+            "but do not turn their old facts or requests into new changes. Every proposed fact or request must cite the current authored email. "
+            "Thread coverage describes supplemental context separately from current evidence. If missing history is needed to interpret the email, "
+            "state the missing information in uncertainties and leave unsupported targets or fields null. "
+            "A reviewed link on an earlier message is a hint, not proof when the current email names a different employer. "
+            "An employer mismatch must remain uncertain; a shared role title cannot establish employer identity. "
+            "Candidate employer fields may contain ATS board slugs rather than display names. Consider the supplied job title, source URL, "
+            "and evidence together; a slug formatting difference alone is not an employer conflict. Candidate retrieval is not an accepted association. "
             "Existing records provide context, not additional facts to copy from the current email. "
             "Use each candidate's authoritative lifecycle to distinguish historical evidence from new developments. "
             "Do not infer that an acknowledgment confirms a particular browser attempt unless the evidence identifies it. "
+            "For generic receipts use submission_id null even if the application already has a submission. "
+            "Record IDs must come from the selected application's supplied records; never use legacy IDs or invent an ID. "
             "Quoted history and sent messages cannot establish new incoming obligations. Copy short verbatim quotes "
+            "that occur exactly once in the selected source; include adjacent words when the subject or phrase repeats. "
             "with their exact source_id/revision and zero-based Unicode character offsets (end exclusive). "
             "Do not invent timezone, midnight, duration, targets, or missing context. "
             "Use null for unknown optional fields. Structured offer value.terms must be a JSON-encoded object string. "

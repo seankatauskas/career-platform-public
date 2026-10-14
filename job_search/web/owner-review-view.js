@@ -1,6 +1,6 @@
 /* Owner Review uses the dashboard shell and the owners' explicit command contracts. */
-const ownerReviewState = {items: [], pages: {}, loaded: false, error: '', epoch: 0, busy: false, stale: false, selections: new Map(), keys: new Map(), resolutions: new Map(), processingPending: new Map()};
-const ownerOperationTitles = {add_note:'Add a note',create_task:'Create a task',record_request:'Record a request',record_submission:'Record a submission',confirm_submission:'Confirm application received',record_progress:'Update application progress',link_message:'Link this email',close_application:'Close application',reopen_application:'Reopen application',record_interview:'Record an interview',record_assessment:'Record an assessment',record_offer:'Record an offer',create_reminder:'Create a reminder',attach_submission_answers:'Attach application answers',send_reply:'Send reply',create_reply_draft:'Create reply draft',create_calendar_entry:'Create calendar entry'};
+const ownerReviewState = {sources: new Map(), groups: [], totals: null, policy: null, items: [], pages: {}, loaded: false, error: '', epoch: 0, busy: false, stale: false, selections: new Map(), keys: new Map(), resolutions: new Map(), processingPending: new Map()};
+const ownerOperationTitles = {record_submission_receipt:'Record application receipt',add_note:'Add a note',create_task:'Create a task',record_request:'Record a request',record_submission:'Record a submission',confirm_submission:'Confirm application received',record_progress:'Update application progress',link_message:'Link this email',close_application:'Close application',reopen_application:'Reopen application',record_interview:'Record an interview',record_assessment:'Record an assessment',record_offer:'Record an offer',create_reminder:'Create a reminder',attach_submission_answers:'Attach application answers',send_reply:'Send reply',create_reply_draft:'Create reply draft',create_calendar_entry:'Create calendar entry'};
 function ownerReviewIsHistory(item) { return item.kind === 'processing_history' || item.kind === 'processing' && (item.processing?.status === 'resolved_manually' || item.processing?.status === 'succeeded' && item.processing?.coverage?.complete === true); }
 function ownerReviewTitle(value) { return ownerOperationTitles[value] || ownerReviewLabel(value).replace(/^./, letter => letter.toUpperCase()); }
 function ownerReviewLabel(value) { return String(value || '').replaceAll('_', ' '); }
@@ -14,13 +14,19 @@ function ownerReviewNormalized(includeHistory = false) {
       status: raw.status || raw.execution, raw, entry: item};
   });
 }
+function ownerReviewCardItems() {
+  return [...ownerReviewState.groups.map(group => ({id:group.id,key:'evidence_group:'+group.id,kind:'evidence_group',
+    applicationId:group.application?.id || null,applicationIds:group.applications.map(a=>a.id),
+    title:group.proposals.length ? `${group.proposals.length} proposed change${group.proposals.length===1?'':'s'} from this evidence` : 'Email processing needs attention',
+    status:'pending',raw:group})), ...ownerReviewNormalized().filter(item=>item.kind==='external_action')];
+}
 function ownerReviewFeedback(text) {
   const box = document.querySelector('#review-feedback'); box.textContent = text; box.hidden = !text;
 }
 function ownerReviewCount() {
   const badge = document.querySelector('#review-count');
-  const count = ownerReviewNormalized().length;
-  badge.textContent = count ? `${count}${ownerReviewHasMore() ? '+' : ''}` : ownerReviewState.error ? '—' : '';
+  const count = ownerReviewState.totals?.cards ?? ownerReviewNormalized().length;
+  badge.textContent = count ? `${count}` : ownerReviewState.error ? '—' : '';
   badge.title = ownerReviewState.error ? 'Review could not be fully refreshed' : ownerReviewHasMore() ? 'More review items are available' : '';
   if (typeof renderApplicationTable === 'function') renderApplicationTable();
   if (typeof renderApplicationReviewNotices === 'function') renderApplicationReviewNotices();
@@ -31,16 +37,40 @@ async function loadOwnerReviewQueue(group = null) {
   const refresh = document.querySelector('#refresh-attention'); refresh.disabled = true;
   const list = document.querySelector('#attention-list'); list.setAttribute('aria-busy', 'true');
   try {
-    const result = await api('/api/v1/application-owner/review?limit=25' + (group ? '&group=' + encodeURIComponent(group) + '&cursor=' + encodeURIComponent(ownerReviewState.pages[group].next_cursor) : ''));
+    const historyOnly = group === 'processing_history';
+    const groupQuery = new URLSearchParams({limit: '25'});
+    if (group === 'groups') groupQuery.set('cursor', ownerReviewState.pages.groups.next_cursor);
+    if (group === 'external_actions') groupQuery.set('action_cursor', ownerReviewState.pages.external_actions.next_cursor);
+    const applicationId = new URLSearchParams(location.hash.split('?')[1] || '').get('application');
+    if (applicationId) groupQuery.set('application_id', applicationId);
+    const route = location.hash.split('?')[0].split('/');
+    const deepLink = !group && route[1] && route[2] && ['evidence_group','proposal'].includes(decodeURIComponent(route[1])) ? decodeURIComponent(route[2]) : null;
+    const historyQuery = '/api/v1/application-owner/review?limit=25&group=processing_history' + (historyOnly ? '&cursor=' + encodeURIComponent(ownerReviewState.pages.processing_history.next_cursor) : '');
+    const [result, history, linked] = await Promise.all([
+      historyOnly ? null : api('/api/v1/application-owner/review-groups?' + groupQuery),
+      ['groups','external_actions'].includes(group) ? null : api(historyQuery),
+      deepLink ? api('/api/v1/application-owner/review-groups?limit=25&group_id=' + encodeURIComponent(deepLink)) : null,
+    ]);
     if (epoch !== ownerReviewState.epoch) return;
-    if (!Array.isArray(result.items)) throw new Error('The review response was incomplete.');
-    const previous = group ? ownerReviewState.items : [];
-    const rows = new Map([...previous, ...result.items].map(item => {
-      const raw = item.proposal || item.action || item.processing || item;
-      const id = item.kind === 'processing_history' ? item.id || raw.analysis_id : raw.issue_id || raw.id || raw.action_id || raw.analysis_id;
-      return [`${item.kind || 'proposal'}:${id}`, item];
-    }));
-    ownerReviewState.items = [...rows.values()]; ownerReviewState.pages = group ? {...ownerReviewState.pages, ...result.pages} : result.pages || {};
+    if (result && !Array.isArray(result.items)) throw new Error('The review response was incomplete.');
+    if (result) {
+      const rows = new Map([...(group ? ownerReviewState.groups : []), ...result.items, ...(linked?.items || [])].map(item => [item.id, item]));
+      ownerReviewState.groups = [...rows.values()];
+      ownerReviewState.totals = result.totals; ownerReviewState.policy = result.policy;
+      const histories = ownerReviewState.items.filter(ownerReviewIsHistory);
+      const actions = new Map([...(group ? ownerReviewState.items.filter(i => i.kind === 'external_action').map(i => i.action) : []), ...(result.actions || [])].map(a => [a.action_id,a]));
+      ownerReviewState.items = [...ownerReviewState.groups.flatMap(g => [
+        ...g.proposals.map(proposal => ({kind:'proposal', proposal, application:g.applications.find(a => a.id === proposal.application_id)})),
+        ...g.processing.map(processing => ({kind:'processing', processing, application:g.application})),
+      ]), ...[...actions.values()].map(action => ({kind:'external_action', action})), ...histories];
+      if (group !== 'external_actions') ownerReviewState.pages.groups = {next_cursor:result.next_cursor};
+      if (group !== 'groups') ownerReviewState.pages.external_actions = {next_cursor:result.next_action_cursor};
+    }
+    if (history) {
+      ownerReviewState.items = [...ownerReviewState.items.filter(item => !ownerReviewIsHistory(item)),
+        ...(historyOnly ? ownerReviewState.items.filter(ownerReviewIsHistory) : []), ...history.items];
+      ownerReviewState.pages.processing_history = history.pages.processing_history;
+    }
     ownerReviewState.loaded = true; ownerReviewState.error = ''; ownerReviewState.stale = false;
     const current = new Map(ownerReviewNormalized().filter(item => item.kind === 'proposal').map(item => [item.id, item.raw]));
     for (const [id, decision] of ownerReviewState.selections) if (current.get(id)?.version !== decision.expected_version) ownerReviewState.selections.delete(id);
@@ -110,7 +140,8 @@ function ownerReviewSources(content, sources) {
     sourceDetails.append(node('summary', '', 'Source evidence'));
     sourceDetails.append(node('p', 'meta', `Revision ${source.revision ?? 'unknown'}${source.start != null ? ` · characters ${source.start}–${source.end}` : ''}`));
     if (source.owner !== 'correspondence') { sourceDetails.append(node('p', 'meta', (source.owner === 'applications' ? 'Browser observation · ' : 'Preserved source · ') + source.source_id)); content.append(sourceDetails); continue; }
-    const body = node('p', 'message-body', ''), read = node('button', 'quiet', 'Read source email');
+    const sourceKey = JSON.stringify([source.source_id, source.revision, source.sha256]);
+    const body = node('p', 'message-body', ownerReviewState.sources.get(sourceKey) || ''), read = node('button', 'quiet', 'Read source email');
     read.addEventListener('click', async () => {
       read.disabled = true;
       try {
@@ -118,19 +149,34 @@ function ownerReviewSources(content, sources) {
         const result = await api('/api/v1/application-owner/review-source?' + query);
         body.textContent = result.text || result.excerpt || result.body || (result.available ? 'This message has no text.' : 'This source is unavailable.');
         if (result.coverage?.complete === false || result.truncated) body.append(node('p', 'notice', 'Some source content is unavailable.'));
+        ownerReviewState.sources.set(sourceKey, body.textContent);
       } catch (error) { body.textContent = error.message; } finally { read.disabled = false; }
     });
     sourceDetails.append(read, body); content.append(sourceDetails);
   }
 }
-function ownerProposalCard(proposal, content, actions) {
+function ownerProposalCard(proposal, content, actions, grouped = false) {
   const visible = Object.fromEntries(Object.entries(proposal.input || {}).filter(([name]) => !/(?:_id|_ref|_version)$/.test(name) && !['evidence','expected_records'].includes(name)));
   content.append(ownerReviewFields(visible));
   const technical = node('details', 'technical-details'); technical.append(node('summary', '', 'Review record details'), ownerReviewFields({proposal_id:proposal.id,version:proposal.version,input:proposal.input})); content.append(technical);
-  ownerReviewSources(content, proposal.evidence);
+  if (!grouped) ownerReviewSources(content, proposal.evidence);
   const blockers = proposal.blockers || [], dependencies = proposal.dependencies || [];
-  if (blockers.length) content.append(node('p', 'notice', 'Needs clarification: ' + blockers.map(ownerReviewLabel).join(', ')));
-  if (dependencies.length) content.append(node('p', 'help', 'This change depends on earlier changes. Accept its prerequisites first, or select them together.'));
+  if (blockers.length) {
+    const descriptions = blockers.map(blocker => {
+      if (blocker === 'needs_target') return proposal.application_id
+        ? 'The target record could not be identified. Refresh the analysis before reviewing it.' : 'Which application is this email about?';
+      if (blocker === 'unresolved_association') return proposal.application_id
+        ? 'The email link needs repair. Refresh the analysis to rebuild it.' : 'Which application is this email about?';
+      if (blocker === 'target_disagrees_with_selected_association') return 'The proposed application conflicts with the email link. Choose the correct application.';
+      if (blocker === 'needs_time') return 'Confirm the date, time, and timezone before recording this update.';
+      if (blocker.startsWith('compare_prior:')) return 'This interpretation differs from an earlier decision. Review the earlier decision before applying it.';
+      if (blocker === 'source_revision_changed') return 'The email changed after analysis. Refresh the analysis to use the latest version.';
+      if (blocker === 'incomplete_evidence_coverage') return 'Some supporting context could not be loaded. Analysis needs recovery.';
+      return 'The proposed update could not be prepared correctly. Refresh the analysis before reviewing it.';
+    });
+    content.append(node('p', 'notice', [...new Set(descriptions)].join(' ')));
+  }
+  if (dependencies.length) content.append(node('p', 'help', 'Requires: ' + (proposal.prerequisites || []).map(p => ownerReviewTitle(p.operation) + ' (' + p.status + ')').join(', ') + '. Select prerequisites together or accept them first.'));
   if (!blockers.length) {
     const label = node('label', 'owner-review-selection'), checkbox = node('input'); checkbox.type = 'checkbox';
     checkbox.checked = ownerReviewState.selections.has(proposal.id);
@@ -233,11 +279,12 @@ function ownerProcessingControls(issue, content, actions) {
   resolve.addEventListener('click', () => ownerProcessingSubmit(issue, 'resolve_processing', reason.value));
   update(); actions.append(retry, resolve);
 }
-function ownerProcessingCard(processing, content, actions, historical = false) {
+function ownerProcessingCard(processing, content, actions, historical = false, grouped = false) {
   if (processing.recorded_at) content.append(node('p', 'meta', 'Last attempt: ' + (typeof displayDate === 'function' ? displayDate(processing.recorded_at) : processing.recorded_at)));
   content.append(node('p', 'meta', ownerReviewLabel(processing.status)));
   if (processing.failure_code) content.append(node('p', 'notice', ownerProcessingFailures[processing.failure_code] || 'This email could not be fully processed. Its source and earlier attempts remain available.'));
   if (processing.coverage?.complete === false) content.append(node('p', 'help', 'Missing evidence: ' + (processing.coverage.reasons || []).map(ownerReviewLabel).join(', ')));
+  if (processing.validation_diagnostic) content.append(node('p', 'meta', 'Validation: ' + ownerReviewLabel(processing.validation_diagnostic.reason) + ' in ' + ownerReviewLabel(processing.validation_diagnostic.category) + ' finding ' + (processing.validation_diagnostic.position + 1)));
   if (processing.attempt_count) content.append(node('p', 'meta', `${processing.attempt_count} processing attempt${processing.attempt_count === 1 ? '' : 's'} retained`));
   const currentIssue = processing.current_issue || processing;
   if (historical && processing.current_issue) content.append(node('p', 'meta', 'Current processing status: ' + ownerReviewLabel(currentIssue.status)));
@@ -246,57 +293,109 @@ function ownerProcessingCard(processing, content, actions, historical = false) {
     const section = node('details', 'technical-details'); section.append(node('summary', '', ownerReviewLabel(finding.category)), ownerReviewFields(finding.content)); content.append(section);
   }
   if (processing.findings_truncated) content.append(node('p', 'help', 'Additional findings are not shown on this page.'));
-  ownerReviewSources(content, processing.sources);
+  if (!grouped) ownerReviewSources(content, processing.sources);
   const details = node('details', 'technical-details'); details.append(node('summary', '', 'Processing record details'), ownerReviewFields({issue_id: processing.issue_id, analysis_id: processing.analysis_id, version: processing.version, failure_code: processing.failure_code})); content.append(details);
   if (!historical) ownerProcessingControls(processing, content, actions);
 }
+function ownerGroupTarget(group, content) {
+  if (group.source_type !== 'email' || !group.proposals.length) return;
+  const details = node('details', 'review-target'); details.append(node('summary', '', 'Correct application or receipt scope'));
+  const form = node('form'), targetLabel = node('label', '', 'Application'), select = node('select');
+  const placeholder = node('option', '', 'Choose an application'); placeholder.value = ''; select.append(placeholder);
+  select.required = true; targetLabel.append(select); form.append(targetLabel);
+  const scopeLabel = node('label', '', 'Submission evidence'), scope = node('select');
+  for (const [value, title] of [['preserve','Keep proposed attempt links'],['application','Application receipt; no attempt selected']]) {
+    const option = node('option', '', title); option.value = value; scope.append(option);
+  }
+  scopeLabel.append(scope); form.append(scopeLabel);
+  const reasonLabel = node('label', '', 'Reason for correction'), reason = node('textarea'); reason.required = true; reason.maxLength = 2000;
+  reasonLabel.append(reason); form.append(reasonLabel);
+  const save = node('button', 'quiet', 'Replace pending proposals'); save.type = 'submit'; save.disabled = true; form.append(save);
+  const feedback = node('p', 'help', 'This prepares corrected proposals for review.'); form.append(feedback);
+  let loaded = false;
+  details.addEventListener('toggle', async () => {
+    if (!details.open || loaded) return;
+    try {
+      let after = null;
+      do {
+        const page = await api('/api/v1/application-owner/applications?limit=100' + (after ? '&after=' + encodeURIComponent(after) : ''));
+        for (const app of page.items) { const option = node('option', '', [app.job?.employer,app.job?.title].filter(Boolean).join(' · ') || app.id); option.value = app.id; select.append(option); }
+        after = page.next_cursor || page.next_after;
+      } while (after);
+      select.value = group.application?.id || '';
+      loaded = true; save.disabled = ownerReviewState.busy || ownerReviewState.stale;
+    } catch (error) { feedback.textContent = error.message; }
+  });
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); if (ownerReviewState.busy || ownerReviewState.stale || !form.reportValidity()) return;
+    ownerReviewState.busy = true; save.disabled = true;
+    try {
+      await ownerReviewCommand('correct_review_target', {group_id:group.id,expected_digest:group.preview_digest,application_id:select.value,reason:reason.value.trim(),receipt_scope:scope.value});
+      ownerReviewState.selections.clear(); await loadOwnerReviewQueue();
+      ownerReviewFeedback('Corrected proposals are ready for review.');
+    } catch (error) { ownerReviewFeedback(error.message); if (error.status === 409) ownerReviewState.stale = true; }
+    finally { ownerReviewState.busy = false; renderOwnerReviewQueue(); }
+  });
+  details.append(form); content.append(details);
+}
+function ownerEvidenceGroupCard(group) {
+  const card = node('article', 'stack-item review-card evidence-group'), content = node('div', 'review-card-content');
+  card.dataset.reviewKey = 'evidence_group:' + group.id; card.tabIndex = -1;
+  content.append(node('p', 'review-card-kind', group.source_type === 'browser' ? 'Browser application attempt' : group.source_type === 'email' ? 'Email evidence' : 'Proposed application change'));
+  const title = group.applications.map(a => [a.job?.employer,a.job?.title].filter(Boolean).join(' · ')).join(' / ');
+  content.append(node('h3', '', title || 'Choose the application for this evidence'));
+  content.append(node('p', 'meta', `${group.proposals.length} proposed change${group.proposals.length === 1 ? '' : 's'}${group.processing.length ? ' · Processing needs attention' : ''}`));
+  for (const app of group.applications) { const link = node('a', 'review-context-link', 'Open application'); link.href = '#applications/' + encodeURIComponent(app.id); content.append(link); }
+  // All quotes stay visible; the saved source is opened once per source/revision.
+  for (const quote of new Set(group.proposals.flatMap(p => p.evidence.map(e => e.quote)).filter(Boolean))) content.append(node('blockquote', 'review-evidence', quote));
+  ownerReviewSources(content, group.evidence.map(({quote, ...ref}) => ref));
+  for (const proposal of group.proposals) {
+    const row = node('section', 'review-proposed-change'), actions = node('div', 'actions');
+    row.dataset.proposalId = proposal.id;
+    row.append(node('h4', '', ownerReviewTitle(proposal.operation)));
+    if (proposal.before?.application) row.append(node('p', 'meta', 'Current progress: ' + ownerReviewLabel(proposal.before.application.stage || proposal.before.application)));
+    if (proposal.closure) row.append(node('p', 'notice', `Closing this application will cancel ${proposal.closure.records.length} open tasks, reminders, and scheduled operations.`));
+    ownerProposalCard(proposal, row, actions, true); row.append(actions); content.append(row);
+  }
+  for (const issue of group.processing) { const row = node('section', 'review-proposed-change'), actions = node('div', 'actions'); row.append(node('h4', '', 'Processing problem')); ownerProcessingCard(issue, row, actions, false, true); row.append(actions); content.append(row); }
+  if (group.source_type === 'email' && group.proposals.some(p => p.blockers.length) && !group.processing.some(p => p.status === 'retry_queued')) {
+    content.append(ownerReviewButton('Refresh analysis', 'refresh_review_group', {group_id:group.id,expected_digest:group.preview_digest}));
+  }
+  const selected = group.proposals.filter(p => ownerReviewState.selections.has(p.id)).map(p => ownerReviewState.selections.get(p.id));
+  if (selected.length) content.append(ownerReviewButton(`Accept ${selected.length} selected change${selected.length === 1 ? '' : 's'}`, 'review_changes', {decisions:selected}));
+  ownerGroupTarget(group, content); card.append(content); return card;
+}
 function renderOwnerReviewQueue() {
   const list = document.querySelector('#attention-list'); if (!list) return;
-  if (!document.querySelector('#owner-processing-section')) {
-    const heading = node('h3', 'owner-review-group-heading', 'Decisions'); heading.id = 'owner-review-decision-heading'; list.before(heading);
-    const section = node('section', 'owner-processing-section'); section.id = 'owner-processing-section';
-    section.append(node('h3', 'owner-review-group-heading', 'Processing problems'), node('p', 'help', 'Emails that could not be fully understood. Retrying preserves earlier attempts; resolving records your reason.'));
-    const problems = node('div', 'stack'); problems.id = 'owner-processing-list'; section.append(problems); list.after(section);
+  const disclosures = captureReviewDisclosures(list); list.replaceChildren(); list.classList.remove('empty');
+  const oldProcessing = document.querySelector('#owner-processing-section'); if (oldProcessing) oldProcessing.remove();
+  const oldHeading = document.querySelector('#owner-review-decision-heading'); if (oldHeading) oldHeading.remove();
+  const legacyHistory = document.querySelector('#review-history'); if (legacyHistory) legacyHistory.hidden = true;
+  const totals = ownerReviewState.totals || {cards:0,operations:0,processing:0};
+  document.querySelector('#review-summary').textContent = `${totals.cards} evidence and action cards · ${totals.operations} proposed changes · ${totals.processing} processing problems`;
+  const policy = ownerReviewState.policy;
+  if (policy) {
+    const settings = node('details', 'browser-recording-preference'); settings.append(node('summary', '', 'Browser recording: ' + (policy.enabled ? 'automatic' : 'review first')));
+    settings.append(node('p', 'help', 'Automatically record unambiguous paired-browser submission attempts, website acknowledgments, and captured answers. Conflicting or incomplete evidence still needs review. Email changes remain manual.'));
+    settings.append(ownerReviewButton(policy.enabled ? 'Review future browser evidence manually' : 'Enable automatic browser recording', 'configure_browser_recording', {enabled:!policy.enabled,expected_version:policy.version})); list.append(settings);
   }
-  const problems = document.querySelector('#owner-processing-list');
-  const problemDisclosures = captureReviewDisclosures(problems); problems.replaceChildren();
-  const disclosures = typeof captureReviewDisclosures === 'function' ? captureReviewDisclosures(list) : new Map();
-  list.replaceChildren(); list.classList.remove('empty');
-  for (const selector of ['#review-history']) { const element = document.querySelector(selector); if (element) element.hidden = true; }
-  const history = document.querySelector('#mail-history-list'), historyRoot = document.querySelector('#mail-review-history');
-  const historyDisclosures = captureReviewDisclosures(history); history.replaceChildren(); historyRoot.hidden = false;
-  historyRoot.querySelector('summary').textContent = 'Email processing history';
-  historyRoot.querySelector('.help').textContent = 'Earlier attempts and resolved problems are retained here. They do not count as current processing problems.';
-  document.querySelector('#refresh-mail-history').hidden = true;
+  for (const group of ownerReviewState.groups) { const card = ownerEvidenceGroupCard(group); list.append(card); restoreReviewDisclosures(card, disclosures); }
+  const actions = ownerReviewNormalized().filter(i => i.kind === 'external_action');
+  for (const item of actions) { const card = node('article','stack-item review-card'), content = node('div','review-card-content'), buttons = node('div','actions'); card.dataset.reviewKey=item.key; content.append(node('h3','',item.title)); ownerActionCard(item.raw,content,buttons); card.append(content,buttons); list.append(card); }
+  if (!ownerReviewState.groups.length && !actions.length) list.append(node('p','empty',ownerReviewState.error ? 'Review could not be loaded. Refresh to try again.' : ownerReviewState.loaded ? 'Nothing needs review.' : 'Loading review…'));
   const applicationId = new URLSearchParams(location.hash.split('?')[1] || '').get('application');
-  const all = ownerReviewNormalized(), items = applicationId ? all.filter(item => item.applicationId === applicationId || (item.raw.candidate_ids || []).includes(applicationId)) : all;
-  const problemItems = items.filter(item => item.kind === 'processing'), decisions = items.filter(item => item.kind !== 'processing');
-  document.querySelector('#review-summary').textContent = `${decisions.length} decision${decisions.length === 1 ? '' : 's'} · ${problemItems.length} processing problem${problemItems.length === 1 ? '' : 's'}${ownerReviewHasMore() ? ' · More items available' : ''}`;
-  if (!problemItems.length) problems.append(node('p', 'empty', ownerReviewState.pages.processing?.next_cursor ? 'More email processing records are available.' : 'No current processing problems in the loaded records.'));
-  if (items.length && !decisions.length) list.append(node('p', 'empty', 'No application decisions in the loaded records.'));
-  if (applicationId) { const link = node('a', 'review-context-link', 'Show all review items'); link.href = '#review'; list.append(link); }
-  if (!items.length) list.append(node('p', 'empty', ownerReviewState.error ? 'Review could not be fully loaded. Refresh to try again.' : !ownerReviewState.loaded ? 'Loading review items…' : ownerReviewHasMore() ? 'No matching review items in the loaded pages. Load more to check the remaining items.' : 'Nothing needs review. New evidence and decisions will appear here.'));
-  const route = location.hash.split('?')[0].split('/');
-  if (route[1] && route[2] && !items.some(item => route[1] === encodeURIComponent(item.kind) && route[2] === encodeURIComponent(item.id))) list.append(node('p', 'notice', ownerReviewHasMore() ? 'The linked review is not in the loaded pages. Load more review items to find it.' : 'The linked review is no longer pending in this queue.'));
-  const historyItems = ownerReviewNormalized(true).filter(item => ownerReviewIsHistory(item.entry) && (!applicationId || item.applicationId === applicationId || (item.raw.candidate_ids || []).includes(applicationId)));
-  if (!historyItems.length) history.append(node('p', 'empty', 'No processing history in the loaded pages.'));
-  for (const item of [...items, ...historyItems]) {
-    const historical = ownerReviewIsHistory(item.entry);
-    const card = node('article', 'stack-item review-card'), content = node('div', 'review-card-content'), header = node('header', 'review-card-header'), actions = node('div', 'actions review-card-actions');
-    card.dataset.reviewKey = item.key; card.tabIndex = -1;
-    header.append(node('p', 'review-card-kind', item.kind === 'external_action' ? 'External action' : ['processing','processing_history'].includes(item.kind) ? (historical ? 'Processing history' : 'Processing problem') : 'Application change'), node('h3', '', item.title));
-    const app = item.entry.application;
-    if (item.applicationId) { const link = node('a', 'review-context-link', [app?.job?.employer, app?.job?.title].filter(Boolean).join(' · ') || 'Open application'); link.href = '#applications/' + encodeURIComponent(item.applicationId); header.append(link); }
-    else header.append(node('p', 'meta', 'Not linked to an application'));
-    content.append(header);
-    if (item.kind === 'external_action') ownerActionCard(item.raw, content, actions);
-    else if (['processing','processing_history'].includes(item.kind)) ownerProcessingCard(item.raw, content, actions, historical);
-    else ownerProposalCard(item.raw, content, actions);
-    card.append(content); if (actions.childNodes.length) card.append(actions); (historical ? history : item.kind === 'processing' ? problems : list).append(card);
-    if (typeof restoreReviewDisclosures === 'function') restoreReviewDisclosures(card, historical ? historyDisclosures : item.kind === 'processing' ? problemDisclosures : disclosures);
-    if (route[1] === encodeURIComponent(item.kind) && route[2] === encodeURIComponent(item.id)) card.classList.add('review-selected');
+  if (applicationId) { const link=node('a','review-context-link','Show all review items'); link.href='#review'; list.append(link); }
+  const history = document.querySelector('#mail-history-list'), historyRoot = document.querySelector('#mail-review-history');
+  const previous = captureReviewDisclosures(history); history.replaceChildren(); historyRoot.hidden=false;
+  historyRoot.querySelector('summary').textContent='Email processing history';
+  historyRoot.querySelector('.help').textContent='Earlier attempts and resolved problems remain available here.';
+  document.querySelector('#refresh-mail-history').hidden=true;
+  for (const item of ownerReviewNormalized(true).filter(i => ownerReviewIsHistory(i.entry))) {
+    const card=node('article','stack-item review-card'), content=node('div','review-card-content'), buttons=node('div','actions'); card.dataset.reviewKey=item.key;
+    content.append(node('h3','',item.title)); ownerProcessingCard(item.raw,content,buttons,true); card.append(content); history.append(card); restoreReviewDisclosures(card,previous);
   }
-  if (ownerReviewState.selections.size) list.append(ownerReviewButton('Accept selected changes', 'review_changes', {decisions: [...ownerReviewState.selections.values()]}));
-  for (const [group, page] of Object.entries(ownerReviewState.pages)) if (page.next_cursor) { const more = node('button', 'quiet', 'Load more ' + ({proposals:'application changes', external_actions:'external actions', processing:'processing problems', processing_history:'processing history'}[group] || group)); more.disabled = ownerReviewState.busy; more.addEventListener('click', () => loadOwnerReviewQueue(group)); (group === 'processing' ? problems : group === 'processing_history' ? history : list).append(more); }
+  for (const [group,page] of Object.entries(ownerReviewState.pages)) if (page?.next_cursor) { const more=node('button','quiet',group==='groups'?'Load more evidence':group==='external_actions'?'Load more external actions':'Load more processing history'); more.disabled=ownerReviewState.busy; more.addEventListener('click',()=>loadOwnerReviewQueue(group)); (group==='processing_history'?history:list).append(more); }
+  const route=location.hash.split('?')[0].split('/');
+  if (route[2]) { const id=decodeURIComponent(route[2]); const selected=ownerReviewState.groups.find(g => g.id===id || g.proposals.some(p=>p.id===id)); if(selected) [...list.querySelectorAll('article')].find(c=>c.dataset.reviewKey==='evidence_group:'+selected.id)?.classList.add('review-selected'); }
   ownerReviewCount();
 }

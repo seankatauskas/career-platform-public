@@ -270,3 +270,25 @@ class CorrespondenceOperations:
         items = [self.get(connection, row["message_id"]) for row in rows[:limit]]
         return {"items": items, "next_cursor": items[-1]["id"] if len(rows) > limit else None,
                 "coverage": {"complete": len(rows) <= limit}}
+
+    def preceding_thread(self, connection, message_id, *, revision=None, limit=10):
+        """Earlier messages in this account's thread, never future mail or drafts.
+
+        Metadata only; callers must use account-authorized evidence() for text.
+        Missing timestamps cannot establish that another message preceded this one.
+        """
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise DomainError("invalid_input", "Invalid thread bound")
+        current = self.get(connection, message_id, revision)
+        if not current["thread_id"]:
+            return {"items": [], "coverage": {"complete": True}}
+        if connection.execute("SELECT julianday(?)", (current["occurred_at"],)).fetchone()[0] is None:
+            return {"items": [], "coverage": {"complete": False}}
+        rows = connection.execute("""SELECT m.id FROM corr_messages m
+            JOIN corr_revisions r ON r.id=m.latest_revision
+            WHERE m.account_id=? AND m.thread_id=? AND m.id!=?
+            AND r.direction IN ('incoming','outgoing') AND julianday(r.occurred_at)<julianday(?)
+            ORDER BY julianday(r.occurred_at) DESC,m.id LIMIT ?""",
+            (current["account_id"], current["thread_id"], message_id, current["occurred_at"], limit + 1)).fetchall()
+        return {"items": [self.get(connection, row[0]) for row in rows[:limit]],
+                "coverage": {"complete": len(rows) <= limit}}

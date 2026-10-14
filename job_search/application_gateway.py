@@ -60,6 +60,15 @@ class ApplicationGateway:
             reader = getattr(self.runtime, "mail_reader", None)
             if reader is None or not reader.can_review_source(issue["source_id"], issue["revision"], issue["sha256"]):
                 raise DomainError("not_authorized", "Processing recovery requires an authorized evidence account")
+        if operation == "refresh_review_group":
+            group_id = payload.get("group_id", "")
+            if not isinstance(group_id, str) or not group_id.startswith("email:"):
+                raise DomainError("invalid_input", "Email review group required")
+            with self.runtime.executor.read() as con:
+                source = self.runtime.correspondence.get(con, group_id[6:])
+            reader = getattr(self.runtime, "mail_reader", None)
+            if reader is None or not reader.can_review_source(source["id"], source["revision"], source["source_sha256"]):
+                raise DomainError("not_authorized", "Review refresh requires an authorized evidence account")
         return HumanApplicationAdapter(self.runtime, actor_id).command(operation, payload, key)
 
     def _rows(self, connection, application_id, kind, *, current_only=False):
@@ -334,6 +343,15 @@ class ApplicationGateway:
                 return True, self.runtime.queries.workspace(args["application_id"])
             if name == "workspace-page":
                 return True, self.runtime.queries.workspace_page(args["application_id"], args["group"], limit=int(args.get("limit", 25)), cursor=args.get("cursor"))
+            if name == "review-groups":
+                from .applications.review import ReviewService
+                if set(args) - {"application_id", "group_id", "limit", "cursor", "action_cursor"}:
+                    raise DomainError("invalid_input", "Unsupported grouped review query fields")
+                return True, ReviewService(self.runtime).page(limit=int(args.get("limit", 25)), cursor=args.get("cursor"),
+                    application_id=args.get("application_id"), group_id=args.get("group_id"), action_cursor=args.get("action_cursor"))
+            if name == "review-migration-preview":
+                from .applications.review import ReviewService
+                return True, ReviewService(self.runtime).migration_preview()
             if name == "review":
                 if set(args) - {"application_id", "group", "limit", "cursor"}:
                     raise DomainError("invalid_input", "Unsupported review query fields")

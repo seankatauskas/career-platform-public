@@ -207,6 +207,14 @@ try {
     await atsPage.locator('#authorized').check();
     await atsPage.locator('#terms').check();
     await atsPage.locator('#password').fill('DO-NOT-CAPTURE-PASSWORD');
+    if(ats==='ashby') await atsPage.evaluate(()=>{
+      // A slow site handler must not split one native click/submit gesture
+      // into two answer captures merely because a debounce timer elapsed.
+      document.addEventListener('click',()=>{
+        const started=performance.now();
+        while(performance.now()-started<1700) {}
+      },{once:true});
+    });
     await atsPage.locator('#submit').click();
     await waitFor(async()=>(await command({action:'applications'})).applications.some(a=>a.ats===ats && a.job_id!=='job-1' && a.submitted_at),'automatic submission tracked');
     assert.equal(await atsPage.evaluate(()=>window.submitCount),1);

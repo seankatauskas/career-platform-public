@@ -139,7 +139,7 @@ class PairedExtensionAdapter:
         }, idempotency_key="extension:" + key)
         observation = result["observation"]
         receipt = {"application_id": observation["application_id"], "attempt_id": attempt,
-                   "status": "pending_review", "observation_id": observation["id"]}
+                   "status": "recorded" if result.get("review", {}).get("proposals") and all(p["status"] == "applied" for p in result["review"]["proposals"]) else "pending_review", "observation_id": observation["id"]}
         if is_answers:
             receipt.update(saved=True, capture_id=external_id, field_count=len(snapshot["fields"]))
         return receipt
