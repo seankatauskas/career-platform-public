@@ -44,6 +44,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from contextlib import closing
 from pathlib import Path
 
 from job_search.salary.enrichment import enrich_job, html_to_text, save_enrichments
@@ -1427,9 +1429,12 @@ def save(
     """
     keyed = {(r["ats"], r["id"]): r for r in rows if r.get("id")}
     cols = ["ats", "id", *[f for f in FIELDS if f not in ("ats", "id")]]
-    with sqlite3.connect(db_path) as con:
+    with closing(sqlite3.connect(db_path)) as con, con:
         _prepare(con)
-        known = {tuple(r) for r in con.execute("SELECT ats, id FROM jobs")}
+        # Probe only this batch through the primary key, not the entire catalog.
+        known = {key for key in keyed if con.execute(
+            "SELECT 1 FROM jobs WHERE ats=? AND id=?", key
+        ).fetchone()}
         con.executemany(
             f"INSERT INTO jobs ({','.join(cols)}, first_seen, last_seen) "
             f"VALUES ({','.join('?' * len(cols))}, ?, ?) "
@@ -1446,10 +1451,8 @@ def save(
             + ", matched=CASE WHEN excluded.matched != '' "
             "THEN excluded.matched ELSE jobs.matched END"
             ", last_seen=excluded.last_seen",
-            [
-                [str(r.get(c, "")) for c in cols] + [seen_at, seen_at]
-                for r in keyed.values()
-            ],
+            ([str(r.get(c, "")) for c in cols] + [seen_at, seen_at]
+             for r in keyed.values()),
         )
         if enrichments is not None:
             # The workers only construct dictionaries. Jobs and their enrichment
@@ -1480,6 +1483,26 @@ def save(
 
     new = len(keyed.keys() - known)
     return new, len(keyed) - new, closed
+
+
+# Bound both queued futures and retained descriptions. Executor.map on Python
+# before 3.14 eagerly submits every board and retains out-of-order results.
+COLLECTION_BATCH_ROWS = 2000
+
+
+def bounded_results(pool, function, items, limit):
+    iterator = iter(items)
+    pending = deque()
+    for _ in range(limit):
+        item = next(iterator, None)
+        if item is None:
+            break
+        pending.append(pool.submit(function, item))
+    while pending:
+        yield pending.popleft().result()
+        item = next(iterator, None)
+        if item is not None:
+            pending.append(pool.submit(function, item))
 
 
 def run_recorded_discovery(
@@ -1744,6 +1767,20 @@ def main() -> None:
 
     rows: list[dict] = []
     enrichments: list[dict] = []
+    streaming = args.no_export
+    seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    seen_before = known_keys(db_path) if args.new_only else set()
+    returned = matched = new_total = updated_total = 0
+    by_ats = {ats: 0 for ats in ats_list}
+
+    def flush():
+        nonlocal new_total, updated_total
+        new, updated, _ = save(rows, db_path, seen_at, enrichments=enrichments)
+        new_total += new
+        updated_total += updated
+        rows.clear()
+        enrichments.clear()
+
     dead: set[tuple[str, str]] = set()
     # Which boards failed, not just how many. A count on stderr left no way to
     # re-scan the survivors of a throttle without repeating all 13,000 boards.
@@ -1795,26 +1832,33 @@ def main() -> None:
         return [], []
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        for i, (found, board_enrichments) in enumerate(pool.map(work, scanned), 1):
+        for i, (found, board_enrichments) in enumerate(
+            bounded_results(pool, work, scanned, args.concurrency), 1
+        ):
+            matched += len(found)
+            if args.new_only:
+                found = [r for r in found if (r["ats"], r["id"]) not in seen_before]
+            returned += len(found)
+            for row in found:
+                by_ats[row["ats"]] += 1
             rows.extend(found)
             enrichments.extend(board_enrichments)
+            if streaming and max(len(rows), len(enrichments)) >= COLLECTION_BATCH_ROWS:
+                flush()
             if i % 500 == 0 or i == len(scanned):
                 print(
                     f"  {i}/{len(scanned)} boards | {len(dead)} 404 | "
-                    f"{len(failed)} err | {unchanged} unchanged | {len(rows)} matches",
+                    f"{len(failed)} err | {unchanged} unchanged | {matched} matches",
                     file=sys.stderr,
                 )
 
     if args.new_only:
-        # Drop anything the database has already recorded. Done here rather than in
-        # scan_board so the board fetch stays independent of storage.
-        before = len(rows)
-        seen_before = known_keys(db_path)
-        rows = [r for r in rows if (r["ats"], r["id"]) not in seen_before]
-        print(f"  --new-only: {before - len(rows)} already known, {len(rows)} new",
+        print(f"  --new-only: {matched - returned} already known, {returned} new",
               file=sys.stderr)
-
-    sort_rows(rows, args.sort)
+    if streaming:
+        flush()
+    else:
+        sort_rows(rows, args.sort)
 
     if not args.no_export:
         # BOM so Excel renders the en-dashes and bullets in location strings.
@@ -1863,9 +1907,6 @@ def main() -> None:
 
     written = "" if args.no_export else f"{csv_path.name}, {json_path.name}"
     if not args.no_db:
-        seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if conditional:
-            save_etags(db_path, fresh_etags, seen_at)
         # Only an unfiltered run saw everything, so only it may close postings.
         # An errored or conditional-304 response cannot supply a new absence
         # claim. Only boards whose complete response was observed may close jobs.
@@ -1874,6 +1915,11 @@ def main() -> None:
         new, updated, closed = save(
             rows, db_path, seen_at, covered, enrichments=enrichments
         )
+        new += new_total
+        updated += updated_total
+        # A failed/abandoned persistence pass must never publish a reusable ETag.
+        if conditional:
+            save_etags(db_path, fresh_etags, seen_at)
         written += (", " if written else "") + f"{db_path.name} ({new} new, {updated} already seen"
         written += f", {closed} closed)" if covered is not None else ")"
 
@@ -1881,15 +1927,14 @@ def main() -> None:
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "boards_scanned": len(scanned), "boards_failed": len(failed),
         "boards_not_found": len(dead), "boards_unchanged": unchanged,
-        "postings_returned": len(rows), "ats": ats_list,
+        "postings_returned": returned, "ats": ats_list,
         "limited": bool(args.limit),
         "authoritative": may_close_postings(title, pattern, cutoff, args.new_only),
         "status": "partial" if failed else "complete",
     }
     (HERE / f"{args.out}.collection.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
-    by_ats = {a: sum(1 for r in rows if r["ats"] == a) for a in ats_list}
-    print(f"\n{len(rows)} jobs ({', '.join(f'{a} {n}' for a, n in by_ats.items())}) "
+    print(f"\n{returned} jobs ({', '.join(f'{a} {n}' for a, n in by_ats.items())}) "
           f"-> {written}", file=sys.stderr)
 
 

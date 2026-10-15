@@ -5,10 +5,22 @@ import os
 from contextlib import closing
 import sqlite3
 
+from .collection import boards
 from .activation import disabled_tasks
 from .contracts import ContractError, MutationContext, canonical_json
 from .maintenance import draining
 from .scheduler import _stable_id, has_real_scraper_contact
+
+
+def _board_list_available(config) -> bool:
+    paths = ((config.board_registry_path,) if config.board_registry_path is not None
+             else (boards.BOARDS_SEED, boards.BOARDS_CACHE))
+    try:
+        sources = [boards._read_boards(path) for path in paths]
+        return any(slugs for source in sources for ats, slugs in source.items()
+                   if ats in {"ashby", "greenhouse", "lever"})
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def scan_availability(config, con) -> dict:
@@ -19,7 +31,7 @@ def scan_availability(config, con) -> dict:
         reason = "Job collection is paused. Enable it in background activity first."
     elif not has_real_scraper_contact(config.environment(os.environ)):
         reason = "Configure the collector contact before scanning."
-    elif not config.board_registry_path or not config.board_registry_path.is_file():
+    elif not _board_list_available(config):
         reason = "Configure the company board list before scanning."
     elif not con.execute("SELECT 1 FROM schedule_specs WHERE task_kind='ats.new_only' AND enabled=1").fetchone():
         reason = "The collection worker is not configured yet."

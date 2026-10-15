@@ -73,6 +73,14 @@ run "single_host_security" {
     error_message = "Only bounded maintenance suppresses service health; backup age remains a real 24-hour alarm."
   }
   assert {
+    condition = alltrue([for name in ["health", "domain"] : alltrue([
+      for q in aws_cloudwatch_metric_alarm.operations[name].metric_query : alltrue([
+        for m in q.metric : m.stat == (q.id == "maintenance" ? "Maximum" : "Minimum")
+      ])
+    ])]) && length(aws_cloudwatch_metric_alarm.operations["domain_stale"].alarm_actions) == 0 && length(aws_cloudwatch_metric_alarm.operations["domain_stale"].ok_actions) == 0 && length(aws_cloudwatch_metric_alarm.operations["domain"].alarm_actions) == 1
+    error_message = "Maintenance boundaries must retain grace; aggregate domain alarms must still notify without duplicate stale notifications."
+  }
+  assert {
     condition     = aws_cloudwatch_log_group.operations.retention_in_days == 14
     error_message = "Retain only fourteen days of operational logs."
   }

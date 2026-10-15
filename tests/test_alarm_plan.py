@@ -18,14 +18,26 @@ def fixture():
         after['metric_query'] = [{'metric': [{'dimensions': {'InstanceId': INSTANCE}}]} for _ in range(2)]
         resources.append({'address': f'aws_cloudwatch_metric_alarm.operations["{key}"]',
                           'mode': 'managed', 'change': {'actions': ['update'], 'before': before, 'after': after}})
+    before = {'id': 'domain_stale', 'dimensions': {'InstanceId': INSTANCE},
+              'alarm_actions': ['alerts'], 'ok_actions': ['alerts'], 'threshold': 0}
+    resources.append({'address': 'aws_cloudwatch_metric_alarm.operations["domain_stale"]',
+                      'mode': 'managed', 'change': {'actions': ['update'], 'before': before,
+                      'after': {**before, 'alarm_actions': [], 'ok_actions': []}}})
     return {'resource_changes': resources}
 
 
 class AlarmPlanTests(unittest.TestCase):
-    def test_two_updates_and_unchanged_dependencies_pass(self):
+    def test_three_updates_and_unchanged_dependencies_pass(self):
         plan = fixture()
         plan['resource_changes'].append({'address': 'aws_instance.host', 'mode': 'managed', 'change': {'actions': ['no-op']}})
         self.assertEqual(CHECK(plan, INSTANCE)['scope'], 'health-alarms')
+
+    def test_stale_alarm_allows_delivery_removal_only(self):
+        for key, value in (('threshold', 2), ('alarm_actions', ['other']),
+                           ('dimensions', {'InstanceId': 'i-12345678'})):
+            plan = fixture()
+            plan['resource_changes'][2]['change']['after'][key] = value
+            with self.assertRaises(ValueError): CHECK(plan, INSTANCE)
 
     def test_dependency_changes_are_rejected(self):
         for address in ('aws_instance.host', 'aws_iam_role.host', 'aws_sns_topic.alerts'):

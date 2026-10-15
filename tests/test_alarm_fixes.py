@@ -149,12 +149,13 @@ class MonitorTests(unittest.TestCase):
             report = ops.status(self.c, publish=True)
         return report, {m['MetricName']: m['Value'] for m in json.loads(aws.call_args.args[-1])}
 
-    def test_backup_grace_requires_live_lock_valid_start_and_bounded_duration(self):
+    def test_maintenance_grace_requires_live_lock_valid_start_and_bounded_duration(self):
         now = datetime.now(timezone.utc)
         base = dict(operation_id='a'*32, kind='backup', complete=False, started_at=now.isoformat())
         for held, changes, expected in (
             (True, {}, 1), (False, {}, 0), (None, {}, 0),
-            (True, {'complete': True}, 0), (True, {'kind': 'deploy'}, 0),
+            (True, {'complete': True}, 0), (True, {'kind': 'deploy'}, 1), (True, {'kind': 'rollback'}, 1),
+            (True, {'kind': 'restore'}, 0),
             (True, {'started_at': (now-timedelta(hours=2)).isoformat()}, 0),
             (True, {'started_at': (now+timedelta(minutes=5)).isoformat()}, 0),
             (True, {'started_at': 'invalid'}, 0),

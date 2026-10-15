@@ -24,7 +24,7 @@ def fixture():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         boards = root / "boards.json"
-        boards.write_text('{}')
+        boards.write_text('{"ashby": ["fixture"]}')
         config = replace(RuntimeConfigV1.defaults(root), application_db=root/'app.db',
                          jobs_db=root/'jobs.db', preference_db=root/'ranking.db', proxy_db=root/'proxy.db',
                          board_registry_path=boards, scraper_contact='collector@company.dev')
@@ -60,7 +60,7 @@ def test_manual_scan_joins_scheduled_scan_and_preserves_schedule():
 
 def test_scan_blocks_paused_maintenance_and_unbounded_boards():
     with fixture() as (config, store):
-        for changed, maintenance in [(replace(config, board_registry_path=None), False), (config, True)]:
+        for changed, maintenance in [(replace(config, board_registry_path=config.jobs_db.parent/"missing.json"), False), (config, True)]:
             with patch('job_search.scanning.draining', return_value=maintenance):
                 try: request_scan(changed, store, 'blocked')
                 except ContractError: pass
@@ -73,6 +73,21 @@ def test_scan_blocks_paused_maintenance_and_unbounded_boards():
         else: raise AssertionError('paused scan was accepted')
         with connect(config.application_db) as con:
             assert con.execute('SELECT COUNT(*) FROM work_items').fetchone()[0] == 0
+
+
+def test_scan_accepts_default_seed_or_cache_without_network_discovery():
+    with fixture() as (config, store):
+        default = replace(config, board_registry_path=None)
+        missing = config.jobs_db.parent/'absent.json'
+        with patch('job_search.scanning.boards.BOARDS_SEED', missing), \
+             patch('job_search.scanning.boards.BOARDS_CACHE', config.board_registry_path):
+            assert scan_status(default)['available']
+            assert request_scan(default, store, 'default-boards')['status'] == 'queued'
+        with patch('job_search.scanning.boards.BOARDS_SEED', missing), \
+             patch('job_search.scanning.boards.BOARDS_CACHE', missing):
+            assert not scan_status(default)['available']
+        config.board_registry_path.write_text('{}')
+        assert not scan_status(config)['available']
 
 
 def test_scan_uses_normal_worker_and_keeps_workflow_lineage():

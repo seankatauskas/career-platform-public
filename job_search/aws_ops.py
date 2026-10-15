@@ -1485,7 +1485,7 @@ def _status(c: dict, publish: bool = False) -> dict:
         result["recovery_tool"] = operation.get("recovery_tool")
         if held is None: result["operation_lock_unverified"] = True
     grace = False
-    if result["maintenance_active"] and operation["kind"] == "backup":
+    if result["maintenance_active"] and operation["kind"] in {"backup", "deploy", "rollback"}:
         try:
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(operation["started_at"])).total_seconds()
             grace = 0 <= elapsed < MAINTENANCE_GRACE_SECONDS

@@ -763,9 +763,13 @@ publishes blocked domain readiness while preserving the separate process-health
 and heartbeat metrics. Detailed ranking coverage remains in ordinary `readiness`.
 
 The Terraform health/domain alarms use `MaintenanceActive` to allow a live,
-locked backup less than one hour old. Raw `Healthy` and `DomainReady` still show
+locked backup, deployment, or rollback less than one hour old. Raw `Healthy` and `DomainReady` still show
 actual observations. Missing maintenance telemetry grants no exception, and
-backup-age, backup-failure, stale-work, and reconciliation alarms are not suppressed.
+backup-age, backup-failure, and reconciliation alarms are not suppressed.
+The maintenance metric uses the maximum within each five-minute alarm period,
+so a period spanning maintenance start/end retains grace until that period ends.
+The stale-capabilities alarm remains visible but sends no duplicate notifications;
+stale capabilities also set `DomainReady=0`, which retains its notifications.
 Deploy the application through the release workflow, then review/apply the alarm
 changes through the Terraform workflow. Existing hosts need no service-unit edit.
 

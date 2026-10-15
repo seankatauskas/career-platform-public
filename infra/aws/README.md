@@ -59,12 +59,13 @@ including its own role. Its `iam:PassRole` is restricted to the host role and EC
 Routine non-IAM changes use the infrastructure workflow; releases use the separate
 deploy role. Neither requires long-lived GitHub AWS access keys.
 
-For the existing health/domain alarm rollout, choose `scope=health-alarms` in
+For the existing health/domain/stale alarm rollout, choose `scope=health-alarms` in
 `aws-terraform.yml`, first with `operation=plan`, then `operation=apply` after
-reviewing the plan. This targets only the two alarms and temporarily preserves
+reviewing the plan. This targets only the three alarms and temporarily preserves
 the installed EC2 bootstrap data. The saved-plan check rejects changes to any
-dependency, alarm replacement, changed notification/threshold settings, or a
-different instance. It uses the same locked remote state and production workflow
+dependency, alarm replacement, changed thresholds, or a different instance.
+Only the duplicate stale-capabilities alarm may have its notifications removed;
+health and domain notification settings must remain unchanged. It uses the same locked remote state and production workflow
 concurrency. The temporary override is removed afterward; full plans still show
 pending bootstrap drift and require a separate replacement decision. This mode
 does not repair unrelated full-plan IAM read permissions or claim drift is gone.

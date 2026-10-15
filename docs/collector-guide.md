@@ -1323,3 +1323,12 @@ column automatically; older rows retain their text until their next board refres
 The ETag representation version changes so an old conditional response cannot
 prevent that first formatting update. The preview sanitizes markup on read, retains
 structural formatting, and omits scripts, embedded media, and source styles.
+
+### Database-only scan memory
+
+Scheduled scans use `--no-export`. These persist jobs and enrichment in bounded
+batches instead of retaining every description. The executor also limits pending
+board results to the configured concurrency (8). An interrupted run can retain
+observed jobs, but does not close missing postings or publish fresh ETags. Only a
+completed authoritative scan closes postings on fully observed boards. CSV/JSON
+exports retain their existing sorted output behavior.

@@ -12,7 +12,7 @@ on:
         default: plan
         required: true
       scope:
-        description: 'Full infrastructure, or only existing health/domain alarms'
+        description: 'Full infrastructure, or only existing health/domain/stale alarms'
         type: choice
         options: [full, health-alarms]
         default: full
@@ -105,13 +105,13 @@ jobs:
           set -euo pipefail
           targets=()
           if [[ "$PLAN_SCOPE" == health-alarms ]]; then
-            targets=('-target=aws_cloudwatch_metric_alarm.operations["health"]' '-target=aws_cloudwatch_metric_alarm.operations["domain"]')
+            targets=('-target=aws_cloudwatch_metric_alarm.operations["health"]' '-target=aws_cloudwatch_metric_alarm.operations["domain"]' '-target=aws_cloudwatch_metric_alarm.operations["domain_stale"]')
           elif [[ "$PLAN_SCOPE" != full ]]; then
             echo 'Unsupported infrastructure scope'; exit 1
           fi
           terraform -chdir=infra/aws plan -input=false -lock-timeout=5m \
             -var-file="$RUNNER_TEMP/aws.tfvars.json" "${targets[@]}" -out="$RUNNER_TEMP/aws.tfplan"
-      - name: Reject changes outside the two existing health alarms
+      - name: Reject changes outside the three existing health alarms
         if: inputs.scope == 'health-alarms'
         run: |
           set -euo pipefail

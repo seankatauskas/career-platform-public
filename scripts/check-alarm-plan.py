@@ -6,7 +6,7 @@ import re
 import sys
 
 
-ALARMS = {f'aws_cloudwatch_metric_alarm.operations["{key}"]' for key in ('health', 'domain')}
+ALARMS = {f'aws_cloudwatch_metric_alarm.operations["{key}"]' for key in ('health', 'domain', 'domain_stale')}
 
 
 def check_plan(plan, instance_id):
@@ -25,6 +25,18 @@ def check_plan(plan, instance_id):
             if actions not in (['no-op'], ['update']):
                 raise ValueError('alarm rollout must update existing alarms only')
             before, after = change['before'], change['after']
+            if address.endswith('["domain_stale"]'):
+                # This diagnostic duplicates DomainReady. Only remove delivery;
+                # never change its metric, threshold, identity, or instance.
+                delivery = {'alarm_actions', 'ok_actions'}
+                if any(after.get(key) != [] for key in delivery):
+                    raise ValueError('stale alarm must be diagnostic only')
+                if ({k: v for k, v in before.items() if k not in delivery} !=
+                        {k: v for k, v in after.items() if k not in delivery}):
+                    raise ValueError('only stale alarm delivery may change')
+                if after.get('dimensions') != {'InstanceId': instance_id}:
+                    raise ValueError('stale alarm targets another instance')
+                continue
             for key in ('id', 'alarm_name', 'alarm_actions', 'ok_actions',
                         'actions_enabled', 'comparison_operator', 'threshold',
                         'evaluation_periods', 'treat_missing_data'):
@@ -40,7 +52,7 @@ def check_plan(plan, instance_id):
         elif actions != ['no-op']:
             raise ValueError('plan changes infrastructure outside the alarm scope: ' + address)
     if found != ALARMS:
-        raise ValueError('both existing health alarms must be present in the plan')
+        raise ValueError('all three existing health alarms must be present in the plan')
     return {'scope': 'health-alarms', 'instance_id': instance_id, 'alarms': sorted(found)}
 
 

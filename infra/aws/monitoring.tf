@@ -104,10 +104,12 @@ resource "aws_cloudwatch_metric_alarm" "operations" {
   evaluation_periods  = each.value.evaluations
   dimensions          = contains(["health", "domain"], each.key) ? null : each.value.dimensions
   treat_missing_data  = "breaching"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
+  # DomainReady already includes stale capabilities. Keep the diagnostic alarm
+  # visible without sending a second incident/recovery pair for the same outage.
+  alarm_actions = each.key == "domain_stale" ? [] : [aws_sns_topic.alerts.arn]
+  ok_actions    = each.key == "domain_stale" ? [] : [aws_sns_topic.alerts.arn]
 
-  # The host grants this only to a locked backup younger than one hour. Keep
+  # The host grants this to locked backups/deployments younger than one hour. Keep
   # raw health metrics truthful and do not suppress age/failure/reconciliation.
   dynamic "metric_query" {
     for_each = contains(["health", "domain"], each.key) ? [1] : []
@@ -130,7 +132,9 @@ resource "aws_cloudwatch_metric_alarm" "operations" {
         metric_name = metric_query.value
         dimensions  = each.value.dimensions
         period      = each.value.period
-        stat        = "Minimum"
+        # A period spanning maintenance start/end must retain its grace signal.
+        # This can extend suppression only to the end of that five-minute period.
+        stat = metric_query.key == "maintenance" ? "Maximum" : "Minimum"
       }
     }
   }
