@@ -5,7 +5,7 @@ Uses public owner operations. A group is presentation, never blanket approval.
 from copy import deepcopy
 
 from job_search.commands import DomainError, digest
-from .understanding.reconciliation import non_actionable_contact, verification, receipt_fact, non_actionable_request, only_nonactionable
+from .understanding.reconciliation import non_actionable_contact, verification, receipt_fact, non_actionable_request, only_nonactionable, non_actionable_outcome
 
 
 def collect(read):
@@ -122,6 +122,28 @@ class ReviewService:
                 p["prerequisites"] = [self.understanding.get(con, identifier) for identifier in p["dependencies"]]
                 if p["operation"] == "close_application" and p.get("application_id"):
                     p["closure"] = self.apps.preview_closure(con, p["application_id"])
+            analyses = {p["analysis_id"] for p in group["proposals"] if p.get("analysis_id")}
+            group["catalog_candidates"] = []
+            group["application_candidates"] = []
+            if analyses:
+                latest = max((self.understanding.get_analysis(con, a) for a in analyses), key=lambda a: (a["recorded_at"], a["id"]))
+                # Retrieval candidates help the human choose; they do not own this
+                # evidence and must not affect application filtering or counts.
+                candidate_ids = list(dict.fromkeys(c["id"] for c in latest["descriptor"].get("candidates", [])))
+                for identifier in candidate_ids[:20]:
+                    try:
+                        candidate = self.runtime.queries._application(con, self.apps.get_application(con, identifier))
+                    except DomainError as exc:
+                        if exc.code != "not_found":
+                            raise
+                        continue
+                    group["application_candidates"].append({"id": candidate["id"], "job": candidate.get("job")})
+                suggested = {f["content"].get("target_id") for f in latest["findings"]
+                             if f["category"] == "associations" and f["content"]["kind"] == "job"}
+                for candidate in latest["descriptor"].get("context", {}).get("catalog_candidates", []):
+                    group["catalog_candidates"].append({**candidate, "suggested": candidate["id"] in suggested,
+                                                       "match_digest": digest(candidate)})
+                group["catalog_retrieval"] = latest["descriptor"].get("context", {}).get("catalog_retrieval", {})
             group["preview_digest"] = digest(group)
         return list(groups.values())
 
@@ -166,6 +188,16 @@ class ReviewService:
         if group is None or group["preview_digest"] != expected_digest:
             raise DomainError("version_conflict", "This evidence group changed; refresh its preview")
         return group
+
+    def review_changes(self, tx, *, group_id, expected_digest, decisions):
+        """Bind a disclosed selection to its complete source-card preview."""
+        group = self._checked(tx.connection, group_id, expected_digest)
+        members = {p["id"] for p in group["proposals"]}
+        if (not isinstance(decisions, list) or not 1 <= len(decisions) <= 50
+                or any(not isinstance(d, dict) or not isinstance(d.get("proposal_id"), str)
+                       or d["proposal_id"] not in members for d in decisions)):
+            raise DomainError("invalid_input", "Decisions must belong to the displayed evidence group")
+        return self.runtime.workflows.review_changes(tx, decisions)
 
     def correct_review_target(self, tx, *, group_id, expected_digest, application_id, reason, receipt_scope="preserve"):
         if tx.context.principal.kind != "human" or not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
@@ -292,11 +324,13 @@ class ReviewService:
                 finding = next((f for f in analysis["findings"] if f["id"] == p["finding_id"]), None)
                 if p["operation"] == "link_message" and only_nonactionable(analysis["findings"]):
                     disposition = "supersede_nonactionable"
+                elif p["operation"] == "close_application" and finding and non_actionable_outcome(finding["content"]):
+                    disposition = "supersede_nonterminal_outcome"
                 elif finding and (non_actionable_contact(finding["content"]) or verification(finding["content"]) or non_actionable_request(finding["content"])):
                     disposition = "supersede_nonactionable"
                 elif self.runtime.workflows._already_recorded(con, p):
                     disposition = "supersede_restatement"
-                elif finding and receipt_fact(finding["content"]) and not p["input"].get("submission_id") and p["operation"] != "record_submission_receipt":
+                elif finding and receipt_fact(finding["content"]) and not p["input"].get("submission_id") and p["operation"] in {"record_submission", "confirm_submission"}:
                     disposition = "replace_receipt"
             planned.append({"proposal_id": p["id"], "version": p["version"], "operation": p["operation"], "disposition": disposition,
                 "application_id": p["application_id"], "input": p["input"], "blockers": p["blockers"], "dependencies": p["dependencies"]})

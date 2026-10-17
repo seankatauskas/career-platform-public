@@ -4,12 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from job_search.application_runtime import ApplicationRuntime
 from job_search.application_transport import HumanApplicationAdapter, AgentApplicationAdapter
 from job_search.application_mail import capture_candidates
 from job_search.applications.review import ReviewService
-from job_search.applications.understanding.analyzer import understanding_schema, _anchor_evidence, SharedAnalyzer
+from job_search.applications.understanding.analyzer import understanding_schema, _anchor_evidence, SharedAnalyzer, model_payload
 from job_search.commands import CommandContext, Principal, DomainError
 from job_search.review_migration import apply
 
@@ -51,8 +52,11 @@ class ReviewContextTest(unittest.TestCase):
             allowed_accounts=('account',), analyzer=SimpleNamespace(prompt_version=prompt, analyze=run), model_version='fixture',
             candidate_ids=(self.app['id'],), candidate_coverage={'complete': True} if retrieve else None, processing_retry=retry)
 
-    def queue_refresh(self):
+    def queue_refresh(self, group_id=None):
         manifest = ReviewService(self.runtime).refresh_preview()
+        if group_id is not None:
+            manifest['groups'] = [group for group in manifest['groups'] if group['group_id'] == group_id]
+            self.assertEqual(len(manifest['groups']), 1)
         receipt = apply(self.runtime, manifest, actor='owner')
         self.assertEqual(receipt['needs_refresh'], 0)
         self.assertEqual(receipt, apply(self.runtime, manifest, actor='owner'))
@@ -163,6 +167,26 @@ class ReviewContextTest(unittest.TestCase):
         self.assertEqual(self.pending(), [])
         self.assertEqual(ReviewService(self.runtime).page()['totals']['processing'], 0)
 
+    def test_accepting_link_after_failed_refresh_retries_without_obsolete_replacement_scope(self):
+        old = self.analyze()['proposals']
+        retry = self.queue_refresh()
+        def fail(context):
+            raise DomainError('invalid_output', 'Synthetic failure')
+        self.assertEqual(self.analyze(prompt='5', retry=retry, transform=fail)['status'], 'failed')
+        link = next(p for p in old if p['operation'] == 'link_message')
+        self.human.command('review_changes', {'decisions': [{'proposal_id': link['id'],
+            'expected_version': link['version'], 'decision': 'accept'}]}, self.key())
+        with self.runtime.executor.read() as con:
+            queued = json.loads(con.execute("SELECT payload FROM command_work WHERE kind='retry_processing' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        self.assertNotIn('replaces', queued)
+        self.assertNotEqual(queued['expected_version'], retry['expected_version'])
+        result = self.analyze(prompt='5', retry=queued)
+        self.assertNotEqual(result.get('status'), 'superseded')
+        self.assertTrue(result['proposals'])
+        with self.runtime.executor.read() as con:
+            self.assertEqual(self.runtime.understanding.processing_for_source(con, self.source['id'], self.source['revision'])['status'], 'succeeded')
+            self.assertEqual(self.runtime.understanding.get(con, link['id'])['status'], 'applied')
+
     def test_short_names_legal_suffixes_and_unrelated_titles(self):
         self.assertEqual(capture_candidates(self.runtime, self.source['id'], 'Thanks from Example Company')['candidate_ids'], [self.app['id']])
         self.assertEqual(capture_candidates(self.runtime, self.source['id'], 'Engineer application received')['candidate_ids'], [])
@@ -187,13 +211,124 @@ class ReviewContextTest(unittest.TestCase):
         self.assertIn('confirmed', value['properties']['status']['enum'])
         self.assertNotIn('submission_status_confirmed', value['properties']['status']['enum'])
 
-    def test_joined_employer_slug_matches_display_name_without_substrings(self):
+    def test_generic_receipts_retrieve_name_variants_without_role_titles(self):
+        for slug, name, ats in [('northstar1', 'Northstar', 'greenhouse'),
+                                ('riverbend-careers', 'Riverbend', 'ashby'),
+                                ('joincedarworks', 'Cedar Works', 'lever'),
+                                ('jobs-oakgrove-global', 'Oakgrove', 'external'),
+                                ('equipe-munchen', 'München', 'greenhouse')]:
+            with self.subTest(slug=slug):
+                candidate = self.human.command('save_job', {'job_source': {'source': ats,
+                    'source_id': slug, 'employer': slug, 'title': 'Software Engineer II'}}, self.key())
+                text = 'Thank you for applying to ' + name + '! We have received your application.'
+                result = capture_candidates(self.runtime, self.source['id'], text)
+                self.assertEqual(result['candidate_ids'], [candidate['id']])
+                self.assertTrue(result['coverage']['complete'])
+                self.assertEqual(result['retrieval_reasons'][candidate['id']], ['current_employer_partial'])
+                with self.runtime.executor.read() as con:
+                    self.assertIsNone(self.runtime.correspondence.association(con, self.source['id']))
+                    self.assertEqual(self.runtime.applications.get_job(con, candidate['job_id'])['employer'], slug)
+                    self.assertEqual(self.runtime.applications.list_records(con, candidate['id'], 'receipts')['items'], [])
+
+    def test_partial_name_hints_keep_competitors_and_report_candidate_limit(self):
+        matches = []
+        for slug in ['northstar1', 'northstar2', 'northstar-careers', 'northstarplus1', 'join-northstar']:
+            matches.append(self.human.command('save_job', {'job_source': {'source': 'greenhouse',
+                'source_id': slug, 'employer': slug, 'title': 'Engineer'}}, self.key())['id'])
+        # Short overlapping words and entirely unrelated employers stay excluded.
+        for slug, ats in [('careers', 'ashby'), ('ai1', 'greenhouse'), ('unrelated', 'external')]:
+            self.human.command('save_job', {'job_source': {'source': ats,
+                'source_id': slug, 'employer': slug, 'title': 'Engineer'}}, self.key())
+        text = 'Thank you for applying to Northstar!'
+        result = capture_candidates(self.runtime, self.source['id'], text)
+        self.assertEqual(set(result['candidate_ids']), set(matches))
+        self.assertEqual(set(result['retrieval_reasons']), set(matches))
+        self.assertEqual(result['retrieval']['matched'], len(matches))
+        self.assertEqual(capture_candidates(self.runtime, self.source['id'],
+            'Thanks from NorthstarPlusPlus. Opportunities in AI.')['candidate_ids'], [])
+        bounded = capture_candidates(self.runtime, self.source['id'], text, limit=2)
+        self.assertEqual(len(bounded['candidate_ids']), 2)
+        self.assertFalse(bounded['coverage']['complete'])
+        self.assertFalse(bounded['retrieval']['complete'])
+        self.assertEqual(bounded['retrieval']['matched'], len(matches))
+        self.assertEqual(len(bounded['retrieval_reasons']), 2)
+        self.assertEqual(set(capture_candidates(self.runtime, self.source['id'],
+            'Your application was received.', thread_text=text)['candidate_ids']), set(matches))
+        scan_bounded = capture_candidates(self.runtime, self.source['id'], text, limit=2, scan_limit=2)
+        self.assertFalse(scan_bounded['retrieval']['complete'])
+        self.assertEqual(scan_bounded['retrieval']['scanned'], 2)
+
+    def test_refresh_recovers_empty_candidate_receipt_without_accepting_it(self):
+        for slug, name, ats in [('northstar1', 'Northstar', 'greenhouse'),
+                                ('riverbend-careers', 'Riverbend', 'ashby')]:
+            with self.subTest(slug=slug):
+                self.app = self.human.command('save_job', {'job_source': {'source': ats,
+                    'source_id': slug, 'employer': slug, 'title': 'Software Engineer II'}}, self.key())
+                self.source = self.message('Thank you for applying to ' + name + '! We have received your application.',
+                                           thread=slug)
+                # Reproduce a persisted pre-fix analysis with no candidate IDs.
+                with patch('job_search.application_mail.capture_candidates', return_value={
+                        'candidate_ids': [], 'coverage': {'complete': True}}):
+                    old = self.analyze(retrieve=True, transform=lambda c: self.output(c, target=False))['proposals'][0]
+                self.assertEqual(self.context.candidates, ())
+                self.assertIn('needs_target', old['blockers'])
+                retry = self.queue_refresh('email:' + self.source['id'])
+                result = self.analyze(retrieve=True, retry=retry)
+                self.assertEqual([c['id'] for c in self.context.candidates], [self.app['id']])
+                self.assertEqual(self.context.candidates[0]['job']['employer'], slug)
+                payload = model_payload(self.context)
+                self.assertEqual(payload['candidate_retrieval']['method'], 'lexical_recall_v2')
+                self.assertEqual(payload['candidates'][0]['retrieval_reasons'], ['current_employer_partial'])
+                link = next(p for p in result['proposals'] if p['operation'] == 'link_message')
+                receipt = next(p for p in result['proposals'] if p['operation'] == 'record_submission_receipt')
+                self.assertEqual(receipt['application_id'], self.app['id'])
+                self.assertEqual(receipt['dependencies'], [link['id']])
+                self.assertNotIn('submission_id', receipt['input'])
+                self.assertTrue(all(p['status'] == 'pending' and not p['blockers'] for p in result['proposals']))
+                with self.runtime.executor.read() as con:
+                    descriptor = self.runtime.understanding.get_analysis(con, result['analysis_id'])['descriptor']
+                    self.assertEqual(descriptor['context']['candidate_retrieval'], payload['candidate_retrieval'])
+                    self.assertEqual(descriptor['candidates'][0]['retrieval_reasons'], ['current_employer_partial'])
+                    self.assertEqual(self.runtime.understanding.get(con, old['id'])['status'], 'superseded')
+                    self.assertIsNone(self.runtime.correspondence.association(con, self.source['id']))
+                    self.assertEqual(self.runtime.applications.list_records(con, self.app['id'], 'receipts')['items'], [])
+
+    def test_whole_name_ranks_above_partial_overlap_without_excluding_it(self):
         candidate = self.human.command('save_job', {'job_source': {'source': 'fixture', 'source_id': 'joined-role',
             'employer': 'examplerobotics', 'title': 'Developer'}}, self.key())
-        self.assertEqual(capture_candidates(self.runtime, self.source['id'],
-            'Thank you for applying to Example Robotics!')['candidate_ids'], [candidate['id']])
-        self.assertEqual(capture_candidates(self.runtime, self.source['id'],
-            'Thank you for applying to Example RoboticsPlus!')['candidate_ids'], [])
+        result = capture_candidates(self.runtime, self.source['id'], 'Thank you for applying to Example Robotics!')
+        self.assertEqual(result['candidate_ids'], [candidate['id'], self.app['id']])
+        self.assertEqual(result['retrieval_reasons'][candidate['id']], ['current_employer_name'])
+        self.assertEqual(result['retrieval_reasons'][self.app['id']], ['current_employer_partial'])
+
+    def test_model_can_abstain_with_one_partial_candidate(self):
+        self.app = self.human.command('save_job', {'job_source': {'source': 'ashby',
+            'source_id': 'ambiguous', 'employer': 'join-northstar', 'title': 'Engineer'}}, self.key())
+        self.source = self.message('Your application to Otherco was received. Our newsletter mentions Northstar.', thread='ambiguous')
+        result = self.analyze(retrieve=True, transform=lambda c: self.output(c, target=False))
+        self.assertEqual([c['id'] for c in self.context.candidates], [self.app['id']])
+        self.assertEqual(len(result['proposals']), 1)
+        self.assertIsNone(result['proposals'][0]['application_id'])
+        self.assertIn('unresolved_association', result['proposals'][0]['blockers'])
+
+    def test_truncated_retrieval_is_visible_to_model_and_blocks_projection(self):
+        for index in range(21):
+            self.app = self.human.command('save_job', {'job_source': {'source': 'ashby',
+                'source_id': 'crowded-' + str(index), 'employer': 'join-northstar-' + str(index),
+                'title': 'Engineer'}}, self.key())
+        self.source = self.message('Thank you for applying to Northstar.', thread='crowded')
+        def output(context):
+            value = self.output(context)
+            value['facts'][0]['target_id'] = context.candidates[0]['id']
+            return value
+        result = self.analyze(retrieve=True, transform=output)
+        payload = model_payload(self.context)
+        self.assertEqual(len(payload['candidates']), 20)
+        self.assertEqual(payload['candidate_retrieval']['matched'], 21)
+        self.assertFalse(payload['candidate_retrieval']['complete'])
+        self.assertFalse(payload['coverage']['complete'])
+        self.assertTrue(result['proposals'])
+        self.assertTrue(all('incomplete_evidence_coverage' in p['blockers'] for p in result['proposals']))
 
 
 if __name__ == '__main__':

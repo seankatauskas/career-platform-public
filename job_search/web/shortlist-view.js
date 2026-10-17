@@ -74,8 +74,10 @@ function renderListGeneration(value) {
     interrupted: 'Generation interrupted', dispatch_failed: 'Generation could not start'};
   root.hidden = !active;
   root.classList.toggle('is-running', active && !value.can_resume);
+  const phaseLabel = phases[value.phase] || 'Generating your list';
+  const resumeLabel = value.phase === 'interrupted' ? 'Resume to continue.' : 'Resume to retry.';
   if (active) root.append(node('span', '', value.can_resume
-    ? 'Generation paused. Resume to continue.' : `${phases[value.phase] || 'Generating your list'}…`));
+    ? `${phaseLabel}. ${resumeLabel}` : `${phaseLabel}…`));
   if (justFinished) loadSavedShortlists();
   clearTimeout(listGenerationTimer);
   if (active && !value.can_resume) listGenerationTimer = setTimeout(loadListGeneration, 10000);

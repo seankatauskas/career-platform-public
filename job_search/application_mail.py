@@ -279,14 +279,25 @@ def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200, t
     with runtime.executor.read() as con:
         page = runtime.applications.list_applications(con, limit=scan_limit)
         associated = runtime.correspondence.association(con, message_id)
-        ranked = []
+        ranked, retrieval_reasons, recorded_sources = [], {}, set()
         import re
-        normalized = text.casefold()
-        history = thread_text.casefold()
+        import unicodedata
+        def folded(value):
+            return "".join(c for c in unicodedata.normalize("NFKD", value.casefold())
+                           if not unicodedata.combining(c))
+        normalized, history = folded(text), folded(thread_text)
+        # Whole email words can occur anywhere in a compact employer/board name,
+        # or contain that name. This deliberately favors recall, including false
+        # positives that the analyzer must reject from the complete email.
+        current_words = {word for word in re.findall(r"[^\W_]+", normalized) if len(word) >= 4}
+        thread_words = {word for word in re.findall(r"[^\W_]+", history) if len(word) >= 4}
+        def employer_partial(name, words):
+            compact = "".join(re.findall(r"[^\W_]+", folded(name)))
+            return len(compact) >= 4 and any(word in compact or compact in word for word in words)
         def employer_matches(name, body):
             # Legal suffixes and punctuation vary between the catalog and ATS.
             # Whole tokens also allow short names without substring collisions.
-            tokens = re.findall(r"[a-z0-9]+", name.casefold())
+            tokens = re.findall(r"[^\W_]+", folded(name))
             while tokens and tokens[-1] in {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation"}:
                 tokens.pop()
             if not tokens or len("".join(tokens)) < 3:
@@ -294,20 +305,29 @@ def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200, t
             # Slugs can join display-name words (examplerobotics versus
             # Example Robotics). Permit separators between letters, retaining
             # whole-name boundaries so Suno never matches Sunology.
-            return bool(re.search(r"\b" + r"[^a-z0-9]*".join(map(re.escape, "".join(tokens))) + r"\b", body))
+            return bool(re.search(r"\b" + r"[\W_]*".join(map(re.escape, "".join(tokens))) + r"\b", body))
         for app in page["items"]:
             job = runtime.applications.get_job(con, app["job_id"])
+            recorded_sources.update((s["source"], s["source_id"]) for s in job.get("sources", []))
             employer = str(job.get("employer") or (job.get("recorded_snapshot") or {}).get("employer") or "")
             employer_match = employer_matches(employer, normalized)
-            title_match = bool(job.get("title")) and str(job["title"]).casefold() in normalized
-            source_match = any(str(s["source_id"]).casefold() in normalized for s in job.get("sources", []) if len(str(s["source_id"])) >= 6)
+            title_match = bool(job.get("title")) and folded(str(job["title"])) in normalized
+            source_match = any(folded(str(s["source_id"])) in normalized for s in job.get("sources", []) if len(str(s["source_id"])) >= 6)
             # ATS employer fields can be board slugs (for example acmecareers).
             # A complete, multiword role title is a retrieval hint, not proof of
             # employer identity. Let the analyzer inspect plausible candidates
             # instead of making its target enum empty before it sees the email.
             title_hint = title_match and len(re.findall(r"[a-z0-9]+", str(job.get("title") or "").casefold())) >= 3
-            score = (8 * source_match + 4 * employer_match + int(title_hint)
-                     + 2 * employer_matches(employer, history) + int(app["id"] in thread_application_ids))
+            history_match = employer_matches(employer, history)
+            hints = [("current_posting_id", source_match, 8),
+                     ("current_employer_name", employer_match, 4),
+                     ("current_employer_partial", not employer_match and employer_partial(employer, current_words), 2),
+                     ("current_role_title", title_hint, 1),
+                     ("thread_employer_name", history_match, 2),
+                     ("thread_employer_partial", not history_match and employer_partial(employer, thread_words), 1),
+                     ("reviewed_thread_link", app["id"] in thread_application_ids, 1)]
+            retrieval_reasons[app["id"]] = [reason for reason, matched, weight in hints if matched]
+            score = sum(weight for reason, matched, weight in hints if matched)
             ranked.append((score, app["id"]))
         ranked.sort(key=lambda item: (-item[0], item[1]))
         # No match is useful context. Arbitrary applications add no evidence and
@@ -315,10 +335,32 @@ def capture_candidates(runtime, message_id, text, *, limit=20, scan_limit=200, t
         matches = [identity for score, identity in ranked if score]
         # Reviewed thread links are retrieval hints, never automatic associations.
         matches += [identity for identity in dict.fromkeys(thread_application_ids) if identity not in matches]
+        for identity in dict.fromkeys(thread_application_ids):
+            retrieval_reasons.setdefault(identity, ["reviewed_thread_link"])
         if associated:
             matches = [associated["application_id"]] + [identity for identity in matches if identity != associated["application_id"]]
-    return {"candidate_ids": matches[:limit], "coverage": {"complete": not page["truncated"] and len(matches) <= limit,
-            "scanned": len(page["items"]), "scan_limit": scan_limit, "selected": min(limit, len(matches))}}
+            retrieval_reasons.setdefault(associated["application_id"], []).append("reviewed_message_link")
+    coverage = {"complete": not page["truncated"] and len(matches) <= limit,
+                "scanned": len(page["items"]), "scan_limit": scan_limit, "selected": min(limit, len(matches))}
+    catalog_result = {"candidates": [], "retrieval": {"method": "not_configured", "complete": True}}
+    catalog = getattr(runtime, "job_catalog", None)
+    if catalog is not None:
+        from .contracts import ContractError
+        import sqlite3
+        try:
+            if not hasattr(catalog, "understanding_candidates"):
+                raise ContractError("catalog does not support understanding retrieval")
+            catalog_result = catalog.understanding_candidates(text, limit=limit, excluded_sources=recorded_sources)
+            if page["truncated"]:
+                for candidate in catalog_result["candidates"]:
+                    candidate.update(application_recorded=None, browser_submission_observed=None)
+        except (ContractError, sqlite3.Error, OSError):
+            catalog_result = {"candidates": [], "retrieval": {"method": "catalog_lexical_v1", "complete": False, "reason": "catalog_unavailable"}}
+    return {"candidate_ids": matches[:limit], "coverage": coverage,
+            "catalog_candidates": catalog_result["candidates"], "catalog_retrieval": catalog_result["retrieval"],
+            "retrieval": {"method": "lexical_recall_v2", "scope": "existing_applications",
+                          "limit": limit, "matched": len(matches), **coverage},
+            "retrieval_reasons": {identity: retrieval_reasons[identity] for identity in matches[:limit]}}
 
 
 def build_application_mail_handlers(runtime, archive, account_id, analyzer, model_version, *, operational_db=None):

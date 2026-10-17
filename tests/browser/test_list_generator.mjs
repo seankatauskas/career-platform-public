@@ -37,6 +37,16 @@ try {
   await page.route('**/api/v1/job-reviews/generation-status', route => route.fulfill({json:{...status, phase:'failed', can_resume:true}}));
   await page.locator('#refresh-curated').click();
   await page.locator('#resume-list-generation').waitFor({state:'visible'});
+  await page.locator('#list-generation-status').getByText('Generation failed. Resume to retry.', {exact:true}).waitFor();
+  for (const [phase, message] of [
+    ['interrupted', 'Generation interrupted. Resume to continue.'],
+    ['dispatch_failed', 'Generation could not start. Resume to retry.'],
+  ]) {
+    await page.route('**/api/v1/job-reviews/generation-status', route => route.fulfill({json:{...status, phase, can_resume:true}}));
+    await page.locator('#refresh-curated').click();
+    await page.locator('#list-generation-status').getByText(message, {exact:true}).waitFor();
+    assert.equal(await page.locator('#resume-list-generation').isVisible(), true);
+  }
   const resumed = page.waitForRequest(request => request.url().endsWith('/job-reviews/generation-resume'));
   await page.locator('#resume-list-generation').click();
   assert.equal((await resumed).postDataJSON().review_id, status.review_id);

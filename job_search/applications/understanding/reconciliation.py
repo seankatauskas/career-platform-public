@@ -1,5 +1,14 @@
 """Conservative interpretation rules shared by projection and backlog reconciliation."""
 import re
+from .recipes import TERMINAL_OUTCOMES
+
+
+def non_actionable_outcome(content):
+    if content.get("kind") != "outcome":
+        return False
+    value = content.get("value")
+    outcome = value.get("outcome") if isinstance(value, dict) else value
+    return not isinstance(outcome, str) or outcome not in TERMINAL_OUTCOMES
 
 
 def non_actionable_contact(content):
@@ -41,6 +50,6 @@ def non_actionable_request(content):
 def only_nonactionable(findings):
     business = [f for f in findings if f['category'] in {'facts', 'requests'}]
     return bool(business) and all(
-        non_actionable_contact(f['content']) or verification(f['content']) or non_actionable_request(f['content'])
+        non_actionable_contact(f['content']) or verification(f['content']) or non_actionable_request(f['content']) or non_actionable_outcome(f['content'])
         or f['category'] == 'requests' and (f['content'].get('requirement') != 'required' or f['content'].get('responsible_party') != 'applicant')
         for f in business)

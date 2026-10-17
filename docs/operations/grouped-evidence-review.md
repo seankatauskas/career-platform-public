@@ -1,14 +1,33 @@
 # Grouped evidence review and backlog migration
 
 Review presents one card per email or paired-browser application attempt that still
-needs attention. Related proposals and processing problems share that card.
+needs a decision. Processing issues appear separately in **System attention**, with
+links between an issue and any pending updates from the same source.
 Automatically recorded evidence creates no pending card. External actions retain
 separate exact approvals. One email can contain several independently selectable
 changes; accepting a card is never an implicit blanket approval.
 
-The card shows source excerpts, current progress, proposed fields, prerequisites,
-and closure consequences. Read the saved email once from Source evidence. Select
-only the changes to accept, or reject individual changes. Counts come from the
+Common email updates show a result and one primary action: **Record receipt**,
+**Add task**, **Record interview**, or **Record rejection**, for example. Accepting
+an update includes its pending email-link prerequisite in the same transaction.
+The card explicitly says that it also attaches the email. No separate link click
+or checkbox is needed. **Review details** retains the individual proposal inputs
+and versions, and **View email** opens the preserved source.
+
+Independent updates keep separate actions. Dismissing an update rejects its
+included link only when no other pending proposal needs that link. It never
+records an employer rejection or deletes the email. Closure consequences remain
+visible before approval. Unresolved targets, blocked or unknown operations, and
+dependencies on another business decision keep the detailed review controls.
+Selected detailed changes also include eligible email links automatically.
+
+Each card submits explicit proposal versions and the complete group digest.
+Changed sources, proposals, associations, or current state invalidate the preview
+atomically; a lost response retries the same command key. Business approval still
+uses the existing `review_changes` workflow and separate audit entries. Older
+callers may continue using explicit decision bundles without a group preview.
+When supplying a preview, both `group_id` and `expected_digest` are required and
+every decision must belong to that group. Counts come from the
 complete bounded inventory, and pagination keeps evidence groups intact. Existing
 proposal links locate the containing card, including beyond the first page.
 
@@ -39,10 +58,25 @@ marketing, verification codes, completed portal steps, employer response estimat
 and actual applicant requests. Projection guards suppress narrowly recognizable
 non-actionable findings while retaining the analysis. Wrong targets, missing
 records, unsupported mappings, and incomplete evidence remain visible blockers.
-Use **Correct application or receipt scope** to replace pending proposals with a
-reason; the replacements still require approval. Previously accepted associations
-use the existing association-correction workflow so accepted consequences are
-included in its preview.
+Unresolved application identity opens **Which role matches this email?** with no
+preselected application. Matching candidates appear first; search includes paginated
+tracked applications and matches employer, title, and location. **None of these**
+opens the existing catalog/unlisted-role workflow when no application is linked.
+**Change application** opens the same picker on a proposed update. Search and
+selection survive rerenders and refreshes. **Continue** records the user's selection
+as the correction reason and prepares replacement proposals; it accepts no update.
+The revised card shows the selected application and resulting action for approval.
+**Receipt options** retains the explicit choice to remove attempt-specific links.
+Previously accepted associations cannot be moved through this picker: the UI explains
+that association correction must review earlier consequences.
+
+The navigation badge and application notices count decision groups, excluding
+processing-only evidence. System attention keeps exact-source retry and manual
+resolution controls. **Retry processing** needs no written reason; **Resolve without
+retrying** requires a disposition and permits an optional explanation. Neither
+accepts application changes. Technical diagnostics and earlier attempts remain
+available in disclosures/history. A lost response freezes the submitted selection
+and reuses the same request/key; stale reviews require refresh while retaining choices.
 
 A validation failure can queue at most two additional automatic attempts per
 source revision and model/prompt version. Each retry preserves the earlier attempt
@@ -164,13 +198,38 @@ history after workers finish; do not claim success from queueing alone.
 The card's **Refresh analysis** action uses the same version-checked workflow.
 Technical preparation failures no longer display the blanket “Needs clarification”
 label. Missing application identity and time information use specific questions.
-The broader interaction redesign remains a [proposal](../review-interaction-design.md).
+The common one-click path is implemented; the remaining interaction work is
+tracked in [review interaction design](../review-interaction-design.md).
+
+### Create an application for an unlisted role
+
+Unassigned incoming-email cards offer **Track an unlisted role**. A unique employer
+and role in current authored text can prefill the form; ATS sender addresses and
+quoted history do not identify a role. When wording is unclear, read the email,
+enter its employer and role, and choose **Check for existing role**.
+
+Creation is suggested only after complete checks of tracked applications and the
+jobs catalog, including closed postings. Possible matches remain choices to review;
+they are never merged based on employer/title similarity. Missing catalog or source
+coverage keeps creation unavailable. This is conservative identity matching with a
+human decision, not a calibrated model-confidence claim.
+
+**Create application record** binds the displayed source-group version, employer,
+role, and matching preview. The command rechecks under the owner transaction and
+uses Applications' stable discovery identity plus Correspondence's reviewed link.
+It creates a **Tracking** application and attaches the email. Unresolved proposals
+are replaced with attributed proposals for that application; receipts without an
+attempt become application-receipt proposals. Those facts, tasks, outcomes, and
+processing problems remain pending. Creation never completes an obligation or
+authorizes an external action. Changed previews fail atomically; an uncertain
+response retries the same receipt-backed command.
 
 ### Checks
 
 ```sh
 uv run python -m unittest tests.test_grouped_evidence_review tests.test_grouped_review_semantics
 uv run python -m tests.test_review_context_refresh
+uv run python -m tests.test_review_bundles
 uv run python -m unittest discover -s tests -p 'test_redesign*.py'
 uv run python -m unittest discover -s tests -p 'test_owner*.py'
 node tests/browser/test_owner_review_view.mjs

@@ -32,6 +32,7 @@ class Model(http.server.BaseHTTPRequestHandler):
   else:
    item={'type':'message','id':'msg_probe','role':'assistant','status':'completed','content':[{'type':'output_text','text':'done','annotations':[]}]}
   events=[{'type':'response.output_item.done','output_index':0,'item':item},
+   {'type':'response.metadata','metadata':{'probe':True}},
    {'type':'response.completed','response':{'id':'resp_probe','status':'completed','output':[item],'usage':{'input_tokens':1,'output_tokens':1,'total_tokens':2}}}]
   body=''.join('data: '+json.dumps(event)+'\n\n' for event in events).encode()
   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
@@ -82,6 +83,7 @@ def host_runtime_probe(image):
             item = {'type': 'message', 'id': 'msg_host_probe', 'role': 'assistant', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'done', 'annotations': []}]}
         events = [{'type': 'response.output_item.done', 'output_index': 0, 'item': item},
+                  {'type': 'response.metadata', 'metadata': {'probe': True}},
                   {'type': 'response.completed', 'response': {'id': 'resp_host_probe', 'status': 'completed',
                    'output': [item], 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}]
         return 200, ''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode()

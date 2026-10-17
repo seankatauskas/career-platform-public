@@ -53,6 +53,24 @@ def save(tx, value):
     return app
 
 
+def capture_catalog(tx, app, job, snapshot):
+    """Retain canonical metadata once, with evidence and lifecycle records intact."""
+    from job_search.contracts import JobSnapshot
+    JobSnapshot(**snapshot).validate()
+    if job["sources"] != [{"source": snapshot["ats"], "source_id": snapshot["job_id"]}]:
+        db.fail("invalid_input", "Catalog snapshot does not match the application's source")
+    before = {"application": app, "job": job}
+    tx.connection.execute("INSERT INTO app_job_snapshots VALUES(?,?,?,?)",
+        (job["id"], db.encode(snapshot), db.encode({}), tx.now))
+    tx.connection.execute("UPDATE app_jobs SET title=?,employer=? WHERE id=?",
+        (snapshot["title"], snapshot["employer"], job["id"]))
+    # Metadata capture does not advance the pursuit/disposition version or its
+    # activity timestamp. Existing submission/review evidence still targets it.
+    after = {"application": db.application(tx.connection, app["id"]), "snapshot": snapshot}
+    tx.record("applications", app["id"], "capture_catalog_snapshot", before, after)
+    return {"application_id": app["id"], "status": "captured", "title": snapshot["title"], "employer": snapshot["employer"]}
+
+
 def note(tx, value):
     db.nonempty(value.text, "text", 100000)
     return db.insert(tx, "notes", ensure(tx, value), "active", {"text": value.text}, "add_note")

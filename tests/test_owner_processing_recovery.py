@@ -62,6 +62,81 @@ class ProcessingRecoveryTest(unittest.TestCase):
     def current(self):
         return self.runtime.queries.dashboard_review(group="processing")["items"]
 
+    def retries(self):
+        with self.runtime.executor.read() as con:
+            return [item["payload"] for item in self.runtime.executor.work_page(con)["items"]
+                    if item["kind"] == "retry_processing"]
+
+    def link(self):
+        app = self.human.command("save_job", {"job_source":{"source":"fixture", "source_id":"role"}}, self.key())
+        value = {"message_id":self.source["id"], "application_id":app["id"]}
+        return self.human.command("link_message", value, self.key()), value
+
+    def test_new_link_retries_failure_once_without_dismissing_it(self):
+        failed = self.failure()
+        _, value = self.link()
+        queued = self.issue()
+        self.assertEqual(queued["status"], "retry_queued")
+        self.assertEqual(queued["analysis_id"], failed["id"])
+        self.assertEqual(len(self.current()), 1)
+        with self.assertRaises(DomainError):
+            self.human.command("link_message", value, self.key())
+        self.assertEqual(self.issue(), queued)
+        self.assertEqual(len(self.retries()), 1)
+        analysis = self.success(retry=self.retries()[0])
+        self.runtime.project_message_analysis(analysis["id"])
+        self.assertEqual(self.issue()["status"], "succeeded")
+        self.assertEqual(self.current(), [])
+
+    def test_new_link_fences_retry_captured_before_identity_was_known(self):
+        self.failure()
+        self.decide("retry_processing")
+        stale = self.retries()[0]
+        self.link()
+        with self.assertRaises(DomainError):
+            self.success(retry=stale)
+        current = next(p for p in self.retries() if p["expected_version"] == self.issue()["version"])
+        self.assertNotEqual(current["expected_version"], stale["expected_version"])
+        self.success(retry=current)
+
+    def test_link_retry_failure_remains_visible_without_another_link_retry(self):
+        self.failure()
+        self.link()
+        failed = self.failure(retry=self.retries()[0], code="invalid_json")
+        self.assertEqual(self.issue()["status"], "open")
+        self.assertEqual(self.issue()["analysis_id"], failed["id"])
+        self.assertEqual(len(self.current()), 1)
+        self.assertEqual(len(self.retries()), 1)
+
+    def test_delayed_projection_cannot_clear_recovery_queued_by_link(self):
+        analysis = self.success()
+        with patch.object(self.runtime.understanding, "project_requests", side_effect=DomainError("invalid_input", "fixture")):
+            with self.assertRaises(DomainError):
+                self.runtime.project_message_analysis(analysis["id"])
+        self.link()
+        before = self.issue()
+        self.assertEqual(self.runtime.project_message_analysis(analysis["id"])["status"], "superseded")
+        self.assertEqual(self.issue(), before)
+        self.assertEqual(before["status"], "retry_queued")
+
+    def test_link_preserves_resolved_successful_and_in_progress_processing(self):
+        for state in ("resolved_manually", "succeeded", "projection_pending"):
+            with self.subTest(state=state):
+                self.source = self.runtime.command(CommandContext(Principal("mail", "worker", {"record_message"}), self.key(), "inferred"), "record_message", {
+                    "account_id":"allowed", "provider_message_id":state, "source_version":1,
+                    "direction":"incoming", "authored_text":"exact source 1", "archive_ref":"archive"})
+                if state == "resolved_manually":
+                    self.failure()
+                    self.decide("resolve_processing")
+                else:
+                    analysis = self.success()
+                    if state == "succeeded":
+                        self.runtime.project_message_analysis(analysis["id"])
+                before = self.issue()
+                self.link()
+                self.assertEqual(self.issue(), before)
+        self.assertEqual(self.retries(), [])
+
     def test_processing_review_uses_current_links_not_matching_candidates(self):
         apps = [self.human.command("save_job", {"job_source":{"source":"fixture", "source_id":str(i)}}, self.key()) for i in range(3)]
         self.worker("record_analysis", lambda tx:self.runtime.understanding.record_source_failure(tx,
@@ -73,6 +148,7 @@ class ProcessingRecoveryTest(unittest.TestCase):
         self.assertTrue(all(scoped(app) == [] for app in apps))
         # A reviewed link can target an app absent from the model's candidates.
         link = self.human.command("link_message", {"message_id":self.source["id"], "application_id":apps[2]["id"]}, self.key())
+        old_retry = self.retries()[0]
         self.assertEqual(self.current()[0]["application_id"], apps[2]["id"])
         self.assertEqual(len(scoped(apps[2])), 1)
         self.assertEqual(scoped(apps[0]), [])
@@ -83,6 +159,10 @@ class ProcessingRecoveryTest(unittest.TestCase):
         self.assertEqual(scoped(apps[2]), [])
         self.assertEqual(len(scoped(apps[0])), 1)
         self.assertEqual(self.current()[0]["processing"]["application_id"], apps[0]["id"])
+        self.assertEqual(self.issue()["status"], "retry_queued")
+        self.assertGreater(self.issue()["version"], old_retry["expected_version"])
+        with self.assertRaises(DomainError):
+            self.success(retry=old_retry)
 
     def test_linked_processing_pagination_skips_unlinked_issues(self):
         app = self.human.command("save_job", {"job_source":{"source":"fixture", "source_id":"role"}}, self.key())

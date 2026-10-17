@@ -176,6 +176,34 @@ class LocalJobCatalog:
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
+    def understanding_candidates(self, text, *, limit=20, excluded_sources=()):
+        from .mail.catalog_candidates import catalog_candidates
+        return catalog_candidates(self, text, limit=limit, excluded_sources=excluded_sources)
+
+    def review_role_matches(self, employer: str, title: str) -> Mapping[str, Any]:
+        """Complete absence check for reviewed discovery, including closed roles."""
+        from .mail.discovery import related_employer, related_role
+        if not self.jobs_db.is_file():
+            raise ContractError('normalized jobs database is unavailable')
+        with closing(sqlite3.connect(self.jobs_db.as_uri() + '?mode=ro', uri=True, timeout=10)) as con:
+            con.row_factory = sqlite3.Row
+            con.execute('BEGIN')
+            columns = {row[1] for row in con.execute('PRAGMA table_info(jobs)')}
+            if not {'ats', 'id', 'company', 'title'}.issubset(columns):
+                raise ContractError('normalized jobs schema is incompatible')
+            companies = [row[0] for row in con.execute('SELECT DISTINCT company FROM jobs ORDER BY company')
+                         if related_employer(employer, row[0] or '')]
+            matches = []
+            fields = ','.join(name for name in ('ats', 'id', 'company', 'title', 'jobUrl', 'closed_at') if name in columns)
+            for start in range(0, len(companies), 200):
+                batch = companies[start:start + 200]
+                for row in con.execute(f'SELECT {fields} FROM jobs WHERE company IN ({",".join("?" for _ in batch)}) ORDER BY ats,id', batch):
+                    if related_role(title, row['title'] or ''):
+                        matches.append(dict(row))
+                        if len(matches) > 20:
+                            return {'items': matches[:20], 'complete': False}
+        return {'items': matches, 'complete': True}
+
     def review_candidates(self, subject: str, body: str, limit: int = 20) -> Sequence[Mapping[str, Any]]:
         """Find email-related postings, including jobs with no application record.
 

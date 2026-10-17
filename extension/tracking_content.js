@@ -48,8 +48,11 @@
   }
   function attempt(sameGesture=false) {
     if(!job) return;
-    snapshotDraft(); flushDraft();
-    const snapshot=JobAnswerCapture.collect(document), signature=JSON.stringify(snapshot);
+    let snapshot=null;
+    try { snapshotDraft(); flushDraft(); snapshot=JobAnswerCapture.collect(document); }
+    catch (_) { snapshot={version:1,fields:[],omitted_fields:1,truncated_values:0}; }
+    // Submission evidence must survive an unreadable form/answer collector.
+    const signature=JSON.stringify(snapshot);
     // A native click is immediately followed by submit; retain only one identical
     // snapshot, but still capture values changed by a site's submit handler.
     if((sameGesture || Date.now()-lastAttemptAt<1500) && signature===lastAttemptSnapshot) return;

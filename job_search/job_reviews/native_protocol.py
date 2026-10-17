@@ -30,6 +30,7 @@ EVENTS = frozenset((
     'response.reasoning_summary_part.added', 'response.reasoning_summary_part.done',
     'response.reasoning_summary_text.delta', 'response.reasoning_summary_text.done',
     'response.reasoning_text.delta', 'response.reasoning_text.done',
+    'response.metadata',
 ))
 
 
@@ -206,6 +207,11 @@ def completion(data):
                 raise gateway.GatewayRejected('native response incomplete', reason='incomplete_stream')
             if event_type not in EVENTS:
                 raise gateway.GatewayRejected('unsupported native event', reason='unsupported_capability')
+            # Subscription responses can include a separate informational metadata
+            # event before completion. Preserve it for Codex, but never interpret
+            # its opaque contents as output, a tool declaration, or completion.
+            if event_type == 'response.metadata' and not isinstance(event.get('metadata'), dict):
+                raise gateway.GatewayRejected('invalid native response metadata')
             response = event.get('response', {})
             if not isinstance(response, dict) or not isinstance(response.get('output', []), list):
                 raise gateway.GatewayRejected('invalid native response')
@@ -312,6 +318,7 @@ def schema_diagnostic(data, error):
                   'invalid reasoning continuation': 'invalid_reasoning',
                   'invalid encrypted reasoning': 'invalid_encrypted_reasoning',
                   'invalid native response': 'invalid_response',
+                  'invalid native response metadata': 'invalid_response_metadata',
                   'invalid native completion': 'invalid_completion',
                   'unapproved native tool': 'unapproved_tool',
                   'unsupported native event': 'unsupported_event',

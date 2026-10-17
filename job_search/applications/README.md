@@ -16,6 +16,11 @@ Use public `get_application`, `get_record`, `list_records`, `stage`,
 `tasks.py` owns completion and snooze; `interviews.py` owns round scheduling and its
 task/reminder consequences; `submissions.py` keeps observations separate from
 accepted attempts. `progress.py` derives the displayed stage from current records.
+`discovery.py` coordinates `create_application_from_review`: a source/version-bound
+human decision creates an exact local discovery identity and reviewed email link
+through the public owners. Other email findings remain pending. Read-only previews
+check existing applications and the injected catalog; no legacy ledger is written.
+Run `python -m tests.test_review_application_discovery` for this workflow.
 Application workflows coordinate corresponding proposal/action invalidation through
 the other owners, and must call those participants in the same outer transaction.
 

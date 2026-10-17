@@ -558,11 +558,13 @@ class AnalyzerTransportTest(unittest.TestCase):
     def test_compact_prompt_retains_complete_email_and_semantic_context(self):
         import json
         from job_search.applications.understanding import SharedAnalyzer
-        text = "🙂 e\u0301\nAuthored message.\nForwarded exact history:\n" + "Long source " * 1000
+        text = "SUBJECT\nApplication to Example\nBODY\n🙂 e\u0301\nAuthored message.\nForwarded exact history:\n" + "Long source " * 1000
         original = source(text)
         job = {"id": "job", "title": "Engineer", "employer": "Example", "sources": [{"source": "fixture", "source_id": "role"}],
                "recorded_snapshot": {"job_url": "https://example.test/role"}, "recorded_snapshots": [{"description": "Copied history " * 20000}]}
-        context = AnalysisInput((original,), ({"id": "app-1", "job": job},), {"application:app-1": 9}, context={
+        retrieval = {"method": "lexical_recall_v2", "limit": 20, "matched": 1, "complete": True}
+        context = AnalysisInput((original,), ({"id": "app-1", "job": job, "retrieval_reasons": ["current_employer_partial"]},), {"application:app-1": 9}, context={
+            "candidate_retrieval": retrieval,
             "closure_previews": {"app-1": {"expected_records": {"task-" + str(i): 1 for i in range(1000)}}},
             "records": {"app-1": {"submissions": [{"id": "submission-1", "status": "confirmed", "occurred_at": "2026-10-09T12:00:00Z", "answers": {"essay": "Private old answer " * 20000}, "documents": [{"text": "Old document"}]}],
                 "interviews": [{"id": "interview-1", "title": "Technical", "status": "scheduled", "start_at": "2026-10-10T12:00:00Z", "timezone": "UTC"}]}},
@@ -578,6 +580,11 @@ class AnalyzerTransportTest(unittest.TestCase):
         self.assertEqual(payload["sources"][0]["text"], text)
         self.assertEqual(payload["sources"][0]["sha256"], original.sha256)
         self.assertEqual(payload["candidates"][0]["job"]["job_url"], "https://example.test/role")
+        self.assertEqual(payload["candidates"][0]["retrieval_reasons"], ["current_employer_partial"])
+        self.assertEqual(payload["candidate_retrieval"], retrieval)
+        self.assertIn("complete current email subject and body", messages[0]["content"])
+        self.assertIn("not evidence that two names identify the same employer", messages[0]["content"])
+        self.assertIn("leave target_id null", messages[0]["content"])
         self.assertEqual(payload["records"]["app-1"]["interviews"][0]["start_at"], "2026-10-10T12:00:00Z")
         self.assertNotIn("answers", payload["records"]["app-1"]["submissions"][0])
         self.assertNotIn("closure_previews", payload)

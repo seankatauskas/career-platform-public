@@ -1,4 +1,7 @@
 /* Review uses the same normalized queue as application notices and navigation. */
+.review-discovery { margin: 20px 0; padding: 16px 0; border-top: 1px solid var(--line); }
+.review-discovery .actions { margin-top: 12px; }
+.review-discovery input { max-width: 100%; }
 #attention .section-heading { margin-bottom: 16px; }
 #review-summary { margin: 0 0 16px; }
 #attention .review-card { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0; gap: 20px; align-items: start; overflow-wrap: anywhere; }
@@ -74,3 +77,26 @@
 .review-target label { display: grid; gap: .3rem; }
 .review-target textarea, .review-target select { width: 100%; max-width: 100%; }
 .browser-recording-preference { margin-bottom: 1rem; }
+#attention .review-outcome h4 { margin: 0 0 12px; font-size: 19px; font-weight: 500; letter-spacing: -.02em; }
+#attention .review-outcome .review-evidence { margin-bottom: 12px; }
+#attention .review-outcome .review-result { margin: 0 0 6px; }
+#attention .review-included { margin: 0 0 16px; color: var(--secondary-ink); font-size: 13px; }
+#attention .review-outcome-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+#attention .review-bundle-details { margin: 12px 0 0; font-size: 13px; }
+#attention .review-bundle-details summary { color: var(--secondary-ink); }
+@media (max-width: 600px) {
+  #attention .review-outcome-actions > button { flex: 1 1 140px; min-height: 44px; }
+  #attention .review-outcome { min-width: 0; }
+}
+
+#attention .review-target { margin-top: 20px; }
+#attention .review-target input[type=search] { width: 100%; box-sizing: border-box; }
+#attention .review-target-choices { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+#attention .review-target-option { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+#attention .review-target-option:has(:checked) { border-color: var(--accent); background: var(--subtle); }
+#attention .review-target-option input { width: auto; flex: 0 0 auto; margin: 0; }
+#attention .review-target-selected { margin: 0; font-weight: 500; }
+#attention .owner-processing-section { border-top: 1px solid var(--line); padding-top: 8px; }
+#attention .owner-processing-section .review-card h4 { margin: 0 0 12px; }
+#attention .owner-processing-section .actions { flex-wrap: wrap; }
+#attention .review-target button, #attention .owner-processing-section button { min-height: 44px; }

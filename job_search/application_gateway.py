@@ -41,6 +41,7 @@ class ApplicationGateway:
         if runtime.executor.path.resolve() == operational_ledger.store.db_path.resolve():
             raise ValueError("Application owners and operational state require separate databases")
         self.runtime, self.operational_ledger, self.catalog = runtime, operational_ledger, catalog
+        self.runtime.job_catalog = catalog
         from .attention.owner_briefings import OwnerBriefingService
         if not isinstance(getattr(operational_ledger, '_attention', None), OwnerBriefingService):
             operational_ledger._attention = OwnerBriefingService(operational_ledger, runtime.queries)
@@ -100,8 +101,8 @@ class ApplicationGateway:
                 pass
         return {**app, "application_id": app["id"], "owner_job_id": app["job_id"],
                 "ats": source.get("source", ""), "job_id": source.get("source_id", ""),
-                "title_snapshot": snapshot.get("title") or job.get("title") or posting.get("title") or "Application",
-                "employer_snapshot": snapshot.get("employer") or job.get("employer") or posting.get("company") or "",
+                "title_snapshot": snapshot.get("title") or posting.get("title") or job.get("title") or "Application",
+                "employer_snapshot": snapshot.get("employer") or posting.get("company") or job.get("employer") or "",
                 "company_slug_snapshot": snapshot.get("company_slug") or posting.get("company") or "", "family_id": snapshot.get("family_id") or "",
                 "job_url_snapshot": snapshot.get("job_url") or posting.get("jobUrl") or "", "current_phase": stage["legacy_phase"],
                 "job_metadata_source": "recorded_snapshot" if snapshot else "catalog_and_identity",
@@ -349,6 +350,11 @@ class ApplicationGateway:
                     raise DomainError("invalid_input", "Unsupported grouped review query fields")
                 return True, ReviewService(self.runtime).page(limit=int(args.get("limit", 25)), cursor=args.get("cursor"),
                     application_id=args.get("application_id"), group_id=args.get("group_id"), action_cursor=args.get("action_cursor"))
+            if name == 'discovery-preview':
+                from .applications.discovery import ApplicationDiscovery
+                if set(args) - {'group_id', 'expected_digest', 'employer', 'title'} or not {'group_id', 'expected_digest'} <= set(args):
+                    raise DomainError('invalid_input', 'Invalid application discovery query')
+                return True, ApplicationDiscovery(self.runtime).preview(**args)
             if name == "review-migration-preview":
                 from .applications.review import ReviewService
                 return True, ReviewService(self.runtime).migration_preview()

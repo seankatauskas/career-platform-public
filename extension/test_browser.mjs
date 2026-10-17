@@ -36,7 +36,7 @@ try {
   const certificate = path.join(temporary, 'cert.pem');
   const key = path.join(temporary, 'key.pem');
   const sslConfig = path.join(temporary, 'openssl.cnf');
-  await writeFile(sslConfig, '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=career.fixture-tailnet.ts.net\n[ext]\nsubjectAltName=DNS:career.fixture-tailnet.ts.net,DNS:job-boards.greenhouse.io,DNS:jobs.ashbyhq.com,DNS:jobs.lever.co,DNS:employer.fixture.test\n');
+  await writeFile(sslConfig, '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=career.fixture-tailnet.ts.net\n[ext]\nsubjectAltName=DNS:career.fixture-tailnet.ts.net,DNS:job-boards.greenhouse.io,DNS:boards.greenhouse.io,DNS:jobs.ashbyhq.com,DNS:jobs.lever.co,DNS:employer.fixture.test\n');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-config', sslConfig, '-keyout', key, '-out', certificate], { stdio: 'ignore' });
   const spki = createHash('sha256').update(createPublicKey(await readFile(certificate)).export({ type: 'spki', format: 'der' })).digest('base64');
   const ready = nextLine();
@@ -48,7 +48,7 @@ try {
   });
   fixture.on('exit', (code) => { while (pending.length) pending.shift().reject(new Error(`Fixture exited ${code}: ${stderr}`)); });
   const hosts = await ready;
-  const mappedHosts = ['career.fixture-tailnet.ts.net', 'job-boards.greenhouse.io', 'jobs.ashbyhq.com', 'jobs.lever.co', 'employer.fixture.test'];
+  const mappedHosts = ['career.fixture-tailnet.ts.net', 'job-boards.greenhouse.io', 'boards.greenhouse.io', 'jobs.ashbyhq.com', 'jobs.lever.co', 'employer.fixture.test'];
   context = await chromium.launchPersistentContext(path.join(temporary, 'profile'), {
     channel: 'chromium', headless: true, viewport: { width: 1100, height: 850 },
     args: [
@@ -256,9 +256,10 @@ try {
   await atsPage.goto(confirmationUrl);
   await new Promise(resolve=>setTimeout(resolve,300));
   assert(!(await command({action:'applications'})).applications.some(a=>a.job_id==='4104'));
-  await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4104?fixture=tracking&outcome=redirect');
+  await atsPage.goto('https://job-boards.greenhouse.io/acme/jobs/4104?fixture=tracking&outcome=hosted_redirect');
   await atsPage.locator('#email').fill('sean@example.test');
   await atsPage.locator('#why').fill('Saved before redirect.');
+  await atsPage.locator('#submit').evaluate(e=>e.textContent='Finish'); // Force network fallback; no recognized submit label.
   await waitFor(async()=>Object.values(await worker.evaluate(()=>chrome.storage.local.get(null))).some(v=>v?.job?.job_id==='4104'),'redirect job recognized');
   await atsPage.locator('#submit').click();
   await atsPage.waitForURL(confirmationUrl);
@@ -271,7 +272,7 @@ try {
   await new Promise(resolve=>setTimeout(resolve,300));
   const redirectTimeline=(await command({action:'state',application_id:redirected.application_id})).timeline;
   assert.equal(redirectTimeline.events.filter(e=>e.event_type==='submission_observed').length,1);
-  report.checks.push('Greenhouse full-page confirmation redirect preserves the attempted job; reload deduplicates and direct confirmation visits create no applications.');
+  report.checks.push('Greenhouse hosted POST on boards.greenhouse.io recovers a missed button event and preserves the attempted job through confirmation; reload deduplicates and direct confirmation visits create no applications.');
   const embedded='https://jobs.lever.co/acme/00000000-0000-4000-8000-000000000003?fixture=tracking';
   await atsPage.goto('https://employer.fixture.test/embed?url='+encodeURIComponent(embedded));
   const frame=atsPage.frameLocator('iframe');

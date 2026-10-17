@@ -62,6 +62,15 @@ This patch uses the existing version 1.3 dashboard API and requires no migration
 Reload the unpacked extension and refresh already-open application pages to use it;
 the existing browser connection remains valid.
 
+Version 1.3.4 also recognizes hosted Greenhouse POSTs to `/<board>/jobs/<job_id>`,
+including submissions from `job-boards.greenhouse.io` to `boards.greenhouse.io`.
+The board and posting ID must match the tracked job. A subsequent same-job
+confirmation route acknowledges the retained attempt, including localized pages.
+Opening a confirmation page alone still creates no application. Answer-capture
+failures preserve submission detection and explicitly mark missing answer coverage.
+Reload the unpacked extension and refresh application tabs to activate the fix;
+server deployment alone does not update an installed unpacked extension.
+
 Version 1.3.3 recognizes Greenhouse's embedded confirmation route and embedded
 submission endpoint. A tracked attempt followed by the iframe's visible **Thank
 you for applying** message records **Submitted · awaiting email**, including when

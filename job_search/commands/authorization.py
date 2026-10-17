@@ -4,7 +4,7 @@ from datetime import datetime
 from .context import CommandContext, DomainError
 
 
-HUMAN_DECISIONS = frozenset({"refresh_review_group", "configure_browser_recording", "correct_review_target", "migrate_review_group","review_changes", "authorize_action", "reject_action",
+HUMAN_DECISIONS = frozenset({"repair_catalog_job", "create_application_from_review", "refresh_review_group", "configure_browser_recording", "correct_review_target", "migrate_review_group","review_changes", "authorize_action", "reject_action",
     "retry_processing", "resolve_processing", "revoke_action", "correct_association", "combine_jobs", "delegate_operation", "replace_proposal"})
 BOOKKEEPING = frozenset({"retry_processing_automatically","record_message", "record_browser_observation", "analyze_observation",
     "record_analysis", "project_analysis", "propose_changes", "prepare_reply", "prepare_calendar_change",

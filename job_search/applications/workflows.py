@@ -62,6 +62,23 @@ class ApplicationWorkflows:
             raise DomainError("invalid_input", "Only incoming evidence has an Understanding recovery")
         return getattr(self.understanding, operation)(tx, **value)
 
+    def retry_after_link(self, tx, message_id):
+        """A reviewed identity change supplies new context to a failed analysis.
+
+        Keep the failure visible until its replacement succeeds. A queued retry
+        may already have captured the old identity, so fence it with a new version.
+        """
+        source = self.correspondence.get(tx.connection, message_id)
+        if source["direction"] != "incoming":
+            return
+        issue = self.understanding.processing_for_source(tx.connection, message_id, source["revision"])
+        if (not issue or issue["status"] not in {"open", "retry_queued"}
+                or issue["sha256"] != source["source_sha256"] or issue["failure_code"] == "projection_pending"):
+            return
+        self.understanding.retry_processing_after_link(tx, issue_id=issue["issue_id"],
+            expected_version=issue["version"], expected_analysis_id=issue["analysis_id"],
+            reason="Retry failed email analysis with the application identity supplied by human review")
+
     def check_versions(self, connection, versions):
         for reference, expected in versions.items():
             kind, separator, record_id = reference.partition(":")
@@ -181,7 +198,9 @@ class ApplicationWorkflows:
                 ref.update(owner="correspondence", sha256=source["source_sha256"])
         if operation == "link_message":
             self.applications.get_application(tx.connection,value["application_id"])
-            return self.correspondence.link_message(tx,**value)
+            linked = self.correspondence.link_message(tx,**value)
+            self.retry_after_link(tx, value["message_id"])
+            return linked
         if operation not in INTERNAL_OPERATIONS:
             raise DomainError("invalid_input", "Proposal does not name a reviewable internal operation")
         if operation == "close_application":
@@ -372,4 +391,5 @@ class ApplicationWorkflows:
                 application_id=target["id"],evidence=proposal["evidence"],blockers=blockers,
                 expected_versions={"application:"+target["id"]:target["version"],"association:"+association["id"]:association["version"]},
                 lineage_key=digest({"correction":value["preview_digest"],"proposal":proposal["id"],"target":target["id"]})))
+        self.retry_after_link(tx, association["message_id"])
         return {"association":association,"correction":corrected,"proposals":replacements}

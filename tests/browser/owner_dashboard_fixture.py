@@ -22,7 +22,7 @@ def main():
     runtime = ApplicationRuntime(args.state_dir / 'owners.db')
     human = HumanApplicationAdapter(runtime, 'fixture-owner')
     application = human.command('save_job', {'job_source': {'source': 'greenhouse', 'source_id': '12345',
-        'employer': 'Example Labs', 'title': 'Platform Engineer'}}, 'save')
+        'employer': 'example-labs', 'title': 'Job Application for Platform Engineer at Example Labs'}}, 'save')
     second = human.command('save_job', {'job_source': {'source': 'fixture', 'source_id': 'second',
         'employer': 'Other Company', 'title': 'Product Engineer'}}, 'second')
     human.command('add_note', {'application_id': application['id'], 'text': 'Discuss the platform team.'}, 'note')
@@ -55,7 +55,7 @@ def main():
                 return {**super().get_job(ats, '12345'), 'id': job_id, 'title': 'Another Engineer',
                     'company': 'Shortlist Company', 'company_slug': 'shortlist-company',
                     'jobUrl': 'https://job-boards.greenhouse.io/shortlist-company/jobs/67890'}
-            return super().get_job(ats, job_id)
+            return {**super().get_job(ats, job_id), 'title': 'Platform Engineer', 'company': 'Example Labs'}
         def posting_summaries(self, identities):
             return {identity: {'ats': identity[0], 'posted_at': '2026-09-15T12:00:00Z'}
                     for identity in identities if identity == ('greenhouse', '12345')}

@@ -18,6 +18,22 @@ SCHEMA_MIGRATIONS = db.SCHEMA_MIGRATIONS
 
 
 class ApplicationOperations:
+    def catalog_capture_target(self, connection, application_id):
+        app = db.application(connection, application_id)
+        row = connection.execute("SELECT data FROM app_observations WHERE application_id=? ORDER BY rowid LIMIT 1", (app["id"],)).fetchone()
+        source = json.loads(row[0]).get("source", {}) if row else {}
+        return {"application": app, "job": self.get_job(connection, app["job_id"]),
+                "page_url": source.get("page_url") if source.get("adapter") == "paired_extension_v1" else None}
+
+    def capture_catalog_snapshot(self, tx, application_id, snapshot):
+        """Called only with a server-resolved catalog snapshot, never browser fields."""
+        with tx.scope("applications"):
+            target = self.catalog_capture_target(tx.connection, application_id)
+            job = target["job"]
+            if job["recorded_snapshots"] or len(job["sources"]) != 1:
+                return {"application_id": application_id, "status": "preserved"}
+            return identity.capture_catalog(tx, target["application"], job, snapshot)
+
     def ensure_application(self, tx, value):
         """Create a targeted observation/proposal container without recording a save."""
         with tx.scope("applications"):

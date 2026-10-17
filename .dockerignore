@@ -87,6 +87,8 @@ job_search/mail/*
 !job_search/mail/attachment_worker.py
 !job_search/mail/attachments.py
 !job_search/mail/context.py
+!job_search/mail/catalog_candidates.py
+!job_search/mail/discovery.py
 !job_search/mail/classification_review.py
 !job_search/mail/evaluation.py
 !job_search/mail/model.py
@@ -388,6 +390,7 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/applications/assessments.py
 !job_search/applications/contracts.py
 !job_search/applications/identity.py
+!job_search/applications/discovery.py
 !job_search/applications/importing.py
 !job_search/applications/interviews.py
 !job_search/applications/offers.py
@@ -428,6 +431,7 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/application_preparation.py
 !job_search/application_agent_tools.py
 !job_search/application_extension.py
+!job_search/application_catalog.py
 
 # Application ownership production composition.
 !job_search/application_agent_host.py

@@ -81,6 +81,34 @@ class ParityProtocolTests(unittest.TestCase):
         self.assertEqual(final['output'][0], call())
         self.assertEqual(final['usage']['input_tokens_details']['cached_tokens'], 50)
 
+    def test_response_metadata_preserves_stream_without_becoming_output(self):
+        events = [json.loads(part[6:]) for part in stream().decode().strip().split('\n\n')]
+        metadata = {'type': 'response.metadata', 'sequence_number': 88,
+                    'response_id': 'resp_1', 'metadata': {'opaque': {'nested': [True, None, 1]},
+                    'output': [{'type': 'web_search_call'}]}}
+        events.insert(-1, metadata)
+        raw = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events).encode()
+        self.assertIs(protocol.validate_response(raw), raw)
+        self.assertEqual(protocol.completion(raw)['output'], [call()])
+        self.assertEqual(protocol.completion(raw)['usage']['input_tokens'], 100)
+
+    def test_metadata_cannot_replace_completion_or_relax_output_validation(self):
+        metadata = {'type': 'response.metadata', 'metadata': {}}
+        encoded = ('data: ' + json.dumps(metadata) + '\n\n').encode()
+        with self.assertRaises(GatewayRejected):
+            protocol.validate_response(encoded)
+        with self.assertRaises(GatewayRejected):
+            protocol.validate_response(stream() + encoded)
+        with self.assertRaises(GatewayRejected):
+            protocol.validate_response(encoded + stream(dict(call(), namespace='collaboration', name='spawn_agent')))
+        with self.assertRaises(GatewayRejected):
+            protocol.validate_response(encoded + stream(done_item=dict(call(), input='changed')))
+        for value in (None, [], 'not-an-object', {'bad': float('nan')}):
+            with self.subTest(metadata=value), self.assertRaises(GatewayRejected):
+                protocol.validate_response(('data: ' + json.dumps(dict(metadata, metadata=value)) + '\n\n').encode() + stream())
+        with self.assertRaises(GatewayRejected):
+            protocol.validate_response(b'data: {"type":"response.metadata"}\n\n' + stream())
+
     def test_completion_rejects_inconsistent_or_unapproved_calls(self):
         with self.assertRaises(GatewayRejected):
             protocol.validate_response(stream(done_item=dict(call(), input='changed')))

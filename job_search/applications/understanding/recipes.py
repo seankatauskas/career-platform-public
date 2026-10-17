@@ -16,6 +16,7 @@ FACT_FIELDS = {
                   "participants", "location", "join_url", "organizer", "note", "employer_confirmed", "reason", "cancellation_kind"},
     "outcome": {"outcome", "reason"},
 }
+TERMINAL_OUTCOMES = frozenset({"accepted", "rejected", "withdrawn", "stopped_pursuing"})
 
 
 def _instant(value):
@@ -33,6 +34,7 @@ def _member(value, choices):
 
 
 def fact_recipe(finding, target, descriptor):
+    """Return a pending operation, or None for an unsupported closing outcome."""
     content, blockers = finding["content"], []
     kind, original = content["kind"], content["value"]
     value = dict(original) if isinstance(original, dict) else {}
@@ -106,12 +108,12 @@ def fact_recipe(finding, target, descriptor):
             else:
                 payload["expected_related_versions"] = preview["expected_related_versions"]
     else:
-        operation = "close_application"
         outcome = value.get("outcome", original if isinstance(original, str) else None)
+        if not _member(outcome, TERMINAL_OUTCOMES):
+            return None
+        operation = "close_application"
         payload = {"application_id": target, "outcome": outcome,
                    "reason": value.get("reason", "Reviewed external outcome: " + outcome if isinstance(outcome, str) else "")}
-        if not _member(outcome, {"accepted", "rejected", "withdrawn", "stopped_pursuing"}):
-            blockers.append("needs_mapping")
         preview = context.get("closure_previews", {}).get(target)
         if not isinstance(preview, dict) or not isinstance(preview.get("expected_records"), dict) or type(preview.get("expected_version")) is not int:
             blockers.append("requires_closure_preview")

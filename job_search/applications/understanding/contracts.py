@@ -33,6 +33,11 @@ class AnalysisInput:
             raise DomainError("invalid_input", "Invalid analysis source identities")
         if any(not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"] for c in self.candidates):
             raise DomainError("invalid_input", "Invalid candidate identity")
+        catalog = self.context.get("catalog_candidates", [])
+        if (not isinstance(catalog, list) or len(catalog) > 20 or any(not isinstance(c, dict)
+                or not isinstance(c.get("id"), str) or not c["id"].startswith("catalog:") for c in catalog)
+                or len({c["id"] for c in catalog}) != len(catalog)):
+            raise DomainError("invalid_input", "Invalid catalog candidate identities")
         if len({(s.source_id, s.revision) for s in self.sources}) != len(self.sources):
             raise DomainError("invalid_input", "Duplicate source references")
         for source in self.sources:
@@ -92,7 +97,8 @@ def validate_analysis(value, context):
         for finding in findings:
             if not isinstance(finding, dict) or set(finding) - ALLOWED[group] or not isinstance(finding.get("kind"), str) or finding["kind"] not in kinds:
                 raise DomainError("invalid_input", "Invalid finding fields or kind")
-            if finding.get("target_id") is not None and (not isinstance(finding["target_id"], str) or finding["target_id"] not in targets):
+            allowed_targets = {c["id"] for c in context.context.get("catalog_candidates", [])} if group == "associations" and finding["kind"] == "job" else targets
+            if finding.get("target_id") is not None and (not isinstance(finding["target_id"], str) or finding["target_id"] not in allowed_targets):
                 raise DomainError("invalid_input", "Finding target is outside supplied candidates")
             confidence = finding.get("confidence")
             if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
@@ -136,4 +142,8 @@ def validate_analysis(value, context):
             not isinstance(item, str) or not 1 <= len(item) <= 2000 for item in uncertainty):
         raise DomainError("invalid_input", "Invalid uncertainty list")
     output["uncertainties"] = uncertainty
+    if any(f["kind"] == "job" and f.get("target_id") for f in output["associations"]) and (
+            any(f["kind"] == "application" and f.get("target_id") for f in output["associations"])
+            or any(f.get("target_id") for kind in ("facts", "requests") for f in output[kind])):
+        raise DomainError("invalid_input", "A catalog-role match cannot also target an existing application")
     return output

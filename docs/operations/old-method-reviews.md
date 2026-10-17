@@ -190,6 +190,13 @@ A failed logging callback cannot change the model response or rejection decision
 These records diagnose future attempts only; omitted details from earlier failures
 cannot be reconstructed retroactively.
 
+Native subscription streams may include `response.metadata` before completion.
+The gateway accepts this informational event with an object-valued `metadata`
+payload and forwards the original stream unchanged. Metadata never supplies output,
+declares tools, or satisfies completion; normal tool, identity, and stream validation
+still applies. Failed generation is displayed as **Generation failed**, separately
+from **Generation interrupted**. Both retain the explicit resume control.
+
 ## Deployment and validation
 
 Use the normal prepared AWS release and deployment workflows. The reviewer image

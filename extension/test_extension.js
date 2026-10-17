@@ -330,9 +330,9 @@ function testGreenhouseConfirmationIdentity() {
   assert.strictEqual(tracking.identify(original+'/confirmation/other'), null);
   assert(!tracking.sameJob(job, tracking.identify(original.replace('12345', '12346')+'/confirmation')));
   const doc = text => ({querySelectorAll: () => [{textContent:text, getClientRects:()=>[{}]}]});
-  assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), original+'/confirmation', job), 'success_dom');
+  assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), original+'/confirmation', job), 'success_route');
   assert.strictEqual(tracking.outcome(doc('Enter the security code to submit your application.'), original, job), null);
-  assert.strictEqual(tracking.outcome(doc(''), original+'/confirmation', job), null);
+  assert.strictEqual(tracking.outcome(doc(''), original+'/confirmation', job), 'success_route');
   const embedded = 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=12345';
   const confirmation = embedded.replace('job_app?', 'job_app/confirmation?');
   assert.deepStrictEqual(tracking.identify(embedded), job);
@@ -340,13 +340,22 @@ function testGreenhouseConfirmationIdentity() {
   assert.strictEqual(tracking.identify(confirmation.replace('/confirmation?', '/confirmation/other?')), null);
   assert.strictEqual(tracking.identify(confirmation.replace('12345', 'invalid')), null);
   assert(!tracking.sameJob(job, tracking.identify(confirmation.replace('12345', '54321'))));
-  assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), confirmation, job), 'success_dom');
-  assert.strictEqual(tracking.outcome(doc(''), confirmation, job), null);
+  assert.strictEqual(tracking.outcome(doc('Thank you for applying.'), confirmation, job), 'success_route');
+  assert.strictEqual(tracking.outcome(doc(''), confirmation, job), 'success_route');
   const request = {method:'POST', url:'https://boards.greenhouse.io/embed/acme/jobs/12345'};
   assert(tracking.submissionRequest(request, job, true));
   for (const url of [request.url+'/other', request.url.replace('12345','54321'), request.url.replace('/acme/','/other/')])
     assert(!tracking.submissionRequest({...request,url},job,true));
   assert(!tracking.submissionRequest({...request,method:'GET'},job,true));
+  const axon=tracking.identify('https://job-boards.greenhouse.io/axon/jobs/7703668003');
+  for(const host of tracking.hosts.greenhouse) {
+    const url=`https://${host}/axon/jobs/7703668003`;
+    assert(tracking.submissionRequest({method:'POST',url},axon,true));
+    for(const wrong of [url.replace('/axon/','/other/'),url.replace('7703668003','7703668004'),url+'/confirmation',url+'/other',url.replace('https://','https://user@'),url.replace(host,host+':8443')])
+      assert(!tracking.submissionRequest({method:'POST',url:wrong},axon,true));
+    assert(!tracking.submissionRequest({method:'GET',url},axon,true));
+  }
+  assert(!tracking.submissionRequest({method:'POST',url:'https://boards-api.greenhouse.io/axon/jobs/7703668003'},axon,true));
 }
 
 function testAshbyConfirmationContainers() {
@@ -428,7 +437,26 @@ async function testDurableAnswerQueue() {
   assert.equal(crowded.fields.length,400);assert.equal(crowded.fields[0].value,'kept first');assert.equal(crowded.omitted_fields,1);
 }
 
+async function testUnreadableAnswersDoNotLoseSubmission() {
+  const listeners={},messages=[];
+  const doc={title:'Axon application',documentElement:{},querySelector:()=>null,
+    querySelectorAll:()=>[],addEventListener:(name,fn)=>{(listeners[name] ||= []).push(fn);}};
+  const context=vm.createContext({document:doc,location:{href:'https://job-boards.greenhouse.io/axon/jobs/7703668003'},
+    window:{addEventListener:()=>{}},MutationObserver:class {observe(){}},setTimeout,clearTimeout,
+    JobTracking:require('./tracking.js'),JobAnswerCapture:{collect:()=>{throw new Error('Unreadable form');}},
+    chrome:{runtime:{sendMessage:async message=>{messages.push(message);return {connected:true};},onMessage:{addListener:()=>{}}}}});
+  vm.runInContext(fs.readFileSync(path.join(root,'tracking_content.js'),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const button={innerText:'Submit application',closest:()=>({})};
+  listeners.click[0]({isTrusted:true,target:{closest:()=>button}});
+  await new Promise(resolve=>setImmediate(resolve));
+  const attempt=messages.find(m=>m.type==='trackingAttempt');
+  assert(attempt,'submission detection survives answer collection failure');
+  assert.equal(attempt.answer_snapshot.omitted_fields,1,'missing final answers remain explicit');
+}
+
 const tests = [
+  testUnreadableAnswersDoNotLoseSubmission,
   testDurableAnswerQueue,
   testGreenhouseConfirmationIdentity,
   testAshbyConfirmationContainers,

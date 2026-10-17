@@ -1,7 +1,14 @@
 # Review interaction proposal
 
-Status: **proposed; not implemented or deployed**. This document records the
-requested UX investigation. The current behavior is documented in
+Status: **common one-click updates, System attention, and application picker implemented; deployment pending**.
+Receipt, confirmation, request, assessment, interview, and closure cards now
+include a valid pending email link in their primary action. Independent updates
+remain separate. Technical inputs are disclosed on demand; closure consequences
+remain visible. Group digests bind the explicit decision bundle atomically.
+System issues are separate from decision counts. Application clarification uses a
+searchable picker with preserved selection and a pending preview before acceptance.
+Sender/subject metadata, accepted-association correction UI, browser preference relocation,
+and the unified activity view below remain proposed. Current behavior is documented in
 [grouped evidence review](operations/grouped-evidence-review.md).
 
 ## Intended experience
@@ -11,10 +18,10 @@ primary action. The user approves the resulting application update; the system
 handles its required linking steps. Individual decisions, evidence, versions,
 and reasons remain auditable beneath that simpler interaction.
 
-Today, grouping is largely visual: a receipt and its prerequisite link each have
+Previously, grouping was largely visual: a receipt and its prerequisite link each had
 a checkbox and Accept/Reject buttons, with another selected-changes button.
-Raw fields and dependency instructions ask the user to operate the internal
-workflow. The next design should remove that burden without hiding consequences.
+Raw fields and dependency instructions asked the user to operate the internal
+workflow. The common path now removes that burden while preserving consequences.
 
 Each card shows, in reading order:
 
@@ -92,7 +99,8 @@ not clarification questions the user should answer.
   Manual resolution offers a specific disposition and optional explanation;
   neither operation approves business changes.
 - Evidence with both proposals and a processing issue keeps one source identity;
-  show processing status within its card rather than duplicating the evidence.
+  show a system-status link within its card and a recovery row in System attention.
+  The source evidence is displayed once, with links between updates and recovery.
 - External actions retain their separate exact-content and recipient approvals.
 - A lost response checks the original command result before offering another
   action. Stale previews refresh explicitly and preserve unsaved user choices.

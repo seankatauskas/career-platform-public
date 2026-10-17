@@ -124,7 +124,7 @@ def projection_applicable(connection, analysis):
         if source.get("direction", "incoming") != "incoming" or source.get("role", "authored") != "authored":
             continue
         issue = for_source(connection, source["source_id"], source["revision"])
-        if issue and (issue["analysis_id"] != analysis["id"] or issue["status"] in {"resolved_manually", "superseded"}):
+        if issue and (issue["analysis_id"] != analysis["id"] or issue["status"] in {"retry_queued", "resolved_manually", "superseded"}):
             return False
     return True
 
@@ -161,7 +161,10 @@ def record_projection(tx, analysis, *, status, failure_code=None):
     return {"status": state, "analysis_id": analysis["id"]}
 
 
-def decide(tx, *, issue_id, expected_version, expected_analysis_id, reason, retry=False, automatic=False, refresh=False, replaces=None):
+def decide(tx, *, issue_id, expected_version, expected_analysis_id, reason, retry=False, automatic=False, refresh=False, replaces=None, association_changed=False):
+    if association_changed and (not retry or automatic or refresh or getattr(tx, "authorized_operation", None)
+                                not in {"link_message", "review_changes", "create_application_from_review", "correct_association"}):
+        raise DomainError("not_authorized", "Association recovery requires its reviewed identity workflow")
     if refresh and (not retry or getattr(tx, "authorized_operation", None) != "refresh_review_group"):
         raise DomainError("not_authorized", "Review refresh requires its owner workflow")
     if automatic and (not retry or getattr(tx, "authorized_operation", None) not in {"retry_processing_automatically", "migrate_review_group"}):
@@ -174,7 +177,7 @@ def decide(tx, *, issue_id, expected_version, expected_analysis_id, reason, retr
         before = get(tx.connection, issue_id)
         if before["version"] != expected_version or before["analysis_id"] != expected_analysis_id:
             raise DomainError("version_conflict", "The current processing attempt changed")
-        if before["status"] not in ({"open", "succeeded"} if refresh else {"open"} if retry else {"open", "retry_queued"}):
+        if before["status"] not in ({"open", "succeeded"} if refresh else {"open", "retry_queued"} if association_changed else {"open"} if retry else {"open", "retry_queued"}):
             raise DomainError("version_conflict", "Processing issue no longer needs this decision")
         tx.connection.execute("UPDATE understand_processing_issues SET status=?,version=version+1,resolution_reason=?,updated_at=? WHERE issue_id=?",
             ("retry_queued" if retry else "resolved_manually", reason, tx.now, issue_id))
@@ -184,7 +187,7 @@ def decide(tx, *, issue_id, expected_version, expected_analysis_id, reason, retr
                        "message_id": result["source_id"], "revision": result["revision"], "sha256": result["sha256"]}
             descriptor = json.loads(tx.connection.execute("SELECT descriptor FROM understand_analyses WHERE id=?", (before["analysis_id"],)).fetchone()[0])
             prior_refresh = descriptor.get("context", {}).get("review_refresh")
-            if refresh or prior_refresh is not None:
+            if not association_changed and (refresh or prior_refresh is not None):
                 payload["replaces"] = replaces if refresh else prior_refresh
             tx.enqueue("understanding", "retry_processing", issue_id + ":" + str(result["version"]), payload)
         tx.record("understanding", issue_id, "retry_processing" if retry else "resolve_processing", before, result)

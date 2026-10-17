@@ -58,6 +58,8 @@ try {
   assert.equal(new URL(page.url()).pathname, '/');
   assert.equal(await page.locator('.application-link').count(), 2);
   const datedCard = page.locator('#application-list tr').filter({hasText: 'Platform Engineer'});
+  assert.equal(await datedCard.locator('.application-link').innerText(), 'Platform Engineer');
+  assert(!await datedCard.innerText().then(text => text.includes('Job Application for')));
   assert.match(await datedCard.locator('time.posting-date').innerText(), /Posted/);
   assert.equal(await datedCard.locator('time.posting-date').getAttribute('datetime'), '2026-09-15T12:00:00Z');
   assert.equal(await datedCard.locator('time.applied-date').getAttribute('datetime'), '2026-10-01T12:00:00Z');
@@ -159,11 +161,16 @@ try {
     group.application={id:applicationId};group.applications=[group.application];
     renderOwnerReviewQueue();
   }, fixture.application_id);
-  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email processing needs attention'}).count(), 1);
+  assert.equal(await page.locator('#application-list .pending-note').filter({hasText: 'Email processing needs attention'}).count(), 0,
+    'Processing-only evidence stays in System attention even when linked');
+  assert.equal(await page.locator('#owner-processing-section [data-review-key="evidence_group:email:processing-visible"]').count(), 1);
   assert.equal(await undatedCard.locator('.pending-note').filter({hasText: 'Email processing needs attention'}).count(), 0);
   await page.locator('#application-needs-review').check();
   assert.equal(await page.locator('#application-review-filter-label').textContent(), 'Needs review (loaded items)');
   await page.locator('#application-list').getByText(/This filter covers the review items loaded so far/).waitFor();
+  assert.equal(await page.locator('.application-link').filter({hasText: 'Platform Engineer'}).count(), 0,
+    'A processing-only application is excluded by the decision filter');
+  await page.locator('#application-needs-review').uncheck();
   await page.locator('.application-link').filter({hasText: 'Platform Engineer'}).waitFor();
   assert.deepEqual(errors, [], 'No browser exceptions');
   assert.deepEqual(failures, [], 'All served assets and API requests succeed');

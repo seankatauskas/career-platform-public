@@ -13,7 +13,8 @@ from .external_actions.api import ExternalActionOperations, SCHEMA as ACTION_SCH
 
 class ApplicationRuntime:
     """Explicit candidate composition. Existing hosts must opt in by construction."""
-    def __init__(self,path,*,clock=None,extra_schemas=None,mail_source=None,reply_provider_resolver=None):
+    def __init__(self,path,*,clock=None,extra_schemas=None,mail_source=None,reply_provider_resolver=None,job_catalog=None):
+        self.job_catalog = job_catalog
         if set(extra_schemas or {}) & {"commands","applications","correspondence","understanding","external_actions"}:
             raise DomainError("invalid_input","Extra schemas cannot replace an existing owner")
         self.executor=CommandExecutor(path,{"applications":APPLICATION_SCHEMA,
@@ -36,6 +37,16 @@ class ApplicationRuntime:
         return self.executor.run(context,operation,payload,lambda tx:self._dispatch(tx,operation,payload))
 
     def _dispatch(self,tx,operation,payload):
+        if operation == "repair_catalog_job":
+            from .application_catalog import repair
+            return repair(self, tx, **payload)
+        if operation == 'create_application_from_review':
+            from .applications.discovery import ApplicationDiscovery, CreateApplicationFromReview
+            try:
+                value = CreateApplicationFromReview(**payload)
+            except TypeError as exc:
+                raise DomainError('invalid_input', 'Invalid application discovery input') from exc
+            return ApplicationDiscovery(self).create(tx, value)
         if operation == "retry_processing_automatically":
             issue = self.understanding.get_processing_issue(tx.connection, payload["issue_id"])
             current = self.correspondence.get(tx.connection, issue["source_id"])
@@ -52,6 +63,11 @@ class ApplicationRuntime:
         if operation in {"retry_processing", "resolve_processing"}:
             return self.workflows.recover_processing(tx, operation, payload)
         if operation=="review_changes":
+            if set(payload) == {"decisions", "group_id", "expected_digest"}:
+                from .applications.review import ReviewService
+                return ReviewService(self).review_changes(tx, **payload)
+            if set(payload) != {"decisions"}:
+                raise DomainError("invalid_input", "Review requires decisions and an optional complete group preview")
             return self.workflows.review_changes(tx,payload["decisions"])
         if operation=="replace_proposal":
             return self.understanding.replace(tx,**payload)
@@ -74,7 +90,11 @@ class ApplicationRuntime:
             self.understanding.supersede_processing_source(tx,source_id=source["id"],latest_revision=source["latest_revision"])
             return source
         if operation=="record_browser_observation":
+            from .application_catalog import browser_snapshot
+            snapshot = browser_snapshot(self, tx, payload)
             observation=self.applications.record_browser_observation(tx,payload)
+            if snapshot is not None:
+                self.applications.capture_catalog_snapshot(tx, observation["application_id"], snapshot)
             proposals=self.workflows.process_browser(tx, observation)
             self._finish_work(tx,"applications","analyze_browser",observation["id"])
             return {"observation":observation,"review":proposals}
@@ -186,11 +206,20 @@ class ApplicationRuntime:
                 if linked:
                     thread_targets.append(linked["application_id"])
                     thread_links.append(linked)
+        retrieval = {"method": "caller_supplied", "limit": 20}
+        catalog_candidates, catalog_retrieval = [], {"method": "not_requested", "complete": True}
+        retrieval_reasons = {identity: ["caller_supplied"] for identity in candidate_ids}
         if candidate_coverage is not None:
             from .application_mail import capture_candidates
             retrieved = capture_candidates(self, message_id, source["text"],
                 thread_text="\n".join(s.text for s in sources[1:]), thread_application_ids=thread_targets)
             candidate_ids = retrieved["candidate_ids"]
+            retrieval = retrieved.get("retrieval", {"method": "unspecified"})
+            retrieval_reasons = retrieved.get("retrieval_reasons", {})
+            catalog_candidates = retrieved.get("catalog_candidates", [])
+            catalog_retrieval = retrieved.get("catalog_retrieval", {})
+            if not catalog_retrieval.get("complete"):
+                reasons.append("incomplete_catalog_coverage")
             if not retrieved["coverage"]["complete"]:
                 reasons.append("incomplete_candidate_coverage")
         with self.executor.read() as con:
@@ -201,6 +230,9 @@ class ApplicationRuntime:
                 if len(identities)>20:
                     reasons.append("incomplete_candidate_coverage")
                 identities=identities[:20]
+            retrieval = {**retrieval, "selected": len(identities)}
+            if "incomplete_candidate_coverage" in reasons:
+                retrieval["complete"] = False
             apps=[self.applications.get_application(con,identity) for identity in identities]
             versions={"application:"+app["id"]:app["version"] for app in apps}
             versions["message:"+message_id]=source["version"]
@@ -213,9 +245,15 @@ class ApplicationRuntime:
             if association:
                 versions["association:"+association["id"]]=association["version"]
                 target_application_id=association["application_id"]
+                hints = retrieval_reasons.setdefault(association["application_id"], [])
+                if "reviewed_message_link" not in hints:
+                    hints.append("reviewed_message_link")
             previews={"closure_previews":{},"interview_previews":{},"records":{},
                       "mail_projection":{"message_id":message_id,"revision":source["revision"],
                           "target_application_id":target_application_id,"association_required":association is None}}
+            previews["candidate_retrieval"] = retrieval
+            previews["catalog_candidates"] = catalog_candidates
+            previews["catalog_retrieval"] = catalog_retrieval
             previews["thread_associations"] = [{k: linked[k] for k in ("message_id", "application_id")} for linked in thread_links]
             previews["thread_coverage"] = {"complete": not thread_reasons, "reasons": sorted(set(thread_reasons)),
                 "scope": "earlier_messages_in_same_account_and_thread", "selected": len(sources) - 1,
@@ -247,6 +285,7 @@ class ApplicationRuntime:
                 raise RuntimeError("Understanding worker lease was lost")
             context=AnalysisInput(tuple(sources),
                 tuple({"id":app["id"],"job":self.applications.get_job(con,app["job_id"]),
+                       "retrieval_reasons": retrieval_reasons.get(app["id"], []),
                        "lifecycle": {key: app[key] for key in ("disposition", "outcome", "pursuit_no")}} for app in apps),
                 versions,coverage,previews)
         claim=self.executor.run(context_for("analyze_observation",uuid.uuid4().hex),"analyze_observation",

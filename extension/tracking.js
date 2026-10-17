@@ -31,13 +31,14 @@
   function submissionRequest(details, job, exactEndpoint = false) {
     if (details.method !== 'POST' || !job) return false;
     const u = new URL(details.url);
-    if (u.protocol !== 'https:') return false;
+    if (u.protocol !== 'https:' || u.username || u.password || u.port) return false;
     if (job.ats === 'lever' && hosts.lever.includes(u.hostname))
       return u.pathname === `/${job.board}/${job.job_id}/apply`;
     if (job.ats === 'greenhouse' && [...hosts.greenhouse, 'boards-api.greenhouse.io'].includes(u.hostname))
       return (exactEndpoint ? /\/(?:submit_app|applications)\/?$/ : /\/(?:submit_app|applications)(?:\/|$)/).test(u.pathname)
         || u.pathname === `/v1/boards/${job.board}/jobs/${job.job_id}`
-        || u.pathname === `/embed/${job.board}/jobs/${job.job_id}`;
+        || u.pathname === `/embed/${job.board}/jobs/${job.job_id}`
+        || (hosts.greenhouse.includes(u.hostname) && u.pathname === `/${job.board}/jobs/${job.job_id}`);
     if (job.ats === 'ashby' && hosts.ashby.includes(u.hostname))
       return u.pathname === '/api/non-user-graphql' && [
         'ApiSubmitApplication', 'SubmitApplication',
@@ -48,6 +49,7 @@
   function outcome(doc, url, job) {
     const current = identify(url);
     if (job && sameJob(current, job) && /\/thanks\/?$/.test(new URL(url).pathname)) return 'success_route';
+    if (current?.ats === 'greenhouse' && sameJob(current, job) && /\/confirmation\/?$/.test(new URL(url).pathname)) return 'success_route';
     if (current?.ats === 'ashby' && sameJob(current, job)) {
       // Ashby prefixes its customizable acknowledgment with a separate "Success"
       // heading. Detect its scoped status container, including localized copy.

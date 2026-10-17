@@ -68,10 +68,11 @@ document.querySelector('form').addEventListener('submit', async e=>{
  const mode=new URL(location.href).searchParams.get('outcome');
  const parts=location.pathname.split('/').filter(Boolean);
  let endpoint=location.hostname.includes('lever') ? location.pathname+'/apply' : location.hostname.includes('ashby') ? '/api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction' : '/applications';
+ if(mode==='hosted_redirect') endpoint='https://boards.greenhouse.io'+location.pathname;
  if(mode==='embed_redirect') endpoint='/embed/acme/jobs/'+new URL(location.href).searchParams.get('token');
  const response=await fetch(endpoint+(endpoint.includes('?')?'&':'?')+'fixture_status='+(mode==='failed'?'500':'200'),{method:'POST',body:'{}',headers:{'Content-Type':'application/json'}});
  if(mode==='uncertain') return;
- if(mode==='redirect' && response.ok) {location.assign(location.pathname+'/confirmation'); return;}
+ if(['redirect','hosted_redirect'].includes(mode) && response.ok) {location.assign(location.pathname+'/confirmation'); return;}
  if(mode==='embed_redirect' && response.ok) {
    const params=new URLSearchParams(location.search);
    location.assign('/embed/job_app/confirmation?for='+params.get('for')+'&token='+params.get('token'));
@@ -101,18 +102,25 @@ def main() -> None:
 
             def handle_request(self):
                 host = self.headers.get("Host", "").split(":", 1)[0]
+                if host == 'boards.greenhouse.io' and self.command == 'OPTIONS':
+                    self.send_response(204)
+                    self.send_header('Access-Control-Allow-Origin', 'https://job-boards.greenhouse.io')
+                    self.send_header('Access-Control-Allow-Methods', 'POST')
+                    self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+                    self.end_headers()
+                    return
                 if host == "employer.fixture.test" and self.command == "GET" and self.path.startswith("/embed?"):
                     target = parse_qs(urlsplit(self.path).query)["url"][0]
                     import html
                     output = ('<!doctype html><h1>Company careers</h1><iframe style="width:900px;height:700px" src="'+html.escape(target, quote=True)+'"></iframe>').encode()
                     self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(output))); self.end_headers(); self.wfile.write(output)
                     return
-                if host in HOSTS.values() and self.command == "POST":
+                if host in [*HOSTS.values(), 'boards.greenhouse.io'] and self.command == "POST":
                     status = int(parse_qs(urlsplit(self.path).query).get("fixture_status", ["200"])[0])
                     self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                    self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+                    self.send_response(status); self.send_header("Access-Control-Allow-Origin", "https://job-boards.greenhouse.io"); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
                     return
-                if host in HOSTS.values() and self.command == "GET":
+                if host in [*HOSTS.values(), 'boards.greenhouse.io'] and self.command == "GET":
                     form = TRACKING_FORM if "fixture=tracking" in self.path else FORM
                     if urlsplit(self.path).path.endswith('/confirmation'):
                         form = b'<!doctype html><h1>Thank you for applying.</h1><p>Your application has been received.</p>'

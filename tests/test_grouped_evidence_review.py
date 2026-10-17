@@ -35,6 +35,32 @@ class GroupedReviewTest(unittest.TestCase):
         self.assertEqual(len(email["evidence"]),1)
         self.assertEqual(service.page(group_id=email["proposals"][0]["id"])["items"][0]["id"], email["id"])
 
+    def test_matching_candidates_are_choices_not_evidence_ownership(self):
+        from job_search.commands import CommandContext, Principal
+        from job_search.applications.understanding import AnalysisInput, SourceText
+        other = self.command("save_job", {"job_source": {"source":"fixture", "source_id":"other", "employer":"Other", "title":"Engineer"}})
+        message = self.message()
+        text = "Please reply."
+        ref = {"source_id":message["id"], "revision":message["revision"], "start":0, "end":len(text), "quote":text}
+        context = AnalysisInput((SourceText(message["id"], message["revision"], message["source_sha256"], text),),
+            candidates=({"id":self.app["id"]}, {"id":other["id"]}, {"id":"deleted-candidate"}))
+        output = {"relevance":"career_related", "associations":[{"kind":"application", "target_id":self.app["id"], "evidence":[ref]}],
+                  "facts":[], "requests":[], "temporal_facts":[], "uncertainties":[]}
+        analysis = self.runtime.executor.run(CommandContext(Principal("model", "worker", {"record_analysis"}), "analysis", "inferred"),
+            "record_analysis", {}, lambda tx:self.runtime.understanding.store_analysis(tx, context=context, model_version="fixture", output=output))
+        self.runtime.executor.run(CommandContext(Principal("model", "worker", {"project_analysis"}), "projection", "inferred"),
+            "project_analysis", {}, lambda tx:self.runtime.understanding.project_analysis(tx, analysis_id=analysis["id"], projections=[{
+                "finding_id":analysis["findings"][0]["id"], "operation":"link_message", "application_id":self.app["id"],
+                "input":{"message_id":message["id"], "application_id":self.app["id"], "expected_version":0}}]))
+        service = ReviewService(self.runtime)
+        group = service.page()["items"][0]
+        self.assertEqual([a["id"] for a in group["application_candidates"]], [self.app["id"], other["id"]])
+        self.assertEqual(group["application_candidates"][1]["job"]["employer"], "Other")
+        self.assertEqual([a["id"] for a in group["applications"]], [self.app["id"]])
+        self.assertEqual(service.page(application_id=other["id"])["items"], [])
+        self.assertIsNone(group["association"])
+        self.assertEqual(group, service.page()["items"][0])
+
     def test_pending_target_correction_preserves_lineage_and_requires_review(self):
         ref = self.ref()
         p = self.proposal("confirm_submission", {"application_id":self.app["id"], "submission_id":"missing", "occurred_at":"2026-10-09T12:00:00Z"}, evidence=[ref], blockers=["requires_target_record_resolution"])

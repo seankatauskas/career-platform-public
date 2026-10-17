@@ -7,6 +7,7 @@ import uuid
 from job_search.commands import DomainError, digest, encode
 from .contracts import validate_analysis
 from .recipes import fact_recipe
+from .reconciliation import non_actionable_outcome
 from . import processing
 
 
@@ -88,6 +89,9 @@ class UnderstandingOperations:
 
     def retry_processing(self, tx, **value):
         return processing.decide(tx, **value, retry=True)
+
+    def retry_processing_after_link(self, tx, **value):
+        return processing.decide(tx, **value, retry=True, association_changed=True)
 
     def resolve_processing(self, tx, **value):
         return processing.decide(tx, **value)
@@ -351,6 +355,8 @@ class UnderstandingOperations:
             if finding is None:
                 raise DomainError("invalid_input", "Projection references missing finding")
             content = finding["content"]
+            if finding["category"] == "facts" and non_actionable_outcome(content):
+                continue
             refresh = analysis["descriptor"].get("context", {}).get("review_refresh")
             reviewed_conflicts = []
             if refresh is not None:
@@ -558,16 +564,22 @@ class UnderstandingOperations:
             return {"analysis_id": analysis_id, "proposals": [], "status": "nonactionable"}
         association_findings = [f for f in analysis["findings"] if f["category"] == "associations"
                                 and f["content"]["kind"] == "application" and f["content"].get("target_id")]
+        catalog_selected = any(f["category"] == "associations" and f["content"]["kind"] == "job"
+                               and f["content"].get("target_id") for f in analysis["findings"])
+        if catalog_selected:
+            # A job match cannot inherit an earlier accepted application link.
+            # Its facts remain unassigned until explicit identity review.
+            application_id = None
         # A fact's selected target already expresses a proposed association. Use
         # its preserved evidence for the prerequisite instead of asking a human
         # to repair a missing duplicate model field. This grants no acceptance.
         supported = association_findings or [f for f in analysis["findings"]
             if f["category"] in {"facts", "requests"} and f["content"].get("target_id")
             and f["content"]["actionable_source"]
-            and not (non_actionable_contact(f["content"]) or verification(f["content"]) or non_actionable_request(f["content"]))
+            and not (non_actionable_contact(f["content"]) or verification(f["content"]) or non_actionable_request(f["content"]) or non_actionable_outcome(f["content"]))
             and (f["category"] != "requests" or f["content"].get("requirement") == "required"
                  and f["content"].get("responsible_party") == "applicant")]
-        if application_id is None:
+        if application_id is None and not catalog_selected:
             targets = {f["content"].get("target_id") for f in analysis["findings"]
                        if f["category"] == "associations" and f["content"]["kind"] == "application"}
             if not targets:
@@ -609,7 +621,10 @@ class UnderstandingOperations:
                               "completion_rule": "verified_send" if content["kind"] == "reply" else "human_decision", "origin_ref": finding["id"],
                               "evidence": content["evidence"]}}
             elif finding["category"] == "facts" and content["actionable_source"]:
-                operation, payload, recipe_blockers = fact_recipe(finding, target, analysis["descriptor"])
+                recipe = fact_recipe(finding, target, analysis["descriptor"])
+                if recipe is None:
+                    continue
+                operation, payload, recipe_blockers = recipe
                 from .reconciliation import receipt_fact
                 valid_submission = any(r["id"] == payload.get("submission_id") for r in
                     analysis["descriptor"].get("context", {}).get("records", {}).get(target, {}).get("submissions", []))
@@ -674,7 +689,7 @@ class UnderstandingOperations:
             blockers=[b for b in old["blockers"] if b not in resolved_blockers])
 
     def set_dependencies(self, tx, proposal_id, dependencies):
-        if getattr(tx, "authorized_operation", None) not in {"correct_review_target", "migrate_review_group"}:
+        if getattr(tx, "authorized_operation", None) not in {"create_application_from_review", "correct_review_target", "migrate_review_group"}:
             raise DomainError("not_authorized", "Dependency rebinding requires target correction")
         before = self.get(tx.connection, proposal_id)
         if before["status"] != "pending" or proposal_id in dependencies:
@@ -690,7 +705,7 @@ class UnderstandingOperations:
     def reconcile(self, tx, *, proposal_id, expected_version, reason, applied=False):
         """Bounded workflow retirement; never grants authority to inferred proposals."""
         operation = getattr(tx, "authorized_operation", None)
-        if operation not in {"record_browser_observation", "migrate_review_group", "project_analysis", "correct_review_target"}:
+        if operation not in {"create_application_from_review", "record_browser_observation", "migrate_review_group", "project_analysis", "correct_review_target"}:
             raise DomainError("not_authorized", "Reconciliation requires its owning workflow")
         if applied and operation not in {"record_browser_observation", "migrate_review_group"}:
             raise DomainError("not_authorized", "This workflow cannot accept findings")
