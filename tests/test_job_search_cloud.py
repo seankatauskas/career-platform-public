@@ -76,6 +76,31 @@ def test_hermes_acceptance_supplies_all_required_compose_settings() -> None:
     assert env["JOB_SEARCH_COST_DIR"] == "/fixture"
 
 
+def test_compose_acceptance_mount_expectations_match_selected_overlays() -> None:
+    acceptance = runpy.run_path(str(ROOT / "scripts/compose-acceptance.py"))
+    expected = acceptance["PRIVATE_FILE_SERVICES"]
+    mounts = {service: {name: False for name in expected} for service in acceptance["SERVICES"]}
+    # Read the actual target declarations used by the acceptance fixture, so
+    # changing a worker destination cannot leave its post-start checks stale.
+    for name in ("compose.mail.yaml", "compose.briefing.yaml", "compose.chief.yaml"):
+        sections = re.split(r"^  ([a-z_-]+):\n", (ROOT / name).read_text(), flags=re.MULTILINE)
+        for service, body in zip(sections[1::2], sections[2::2]):
+            if service in mounts:
+                for target in re.findall(r"target: /run/job-search/([^\s]+)", body):
+                    if target in expected:
+                        mounts[service][target] = True
+    for service, observed in mounts.items():
+        acceptance["assert_private_mounts"](service, observed)
+    assert mounts['interactive-core']['mail-inference.json']
+    assert mounts['interactive-model']['briefing-api-key']
+    try:
+        acceptance["assert_private_mounts"]('model', {'briefing-api-key': True})
+    except AssertionError as exc:
+        assert 'model: briefing-api-key' in str(exc)
+    else:
+        raise AssertionError('acceptance allowed the briefing key on the batch worker')
+
+
 class FakeRuntime:
     def __init__(self, stop: threading.Event) -> None:
         self.stop = stop
@@ -83,7 +108,7 @@ class FakeRuntime:
         self.maximum_active = 0
         self.ticks = 0
 
-    def tick(self, *, should_stop=lambda: False):
+    def tick(self, *, should_stop=lambda: False, include_diagnostics=True, refresh_dependencies=True):
         self.active += 1
         self.maximum_active = max(self.maximum_active, self.active)
         self.ticks += 1
@@ -230,8 +255,8 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     mcp = compose.split("\n  mcp:\n", 1)[1].split("\n  core:\n", 1)[0]
     core = compose.split("\n  core:\n", 1)[1].split("\n  model:\n", 1)[0]
     mail = (ROOT / "compose.mail.yaml").read_text(encoding="utf-8")
-    assert set(re.findall(r"^  ([a-z_-]+):$", mail, flags=re.MULTILINE)) == {"core", "dashboard"}
-    for service in ("core", "dashboard"):
+    assert set(re.findall(r"^  ([a-z_-]+):$", mail, flags=re.MULTILINE)) == {"core", "dashboard", "interactive-core"}
+    for service in ("core", "dashboard", "interactive-core"):
         mounts = mail.split("\n  " + service + ":\n", 1)[1]
         mounts = re.split(r"\n  [a-z_-]+:\n", mounts, maxsplit=1)[0]
         assert mounts.count("type: bind") == 2
@@ -242,7 +267,7 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
         assert "hermes.env" not in mounts
     assert "network_mode: host" in compose and "ports:" not in compose
     assert 'JOB_SEARCH_PLATFORM:-linux/amd64' in compose
-    assert compose.count("replicas: 1") == 5
+    assert compose.count("replicas: 1") == 7
     assert "network_mode: none" in compose
     assert "JOB_SEARCH_NETWORKLESS_TOOL_CONTAINER" in compose
     assert "no-new-privileges:true" in compose and "cap_drop:" in compose
@@ -253,7 +278,7 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     assert "--bind-host" in mcp and "0.0.0.0" in mcp
     assert "--allowed-host" in mcp and "- mcp" in mcp
     assert compose.count("*mcp-token-volume") == 1
-    assert compose.count("*notification-socket-volume") == 2
+    assert compose.count("*notification-socket-volume") == 3
     assert "*notification-socket-volume" in dashboard
     assert "*notification-socket-volume" not in mcp
     assert "*notification-socket-volume" in core
@@ -299,7 +324,8 @@ def test_cloud_packaging_keeps_private_services_loopback_and_single_replica() ->
     host_only_python = {"job_search/aws_ops.py", "job_search/operation_journal.py",
                         "job_search/release_policy.py", "job_search/cost_collector.py",
                         "job_search/review_host.py", "job_search/prepared_release.py",
-                        "job_search/release_coordinator.py", "job_search/image_retention.py"}
+                        "job_search/release_coordinator.py", "job_search/image_retention.py",
+                        "job_search/deployment_contract.py"}
     assert packaged_python == repository_python - host_only_python
     assert not (packaged_python & host_only_python)
     for excluded in (

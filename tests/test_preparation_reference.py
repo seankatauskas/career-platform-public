@@ -23,7 +23,8 @@ class PreparationReferenceTests(unittest.TestCase):
     def anchor(self):
         with ops.prepare_snapshot(self.c) as prepared:
             receipt, stage, _ = self.fixture.capture(prepared)
-        op = ops.Operation.begin(self.c, 'deploy', backup=receipt)
+        op = ops.Operation.begin(self.c, 'deploy', backup=receipt,
+                                 target_release=ops.release_path(self.c).name)
         op.finish('deployed')
         return receipt, stage
 
@@ -39,6 +40,87 @@ class PreparationReferenceTests(unittest.TestCase):
             with ops.prepare_snapshot(self.c) as prepared:
                 self.assertEqual(prepared['file_profiles']['state/jobs.db']['validation'], 'checked')
                 self.assertEqual(check.call_count, 1)
+
+    def backup_journal(self, phase='snapshot_finished'):
+        op = ops.Operation.begin(self.c, 'backup', previous_release=ops.release_path(self.c).name)
+        op.finish(phase)
+        return op
+
+    def test_repeated_backups_keep_exact_completed_deployment_anchor(self):
+        receipt, _ = self.anchor()
+        deployment = ops.read_operation(self.c)
+        for _ in range(3):
+            backup = self.backup_journal()
+            self.assertEqual(backup.value['verification_operation_id'], deployment['operation_id'])
+            self.assertEqual(ops.preparation_reference(self.c)[1:], ('available', receipt['backup_id']))
+            with patch.object(ops, 'sqlite_check', wraps=ops.sqlite_check) as check:
+                with ops.prepare_snapshot(self.c) as prepared:
+                    self.assertEqual(prepared['file_profiles']['state/jobs.db']['validation'], 'reused')
+                check.assert_not_called()
+        with sqlite3.connect(self.db) as db:
+            db.execute("UPDATE jobs SET text='changed after backups' WHERE id=1")
+        self.assert_checked()
+
+    def test_backup_link_requires_private_matching_complete_successful_deployment(self):
+        self.anchor()
+        original = ops.read_operation(self.c)
+        self.backup_journal()
+        archived = self.data / 'operations' / (original['operation_id'] + '.json')
+        for edit in ({'complete': False}, {'phase': 'deployment_reverted'}, {'phase': 'recovered_paused'},
+                     {'kind': 'restore'}, {'operation_id': 'f' * 32}, {'target_release': 'different-release'}):
+            with self.subTest(edit=edit):
+                ops.write_json(archived, {**original, **edit}); self.assert_checked()
+        ops.write_json(archived, original)
+        archived.chmod(0o644); self.assert_checked(); archived.chmod(0o600)
+        linked = archived.with_suffix('.link'); os.link(archived, linked)
+        self.assert_checked(); linked.unlink()
+        archived.rename(linked); archived.symlink_to(linked)
+        self.assert_checked(); archived.unlink(); linked.rename(archived)
+        archived.unlink(); self.assert_checked()
+
+    def test_interrupted_recovered_and_nonbackup_operations_invalidate_chain(self):
+        for kind, phase in (('backup', 'recovered_paused'), ('backup', 'drain_aborted'),
+                            ('deploy', 'deployment_reverted'), ('restore', 'restored_paused')):
+            with self.subTest(kind=kind, phase=phase):
+                self.anchor(); self.backup_journal()
+                interrupted = ops.Operation.begin(self.c, kind, previous_release=ops.release_path(self.c).name)
+                self.assert_checked()
+                interrupted.finish(phase); self.assert_checked()
+                self.backup_journal(); self.assert_checked()
+
+    def test_backup_link_cannot_cross_installed_release_or_snapshot_release(self):
+        _, stage = self.anchor(); self.backup_journal()
+        current = ops.read_operation(self.c)
+        path = self.data / 'operations/current.json'
+        ops.write_json(path, {**current, 'previous_release': 'different-release'})
+        self.assert_checked(); ops.write_json(path, current)
+        old = ops.release_path(self.c)
+        target = self.fixture.fixture.install_candidate()
+        ops.point_current(self.c, target); self.assert_checked(); ops.point_current(self.c, old)
+        archived = self.data / 'operations' / (current['verification_operation_id'] + '.json')
+        original = json.loads(archived.read_text())
+        manifest = stage / 'backup.json'; value = json.loads(manifest.read_text())
+        value['release_id'] = 'different-release'; ops.write_json(manifest, value)
+        original['backup']['sha256'] = ops.digest(manifest); ops.write_json(archived, original)
+        self.assert_checked()
+
+    def test_untrusted_current_metadata_cannot_be_laundered_by_backup_archival(self):
+        for relative in ('operations', 'operations/current.json'):
+            with self.subTest(path=relative):
+                self.anchor()
+                path = self.data / relative; mode = path.stat().st_mode & 0o777
+                path.chmod(mode | 0o044)
+                backup = self.backup_journal()
+                self.assertNotIn('verification_operation_id', backup.value)
+                self.assert_checked(); path.chmod(mode)
+
+    def test_explicit_rollback_success_can_anchor_subsequent_backup(self):
+        receipt, _ = self.anchor()
+        for phase in ('deployed', 'deployed_paused'):
+            op = ops.Operation.begin(self.c, 'rollback', backup=receipt,
+                                     target_release=ops.release_path(self.c).name)
+            op.finish(phase); self.backup_journal()
+            self.assertEqual(ops.preparation_reference(self.c)[1], 'available')
 
     def test_exact_bytes_reuse_checks_but_copies_remain_independent_and_restore_rechecks(self):
         _, prior = self.anchor()
@@ -240,7 +322,11 @@ with ops.prepare_snapshot(c): raise AssertionError('must not yield')
             with self.assertRaisesRegex(OSError, 'source I/O failure'):
                 ops.deploy(self.c, 'b' * 40 + '-2')
         self.assertFalse(any('stop' in call.args or 'initialize' in call.args for call in compose.call_args_list))
-        self.assertEqual((self.data / 'operations/current.json').read_bytes(), before)
+        journal = ops.read_operation(self.c)
+        self.assertEqual(journal['phase'], 'preparation_aborted')
+        self.assertTrue(journal['complete'])
+        previous = json.loads(before)
+        self.assertEqual((self.data / 'operations' / (previous['operation_id'] + '.json')).read_bytes(), before)
 
 
 if __name__ == '__main__': unittest.main()

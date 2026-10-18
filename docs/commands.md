@@ -5,6 +5,9 @@ Run commands from the repository root. Python imports and background workers use
 | Purpose | Command |
 | --- | --- |
 | Application ledger, dashboard, and operator tools | `python -m job_search --help` |
+| Inspect configured schemas without creating or migrating databases | `python -m job_search --config /path/to/config.json check-schema` |
+| Explicitly initialize/migrate local state (`init` remains an alias) | `python -m job_search --config /path/to/config.json migrate` ([production migration boundary](operations/deployment-modes.md)) |
+| Prepare an optional feature before activation, during maintenance | `python -m job_search --config /path/to/config.json migrate --prepare-feature ranking` (or `--prepare-feature salary`; repeat to prepare both; creates schemas without activating models/automation) |
 | Grant a one-day inference top-up | `python -m job_search inference-allowance-grant --help` ([usage and safeguards](models/inference-providers.md#platform-usage-limits-and-restart-recovery)) |
 | Publish agent-selected jobs | `python -m job_search --config /path/to/config.json shortlist publish --input -` ([guide](curated-shortlists.md)) |
 | Collect postings and discover boards | `python -m job_search.collection.boards --help` |

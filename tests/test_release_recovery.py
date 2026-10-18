@@ -192,7 +192,7 @@ ops.restore_unlocked(p['c'],Path(p['bundle']),p['sha'],replace=True)
                         fixture.doCleanups()
 
     def test_deployment_sigkill_recovery_obeys_write_boundary(self):
-        for boundary in ('precopy', 'prepared', 'snapshotting', 'reused_file', 'snapshot_published', 'snapshotted', 'preparing_runtime', 'initializing', 'release_pointer', 'secrets', 'after_write'):
+        for boundary in ('precopy', 'prepared', 'preparing_snapshot', 'snapshotting', 'reused_file', 'snapshot_published', 'snapshotted', 'preparing_runtime', 'initializing', 'release_pointer', 'secrets', 'after_write'):
             with self.subTest(boundary=boundary):
                 fixture = ops_fixtures.OperationsTests(); fixture.setUp()
                 try:
@@ -256,11 +256,11 @@ ops.deploy(p['c'],'b'*40+'-2')
                     self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
                     record=read(fixture.c)
                     if boundary == 'precopy':
-                        self.assertIsNone(record)
-                        self.assertFalse((fixture.data/'maintenance/gate.json').exists())
+                        self.assertEqual(record['phase'], 'preparing_snapshot')
+                        self.assertFalse(record['complete'])
+                        self.assertIsNone(record['backup'])
                         self.assertEqual(ops.release_path(fixture.c).name,'a'*40+'-1')
                         self.assertTrue(list((fixture.data/'backups').glob('snapshot-preparing-*')))
-                        continue
                     with patch.object(ops,'stop_project'), patch.object(ops,'running_services',return_value=[]), patch.object(ops,'chown_runtime'):
                         ops.recover(fixture.c,record['operation_id'])
                     if boundary=='after_write':

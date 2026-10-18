@@ -123,12 +123,14 @@ class PreparedSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ops.OpsError, 'immutable'):
                 self.capture(prepared)
 
-    def test_preparation_io_failure_does_not_stop_services_or_begin_operation(self):
+    def test_preparation_io_failure_does_not_stop_dashboard_or_leave_open_operation(self):
         self.fixture.install_candidate()
         with patch.object(ops, 'compose', return_value='') as compose, patch.object(ops, 'preflight', return_value={'issues': []}), patch.object(ops, 'sync_tree', side_effect=OSError('disk failure')):
             with self.assertRaises(OSError): ops.deploy(self.c, 'b' * 40 + '-2')
         self.assertFalse(any(call.args[1] == 'stop' for call in compose.call_args_list))
-        self.assertIsNone(ops.read_operation(self.c))
+        self.assertEqual(ops.read_operation(self.c)['phase'], 'preparation_aborted')
+        self.assertTrue(ops.read_operation(self.c)['complete'])
+        self.assertIsNone(ops.read_operation(self.c)['backup'])
         self.assertFalse(list((self.data / 'backups').iterdir()))
 
     def test_sync_failure_after_reuse_prevents_initialization(self):

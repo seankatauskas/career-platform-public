@@ -18,6 +18,7 @@ from ..availability import check_boards
 from ..contracts import identifier
 from ..runner import build_authority, runner_lock, _private_dir, _write_json
 from ..runner_config import load_runner_config
+from ..resource_monitor import AttemptResources
 from . import WORKFLOW
 from .store import Store
 from .runtime import worker, read_output
@@ -76,75 +77,93 @@ def run_review(config, store, rid, *, launch=worker, availability=check_boards, 
             status = store.status(rid)
             if status['status'] == 'published' or status['phase'] == 'qualified':
                 return status
-            meta = store.metadata(rid)
-            if meta.get('generation_stream') and not meta.get('inputs_ready'):
-                if not store.freeze_generation(rid, execution=execution(config)):
-                    return store.status(rid)
-                meta = store.metadata(rid)
-            if meta['execution'] != execution(config):
-                raise ContractError('resume requires the frozen execution profile and image')
-            packet = store.packet(rid)
             root = _private_dir(config.state_dir / 'old-method' / rid / ('attempt_' + secrets.token_hex(6)))
-            store.update(rid, phase='running', error=None, attempt=str(root))
-            deadline = time.monotonic() + config.invocation_timeout_seconds
-            journal = {'workflow': WORKFLOW, 'review_id': rid, 'active': True, 'status': 'running'}
-            _write_json(config.state_dir/'status.json', journal)
-            totals = {}
-            def telemetry(event):
-                for key, value in event.items():
-                    if type(value) in (int, float):
-                        totals[key] = totals.get(key, 0) + value
-            try:
-                result = meta.get('result')
-                if result and result.get('sealed') is True:
-                    store.checkpoint(rid, result, sealed=True)
-                else:
-                    with launch(config, packet, root, previous=meta.get('result'), telemetry=telemetry) as handle:
-                        last_saved = None
-                        while handle.poll() is None:
-                            path = handle.output_directory/'progress.json'
-                            if path.exists():
-                                candidate = read_output(path)
-                                if candidate != last_saved:
-                                    store.checkpoint(rid, candidate)
-                                    last_saved = candidate
-                            if stopped.is_set() or draining() or time.monotonic() >= deadline:
-                                handle.terminate()
-                                store.update(rid, phase='interrupted', inference=totals)
-                                return store.status(rid)
-                            time.sleep(1)
-                        path = handle.output_directory/'progress.json'
-                        if path.exists():
-                            store.checkpoint(rid, read_output(path))
-                        if handle.wait() != 0:
-                            raise ContractError('Codex worker failed; saved progress can be resumed')
-                        result = read_output(handle.output_directory/'result.json')
-                        if result != read_output(path):
-                            raise ContractError('saved work changed after the final result was sealed')
-                        store.checkpoint(rid, result, sealed=True)
-                if stopped.is_set() or draining():
-                    store.update(rid, phase='interrupted', inference=totals)
-                    return store.status(rid)
-                store.update(rid, phase='validating', inference=totals)
-                if not meta['publish']:
-                    store.update(rid, phase='qualified')
-                    return store.status(rid)
-                app = load_runtime_config(config.application_config, required=True)
-                selected = [packet['jobs'][n-1] for n in result['order']]
-                observations = availability(selected, contact=app.scraper_contact or '')
-                if stopped.is_set() or draining():
-                    store.update(rid, phase='interrupted')
-                    return store.status(rid)
-                store.publish(rid, observations)
-                return store.status(rid)
-            except Exception as exc:
-                store.update(rid, phase='failed', error=str(exc) if isinstance(exc, ContractError) else type(exc).__name__, inference=totals)
-                raise
-            finally:
-                _write_json(config.state_dir/'status.json', {**journal, 'active': False, 'status': store.status(rid)['phase']})
+            with AttemptResources(root, store.db_path, timeout_seconds=config.invocation_timeout_seconds,
+                                  identity=execution(config)) as monitor:
+                try:
+                    return _run_attempt(config, store, rid, stopped, root, monitor, launch, availability)
+                finally:
+                    try:
+                        monitor.outcome(store.status(rid)['phase'])
+                    except Exception:
+                        pass  # Telemetry must not mask the original review outcome.
     finally:
         for sig, old in previous_signals.items():
             signal.signal(sig, old)
+
+
+def _run_attempt(config, store, rid, stopped, root, monitor, launch, availability):
+    meta = store.metadata(rid)
+    if meta.get('generation_stream') and not meta.get('inputs_ready'):
+        if not store.freeze_generation(rid, execution=execution(config)):
+            return store.status(rid)
+        meta = store.metadata(rid)
+    if meta['execution'] != execution(config):
+        raise ContractError('resume requires the frozen execution profile and image')
+    monitor.mark('loading_inputs')
+    packet = store.packet(rid)
+    monitor.count('input_jobs', len(packet['jobs']))
+    store.update(rid, phase='running', error=None, attempt=str(root))
+    deadline = time.monotonic() + config.invocation_timeout_seconds
+    journal = {'workflow': WORKFLOW, 'review_id': rid, 'active': True, 'status': 'running'}
+    _write_json(config.state_dir/'status.json', journal)
+    totals = {}
+    def telemetry(event):
+        for key, value in event.items():
+            if type(value) in (int, float):
+                totals[key] = totals.get(key, 0) + value
+    try:
+        result = meta.get('result')
+        if result and result.get('sealed') is True:
+            store.checkpoint(rid, result, sealed=True)
+        else:
+            with launch(config, packet, root, previous=meta.get('result'), telemetry=telemetry) as handle:
+                monitor.worker(getattr(handle, 'runtime_id', None))
+                last_saved = None
+                while handle.poll() is None:
+                    path = handle.output_directory/'progress.json'
+                    if path.exists():
+                        candidate = read_output(path)
+                        if candidate != last_saved:
+                            store.checkpoint(rid, candidate)
+                            last_saved = candidate
+                    if stopped.is_set() or draining() or time.monotonic() >= deadline:
+                        handle.terminate()
+                        store.update(rid, phase='interrupted', inference=totals)
+                        return store.status(rid)
+                    time.sleep(1)
+                path = handle.output_directory/'progress.json'
+                if path.exists():
+                    store.checkpoint(rid, read_output(path))
+                if handle.wait() != 0:
+                    raise ContractError('Codex worker failed; saved progress can be resumed')
+                result = read_output(handle.output_directory/'result.json')
+                if result != read_output(path):
+                    raise ContractError('saved work changed after the final result was sealed')
+                store.checkpoint(rid, result, sealed=True)
+        if stopped.is_set() or draining():
+            store.update(rid, phase='interrupted', inference=totals)
+            return store.status(rid)
+        monitor.mark('validating')
+        monitor.count('selected_jobs', len(result['order']))
+        store.update(rid, phase='validating', inference=totals)
+        if not meta['publish']:
+            store.update(rid, phase='qualified')
+            return store.status(rid)
+        app = load_runtime_config(config.application_config, required=True)
+        selected = [packet['jobs'][n-1] for n in result['order']]
+        observations = availability(selected, contact=app.scraper_contact or '')
+        if stopped.is_set() or draining():
+            store.update(rid, phase='interrupted')
+            return store.status(rid)
+        monitor.mark('publishing')
+        store.publish(rid, observations)
+        return store.status(rid)
+    except Exception as exc:
+        store.update(rid, phase='failed', error=str(exc) if isinstance(exc, ContractError) else type(exc).__name__, inference=totals)
+        raise
+    finally:
+        _write_json(config.state_dir/'status.json', {**journal, 'active': False, 'status': store.status(rid)['phase']})
 
 
 def drain_generation(config, store, **kwargs):

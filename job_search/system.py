@@ -180,7 +180,7 @@ def build_dashboard_controller(
         autofill,
         jobs,
         resume,
-        readiness=lambda: runtime_readiness(config, use_snapshot=True),
+        readiness=lambda: runtime_readiness(config, use_snapshot=True, include_ranking_details=False),
         notification_recovery=build_notification_recovery(config, ledger),
         mail_source=mail_source or _DashboardMailSource(config, ledger),
         review_classifier_factory=(review_classifier if config.mail_understanding_mode not in {'shared', 'paused'}
@@ -320,7 +320,7 @@ def build_hermes_sources_from_config(
             availability=planner,
         ),
         resume=resume,
-        readiness=lambda: runtime_readiness(config, use_snapshot=True),
+        readiness=lambda: runtime_readiness(config, use_snapshot=True, include_ranking_details=False),
     )
 
 

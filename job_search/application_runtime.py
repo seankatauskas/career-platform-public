@@ -13,13 +13,13 @@ from .external_actions.api import ExternalActionOperations, SCHEMA as ACTION_SCH
 
 class ApplicationRuntime:
     """Explicit candidate composition. Existing hosts must opt in by construction."""
-    def __init__(self,path,*,clock=None,extra_schemas=None,mail_source=None,reply_provider_resolver=None,job_catalog=None):
+    def __init__(self,path,*,clock=None,extra_schemas=None,mail_source=None,reply_provider_resolver=None,job_catalog=None,require_schema=False):
         self.job_catalog = job_catalog
         if set(extra_schemas or {}) & {"commands","applications","correspondence","understanding","external_actions"}:
             raise DomainError("invalid_input","Extra schemas cannot replace an existing owner")
         self.executor=CommandExecutor(path,{"applications":APPLICATION_SCHEMA,
             "correspondence":CORRESPONDENCE_SCHEMA,"understanding":UNDERSTANDING_SCHEMA,
-            "external_actions":ACTION_SCHEMA,**(extra_schemas or {})},clock=clock, schema_migrations={**APPLICATION_MIGRATIONS, **ACTION_MIGRATIONS, **UNDERSTANDING_MIGRATIONS})
+            "external_actions":ACTION_SCHEMA,**(extra_schemas or {})},clock=clock, require_schema=require_schema, schema_migrations={**APPLICATION_MIGRATIONS, **ACTION_MIGRATIONS, **UNDERSTANDING_MIGRATIONS})
         self.applications=ApplicationOperations()
         self.correspondence=CorrespondenceOperations()
         self.understanding=UnderstandingOperations()

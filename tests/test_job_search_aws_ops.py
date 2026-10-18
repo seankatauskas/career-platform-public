@@ -700,7 +700,7 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(ops.release_path(self.c).name, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-2")
         self.assertEqual((self.data / "state" / "new-application.txt").read_text(), "submitted after upgrade")
         self.assertFalse(json.loads((self.data / "activation.json").read_text())["enabled"])
-        self.assertEqual(compose.call_args.args[1:], ("stop", "--timeout", "4200", *ops.SERVICES))
+        self.assertEqual(compose.call_args.args[1:], ("stop", "--timeout", "4200", *ops.configured_services(self.c)))
 
     def test_review_starts_interactive_services_without_recurring_workers(self):
         with patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "running_services", return_value=[]), patch.object(ops, "compose", return_value="") as compose, patch.object(ops, "wait_healthy"), patch.object(ops, "model_readiness") as model:
@@ -726,6 +726,68 @@ class OperationsTests(unittest.TestCase):
                 self.assertNotIn("core", call.args)
                 self.assertNotIn("model", call.args)
         model.assert_not_called()
+
+    def test_upgrade_keeps_the_exact_validated_tools_container_and_rechecks_its_health(self):
+        self.install_candidate()
+        active = ["tools", "dashboard"]
+        tool_container = None
+        checked = []
+        events = []
+        def compose(c, *args, **kwargs):
+            nonlocal tool_container
+            events.append(args)
+            if args[0] == "up" and "tools" in args:
+                self.assertIn("--force-recreate", args)
+                self.assertEqual(ops.release_path(c).name, "b" * 40 + "-2")
+                self.assertIsNone(tool_container, "validated tools was created twice")
+                tool_container = object()
+            if args[:2] == ("stop", "tools"):
+                self.fail("active tools must survive validation")
+            return ""
+        def check(c, expected):
+            if "tools" in expected:
+                self.assertIsNotNone(tool_container)
+                checked.append((tool_container, tuple(expected)))
+        with patch.object(ops, "running_services", return_value=active), patch.object(ops, "compose", side_effect=compose), patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "wait_healthy", side_effect=check):
+            result = ops.deploy(self.c, "b" * 40 + "-2")
+        self.assertEqual(result["status"], "deployed")
+        self.assertEqual([items for _, items in checked], [("tools",), tuple(active)])
+        self.assertIs(checked[0][0], checked[1][0])
+        self.assertEqual(events[-1], ("up", "-d", "--no-deps", "--no-build", "--force-recreate", "dashboard"))
+        timings = result["cutover_steps_seconds"]
+        self.assertEqual(set(timings), {"secret_materialization", "runtime_ownership",
+                         "reviewer_configuration", "runtime_preflight", "initialize",
+                         "tools_create", "tools_health", "services_create", "services_health"})
+        self.assertTrue(all(isinstance(value, (int, float)) and value >= 0 for value in timings.values()))
+        self.assertEqual(ops.read_operation(self.c)["cutover_steps_seconds"], timings)
+
+    def test_paused_upgrade_stops_the_validation_tools_container(self):
+        self.install_candidate()
+        with patch.object(ops, "running_services", return_value=[]), patch.object(ops, "compose", return_value="") as compose, patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}):
+            result = ops.deploy(self.c, "b" * 40 + "-2")
+        self.assertEqual(result["status"], "deployed_paused")
+        self.assertIn((self.c, "stop", "tools"), [call.args for call in compose.call_args_list])
+
+    def test_reviewer_export_failure_happens_before_draining_or_journal_creation(self):
+        target = self.install_candidate()
+        candidate = json.loads((target / "release.json").read_text())
+        candidate["reviewer_image"] = candidate["app_image"]
+        (target / "release.json").write_text(json.dumps(candidate))
+        with patch.object(ops, "compose", return_value=""), patch.object(ops, "run", return_value=""), patch("job_search.review_host.prepare_binary", side_effect=ops.OpsError("invalid reviewer export")), patch.object(ops, "stop_for_maintenance") as stop:
+            with self.assertRaisesRegex(ops.OpsError, "invalid reviewer export"):
+                ops.deploy(self.c, target.name)
+        stop.assert_not_called()
+        self.assertIsNone(ops.read_operation(self.c))
+        self.assertEqual(ops.release_path(self.c).name, "a" * 40 + "-1")
+
+    def test_failure_after_tools_validation_stops_it_before_restore(self):
+        self.install_candidate()
+        (self.data / "activation.json").write_text('{"enabled": true}')
+        events = []
+        with patch.object(ops, "running_services", return_value=["tools", "core"]), patch.object(ops, "compose", return_value=""), patch.object(ops, "backup_unlocked", return_value={"backup_id": "before-upgrade", "sha256": "a" * 64}), patch.object(ops, "materialize_secrets"), patch.object(ops, "chown_runtime"), patch.object(ops, "preflight", return_value={"issues": []}), patch.object(ops, "model_readiness", side_effect=ops.OpsError("invalid model")), patch.object(ops, "stop_project", side_effect=lambda c: events.append("stop_all")), patch.object(ops, "restore_unlocked", side_effect=lambda *args, **kwargs: events.append("restore")):
+            with self.assertRaisesRegex(ops.OpsError, "invalid model"):
+                ops.deploy(self.c, "b" * 40 + "-2")
+        self.assertEqual(events, ["stop_all", "restore"])
 
     def domain(self, status="ready", stale=0, failed=0, reconcile=0):
         return {"schema_version": 1, "status": status, "metrics": {

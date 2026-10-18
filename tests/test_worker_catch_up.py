@@ -56,6 +56,7 @@ class CatchUpTests(unittest.TestCase):
 
         def tick(**kwargs):
             starts.append(self.clock.seconds)
+            kwargs.pop('refresh_dependencies', None)
             return worker.tick(**kwargs)
 
         def emit(raw):

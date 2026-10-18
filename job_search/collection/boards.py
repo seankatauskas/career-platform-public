@@ -1009,6 +1009,10 @@ CREATE TABLE IF NOT EXISTS discovery_observations (
 
 def _prepare_board_registry(con: sqlite3.Connection) -> None:
     """Create the additive board registry schema without disturbing job tables."""
+    from ..schema_lifecycle import require_current, check_collector
+    if require_current():
+        check_collector(con, component="registry")
+        return
     con.executescript(_BOARD_REGISTRY_SCHEMA)
 
 
@@ -1228,6 +1232,10 @@ def _prepare(con: sqlite3.Connection) -> None:
     cannot be created; putting them in the same script as CREATE TABLE is what broke
     the previous migration.
     """
+    from ..schema_lifecycle import require_current, check_collector
+    if require_current():
+        check_collector(con, component="jobs")
+        return
     cols = {c[1] for c in con.execute("PRAGMA table_info(jobs)")}
     if cols and "ats" not in cols:
         # Pre-multi-ATS database. The primary key is changing, which ALTER TABLE
@@ -1269,6 +1277,8 @@ def _prepare(con: sqlite3.Connection) -> None:
             if "closed_at" not in cols:
                 con.execute("ALTER TABLE jobs ADD COLUMN closed_at TEXT")
     con.executescript(_INDEXES)
+    from .discovery_index import INDEX_SQL
+    con.execute(INDEX_SQL)
     from .history import prepare_history
     prepare_history(con)
 
@@ -1318,6 +1328,10 @@ CREATE TABLE IF NOT EXISTS board_etag (
 
 def _prepare_etags(con: sqlite3.Connection) -> None:
     """Create the ETag cache and distrust pre-description representations."""
+    from ..schema_lifecycle import require_current, check_collector
+    if require_current():
+        check_collector(con, component="etags")
+        return
     con.executescript(_ETAG_SCHEMA)
     cols = {c[1] for c in con.execute("PRAGMA table_info(board_etag)")}
     if "includes_descriptions" not in cols:

@@ -1,0 +1,41 @@
+{
+  "fixture": "always-ready networkless process, same successful probe in both modes",
+  "image_id": "sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e",
+  "docker_version": "27.4.0",
+  "limitations": [
+    "Docker Desktop/Linux VM; not native AWS",
+    "No application startup, initialization, or dependency ordering measured"
+  ],
+  "baseline": [
+    {
+      "seconds_to_healthy": 30.225,
+      "started_at": "2026-10-18T00:28:39.883301501Z",
+      "first_probe_at": "2026-10-18T00:29:09.955242709Z",
+      "start_period": "0s",
+      "start_interval": "5s"
+    },
+    {
+      "seconds_to_healthy": 30.165,
+      "started_at": "2026-10-18T00:29:12.844900919Z",
+      "first_probe_at": "2026-10-18T00:29:42.906475127Z",
+      "start_period": "0s",
+      "start_interval": "5s"
+    }
+  ],
+  "candidate": [
+    {
+      "seconds_to_healthy": 2.119,
+      "started_at": "2026-10-18T00:29:10.244880959Z",
+      "first_probe_at": "2026-10-18T00:29:12.292955335Z",
+      "start_period": "20s",
+      "start_interval": "2s"
+    },
+    {
+      "seconds_to_healthy": 2.197,
+      "started_at": "2026-10-18T00:29:43.136198544Z",
+      "first_probe_at": "2026-10-18T00:29:45.198880462Z",
+      "start_period": "20s",
+      "start_interval": "2s"
+    }
+  ]
+}

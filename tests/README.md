@@ -40,8 +40,15 @@ The runner writes a JSON receipt to `.cache/system-checks.json` by default. Scre
 python3 -m tests.test_job_search_aws_ops
 python3 -m tests.test_prepared_snapshots
 python3 -m tests.test_preparation_reference
+python3 -m tests.test_snapshot_pause_boundaries
+python3 -m tests.test_backup_archive
 python3 -m tests.test_release_recovery
 python3 -m tests.test_release_coordinator
+python3 -m tests.test_schema_lifecycle
+python3 -m tests.test_optional_schema_lifecycle
+uv run --python 3.12 --with cryptography --with pypdf python -m tests.test_release_startup_boundary
+python3 -m tests.test_deployment_modes
+python3 -m tests.test_deployment_contract
 python3 scripts/check-system.py --match release
 uv run --with cryptography --with pypdf python scripts/release-transition-acceptance.py --local
 ```
@@ -50,8 +57,23 @@ Install the repository's fast release checks as a local hook with
 `git config core.hooksPath .githooks` when no other hook manager is configured.
 CI runs the full system/browser checks and native Linux Compose/transition gates;
 the hook runs only the inexpensive operations and release contracts.
-See [production acceptance](../docs/compose-acceptance.md) and
+See [deployment modes](../docs/operations/deployment-modes.md),
+[production acceptance](../docs/compose-acceptance.md) and
 [deployment/recovery](../docs/operations/aws-deployment.md) for the Docker and live gates.
+The deployment-mode tests verify conservative fallback and application-data
+preservation without invoking snapshot/migration work on an eligible edge; their
+host adapters do not establish production timing. Contract tests fence runtime
+inputs from the static-asset/documentation exception and protocol 2's exact audited
+`runtime_readiness.py` source. Invalid/stale audit declarations, changed helpers,
+schemas, dependencies, runtime files and executable modes remain conservative.
+Startup tests cover optional configured/present schemas and reject missing/drifted
+state without preparing it. Transition diagnostics execute paused/enabled,
+summary/detailed and snapshot/provided/local observations against legacy and
+converted-owner fixtures; an intentionally injected schema write must fail the
+read-only gate. Candidate writes must still survive predecessor reads and writes.
+A clean, exact-source Docker transition receipt remains required for production eligibility;
+local subprocess receipts cannot grant it. Full restore and scheduled-backup checks
+remain separate obligations.
 
 Browser demo fixtures use `requirements/demo.txt`. The system runner passes its Python interpreter to the demo and fixture commands; standalone browser runs use `uv` to provision the demo dependencies.
 
@@ -79,3 +101,56 @@ verification reference does not imply a warm OS page cache. The optional
 `--check-workers 2` is a benchmark-only hypothesis, not a production setting.
 See [host preparation evidence](../docs/operations/host-preparation-performance.md)
 for resource limits, measured cases and limitations. Never run it on production.
+
+## Incremental ranking
+
+`uv run python -m unittest tests.test_incremental_families tests.test_policy_refresh`
+checks full-pass parity, inserts/deletions/moves, historical template lineage,
+metadata edits, observation-only updates, missing journals, rollback, concurrent
+collection, and partial scoring recovery. Run `uv run python -m tests.test_job_dedupe`
+for the existing full-rebuild contracts.
+
+`uv run python -m tests.benchmark_incremental_ranking --families 3000` measures
+bounded fictional preparation and feature/scoring work with deterministic stub
+predictions, no model inference, and no network. It reports checked/recomputed
+families and phase timings; it does not predict production elapsed time.
+
+Per-attempt recommendation resource evidence is verified by
+`uv run python -m tests.test_review_resource_monitor` and the OLD METHOD lifecycle
+suite. Release preparation also exercises host/cgroup capture through the native
+`tests.probe_old_method_container --require-host-runtime` probe, without paid calls.
+
+`uv run --python 3.12 python -m tests.test_review_input_index` checks indexed input
+selection against the original full-scan algorithm, including alternate timestamps,
+strict boundaries, index migration, and concurrent writes during snapshot reads.
+`uv run --python 3.12 python -m tests.benchmark_review_inputs --rows 360000 --description-bytes 2048`
+builds a temporary fictional catalog (about 1.5 GB) and compares original input
+selection, the legacy scan with the new index, and indexed candidate selection.
+It reports index build time/storage and the query plan. This is a warm local
+benchmark without cache eviction or production timing claims; the default fixture
+uses 100,000 historical rows and smaller descriptions.
+
+On the local Python 3.12 run on 2026-10-17, the 360,000-row historical fixture
+plus 1,000 recent discoveries occupied 1,490,579,456 bytes. Both implementations
+selected the same 122 eligible jobs. Median times over three warm runs were
+0.534 seconds before indexing, 0.353 seconds for the old scan with the new covering
+index, and 0.00194 seconds for indexed candidate selection. Both candidate-query
+branches used covering index searches. Building the index took 0.385 seconds and
+added 27,328,512 bytes. A separate 10,000-row unchanged date/status update proxy
+took 0.0179 seconds before indexing and 0.1055 seconds afterward, illustrating the
+additional write cost. These fictional local measurements do not predict EC2
+input-freezing time, disk-cache behavior, collector duration or installation pause.
+
+For an explicitly requested historical input replay, run
+`python -m tests.probe_review_input_replay --app-db /path/to/application.db --review-id REVIEW_ID`.
+The probe loads the saved window and ordered snapshot payloads, verifies their stored
+fingerprints, and reproduces their complete payload/order using the old selector and
+the actual current `Store` against a private temporary indexed catalog. It runs no
+models or publication. Add `--jobs-db /path/to/jobs.db --compare-current` explicitly
+to compare both selectors against the current catalog in one read transaction;
+this includes a full historical-date scan and can be expensive. Current drift is
+reported separately from algorithm parity. Source databases use read-only/query-only
+connections, and the probe never installs a live index. Output contains counts,
+timings, digests and the review/window identifiers without job contents or job IDs.
+Run `uv run --python 3.12 python -m tests.test_review_input_replay` for its offline
+corruption, concurrency, privacy and historical/current separation regressions.

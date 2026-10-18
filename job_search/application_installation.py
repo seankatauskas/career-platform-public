@@ -37,7 +37,14 @@ def protected_tables(con):
 
 
 def binding(operational_db):
-    with closing(connect(operational_db)) as con:
+    from .schema_lifecycle import read_connection, require_current
+    if not Path(operational_db).exists():
+        if require_current():
+            raise RuntimeError("Schema migration required: application database is missing")
+        # Local bootstrap asks whether a binding exists before constructing the
+        # ledger. Answer that question without creating an empty database.
+        return None
+    with closing(read_connection(operational_db)) as con:
         if not con.execute("SELECT 1 FROM sqlite_master WHERE name='application_owner_binding'").fetchone():
             return None
         row = con.execute('SELECT * FROM application_owner_binding WHERE singleton=1').fetchone()
@@ -54,7 +61,8 @@ def require_backend(config):
         raise DomainError('version_conflict', 'Owners backend requires an operator-created database binding')
     else:
         try:
-            with closing(sqlite3.connect(config.application_owner_db.resolve().as_uri()+'?mode=ro',uri=True)) as con:
+            from .schema_lifecycle import read_connection
+            with closing(read_connection(config.application_owner_db)) as con:
                 identity=con.execute('SELECT identity FROM installation_identity WHERE singleton=1').fetchone()
                 manifest=con.execute('SELECT report_json FROM migration_manifest WHERE id=1').fetchone()
             if not identity or identity[0]!=state.get('owner_identity') or not manifest:

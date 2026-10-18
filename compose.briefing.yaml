@@ -1,6 +1,6 @@
 # Explicit model profile; never reuse the mail worker's private credential mount.
 services:
-  model:
+  interactive-model:
     volumes:
       - type: bind
         source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/briefing-inference.json"

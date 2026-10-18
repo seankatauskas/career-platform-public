@@ -4,11 +4,8 @@ FROM ${PYTHON_BASE_IMAGE}
 
 ARG JOB_SEARCH_UID=10001
 ARG JOB_SEARCH_GID=10001
-ARG SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    JOB_SEARCH_SOURCE_REVISION=$SOURCE_REVISION \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -23,19 +20,30 @@ WORKDIR /opt/job-search
 
 COPY requirements/cloud.txt ./requirements/cloud.txt
 RUN python -m pip install --no-deps -r requirements/cloud.txt \
-    && python -m pip check
+    && python -m pip check \
+    && python -m compileall -q --invalidation-mode checked-hash \
+       -x '/site-packages/' /usr/local/lib/python3.12
 
 COPY --chown=root:root . .
 
 # The scraper's registry cache retains its historical repository-relative name. The
 # worker sends CSV/JSON/failure output directly to the database directory; only this
 # one cache therefore needs a compatibility symlink into persistent state.
-RUN mkdir -p /var/lib/job-search \
+# Read-only containers can read these source-validated caches without compiling
+# every import again on each health probe. Runtime cache writes stay disabled.
+RUN python -m compileall -q --invalidation-mode checked-hash /opt/job-search/job_search \
+    && mkdir -p /var/lib/job-search \
     && chown -R jobsearch:jobsearch /var/lib/job-search \
     && ln -s /var/lib/job-search/boards.json /opt/job-search/boards.json \
     && chmod -R a+rX /opt/job-search \
     && chmod -R a-w /opt/job-search \
     && chmod 0555 /opt/job-search
+
+# Commit identity is image metadata, not an input to dependency installation or
+# bytecode compilation. Preserve cached filesystem layers across source revisions.
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
+ENV JOB_SEARCH_SOURCE_REVISION=$SOURCE_REVISION
 
 USER jobsearch
 

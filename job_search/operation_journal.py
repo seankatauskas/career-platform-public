@@ -6,12 +6,31 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Any
 
 
 class OpsError(RuntimeError):
     pass
+
+
+def private_directory(path: Path) -> bool:
+    info = path.lstat()
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
+def private_bytes(path: Path, limit: int) -> bytes:
+    """Read bounded operations evidence without following or trusting links."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > limit):
+            raise ValueError("untrusted preparation metadata")
+        value = stream.read(limit + 1)
+        if len(value) > limit: raise ValueError("oversized preparation metadata")
+        return value
 
 
 def sync_directory(path: Path) -> None:
@@ -98,12 +117,34 @@ class Operation:
         root = Path(c["data_root"]) / "operations"
         if root.is_symlink():
             raise OpsError("operations directory is a symlink")
+        # Check before chmod/archive could normalize unsafe metadata permissions.
+        try:
+            trusted_previous = json.loads(private_bytes(root / "current.json", 1024**2)) if private_directory(root) else None
+        except (OSError, ValueError):
+            trusted_previous = None
         root.mkdir(mode=0o700, exist_ok=True)
         root.chmod(0o700)
         sync_directory(root.parent)
         previous = read(c)
         if previous:
             write_json(root / (previous["operation_id"] + ".json"), previous)
+        # A routine backup must not erase the last completed deployment's
+        # content-verification proof. Reference its durable archived journal,
+        # never a speculative snapshot or an interrupted/recovered operation.
+        # Only consecutive backups carry this link forward; deploy/rollback/
+        # restore start a new chain and must earn their own completion evidence.
+        if kind == "backup" and previous and previous == trusted_previous and previous["complete"]:
+            reference = None
+            if (previous["kind"] in {"deploy", "rollback"} and
+                    previous.get("phase") in {"deployed", "deployed_paused"} and
+                    previous.get("target_release") == fields.get("previous_release") and
+                    fields.get("previous_release")):
+                reference = previous["operation_id"]
+            elif (previous["kind"] == "backup" and previous.get("phase") == "snapshot_finished" and
+                  previous.get("previous_release") == fields.get("previous_release")):
+                reference = previous.get("verification_operation_id")
+            if reference:
+                fields["verification_operation_id"] = reference
         op = cls(c, {"version": 1, "operation_id": os.urandom(16).hex(), "kind": kind,
                      "phase": "prepared", "complete": False, "writes_possible": False,
                      "started_at": now(), "phase_times": {}, **fields})
@@ -121,7 +162,8 @@ class Operation:
     def durations(self) -> dict:
         """Completed intervals, without treating worker drain as UI downtime."""
         phases = self.value["phase_times"]
-        pairs = {"drain": (phases.get("draining"), phases.get("stopping")),
+        pairs = {"drain": (phases.get("draining"), phases.get("preparing_snapshot", phases.get("stopping"))),
+                 "snapshot_preparation": (phases.get("preparing_snapshot"), phases.get("stopping")),
                  "stop": (phases.get("stopping"), phases.get("quiesced")),
                  "snapshot": (phases.get("snapshotting"), phases.get("snapshotted")),
                  "runtime_preparation": (phases.get("preparing_runtime"), phases.get("initializing")),

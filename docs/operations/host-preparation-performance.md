@@ -1,5 +1,17 @@
 # Host preparation performance
 
+For preparation copy/hash overlap and the mapped-read experiment rejected after
+a production probe, see [snapshot preparation measurements](sqlite-snapshot-performance.md).
+
+The October 17 [validation continuity fix](#validation-continuity-across-routine-backups)
+preserves completed deployment proofs across routine backups. It supersedes the
+historical limitation below that any scheduled backup forces cold preparation.
+
+For the October 17 follow-up that moves preparation after worker draining and
+routine-backup validation after service resumption, see
+[snapshot pause performance](snapshot-pause-performance.md). The measurements
+and behavior below describe the October 10 implementation.
+
 This follow-up starts from `b935259` on main, including deployment preparation
 from PR #85 and rollback-journal handling from PR #87. It changes host snapshot
 preparation only. The release owner retains the predecessor update, batch selection,
@@ -193,3 +205,176 @@ deployment, compare full manifest entries across compatible snapshots, and asses
 whether the costly database actually remains unchanged between releases. That
 evidence is needed before deciding whether a broader cache or parallel validation
 is justified. Do not run benchmark fixtures or global cache eviction on production.
+
+## Validation continuity across routine backups
+
+The October 17 production sequence exposed a metadata problem: a routine backup
+replaced `operations/current.json`, so the next deployment lost access to the
+preceding deployment's verification proof even though its private archived journal
+and snapshot were still retained. The observed backup spent 1,234 seconds checking
+captured SQLite files, and the next deployment spent 1,002 seconds preparing its
+rollback snapshot. These are separate operations; neither entire interval is
+claimed as savings from this change.
+
+A backup journal now carries `verification_operation_id`, an explicit reference
+to the archived successful deploy/rollback journal that `Operation.begin` already
+flushes before replacing `current.json`. Consecutive completed backups preserve
+the reference. No history scan, additional mutable cache, payload reuse, or new
+retention policy is introduced. Existing snapshots and archived journals remain
+the proof; missing retained evidence simply requires fresh checks.
+
+The current backup must be complete in `snapshot_finished`, its installed release
+must match the referenced deployment target, and that archive must have the exact
+referenced operation ID and a successful `deployed` or `deployed_paused` phase.
+The snapshot's release must match the deployment's predecessor (or initial target).
+The release IDs bind these records to the installed source release. The manifest
+digest, full copied-file hashes and lengths, verification method, and SQLite engine
+version remain mandatory. Metadata reads reject unsafe ownership, permissions,
+symlinks, hard links and oversized records. Archiving cannot normalize unsafe
+current metadata into a trusted proof: its original permissions are checked first.
+
+An interrupted operation, recovery, restore, reverted deployment, changed release,
+missing archive, tampered manifest, or unknown validation contract forces a cold
+preparation. Deploy/rollback start a new chain and earn a new successful anchor.
+An interrupted backup does not grant reuse, even if its inherited pointer exists.
+A failed archive upload after writers resume may retain the old deployment proof;
+it cannot certify the failed backup or advance the last-successful-backup receipt.
+
+Routine backups still run one complete SQLite quick check per captured database
+before upload. Inspection found no duplicate integrity invocation within that
+archive path to remove safely. This fix reduces **deployment preparation after a
+backup**, not the routine backup's own 20-minute validation. Every fresh copy is
+independent; changed bytes are checked, journaled cutover data is recaptured, and
+restore always checks all bytes and databases again. A release adding database
+indexes changes database contents and may miss reuse on its next deployment.
+
+### Bounded verification and measurement
+
+The full backup-to-deployment integration fixture checks both captured databases
+during the routine backup, then reuses both previous deployment checks during
+preparation. Regression coverage also includes three interleaved backups, changed
+source bytes, damaged/missing/unsafe archived evidence, mismatched releases,
+interrupted/recovered operations, and successful paused/active rollback anchors.
+
+Three trials on a 512 MiB fictional fixture on macOS ARM64, Python 3.12 / SQLite
+3.53.1, measured median preparation after a backup journal transition at **0.298 s
+before and 0.231 s after**. All four SQLite checks ran in each baseline trial;
+all four were reused in each candidate trial. Full restore verification passed
+after every snapshot. These small, cached, shared-host measurements establish
+that the lost reuse is recovered, not an EBS speedup or downtime forecast. The
+benchmark isolates the backup journal transition; actual backup capture/upload
+time is excluded and is covered separately by the integration fixture.
+
+[Raw fictional results](evidence/validation-after-backup-2026-10-17.json) include
+individual trials, source hashes, check counts and restore-verification timings.
+Reproduce the bounded case with:
+
+```sh
+uv run --python 3.12 python -m tests.benchmark_host_preparation --megabytes 512 \
+  --runs 3 --modes cold after_backup --output .cache/after-backup-preparation.json
+```
+
+The next production release should retain `preparation_validation` counts and
+private per-file preparation profiles. Actual savings depend on how many costly
+databases retain identical bytes between deployments; collection and migrations
+can invalidate those checks even when the proof survives a routine backup.
+
+## Fresh verification from a completed routine backup
+
+A routine backup can now supply newer validation evidence than the preceding
+deployment. The earlier continuity fix preserved the old deployment proof, but
+could not certify catalog changes since that deployment. SQLite's backup API also
+changes destination header bytes even when a stopped source is unchanged, so its
+validated output commonly cannot match the next independent copy of the source.
+A small fictional fixture observed changes at header offsets 27, 43 and 95 in
+otherwise equivalent DELETE and checkpointed WAL databases.
+
+During routine backup capture, **after every writer has stopped together**, a
+SQLite main file with no nonempty WAL or rollback journal is copied verbatim into
+independent storage. This is an explicit `quiesced_raw_sqlite` caller contract;
+`copy_snapshot` keeps its online SQLite backup behavior by default. The existing
+`paused=True` backup API is likewise an explicit assertion that all writers are
+already stopped. Sidecar symlinks are rejected. A nonempty WAL or rollback journal
+uses SQLite's backup API, including its existing fail-closed behavior for a hot
+journal requiring write recovery. Immutable predecessor checks remain mandatory.
+
+Services resume before the captured files are checked, hashed and compressed.
+Every captured database still receives a complete SQLite check. Neither the
+`snapshot_finished` journal phase nor successful resumption proves validation:
+that phase precedes checking and upload. Only after the archive and its receipt
+have both uploaded, and the successful-backup receipt is recorded, may the operation
+publish a private verification manifest at
+`operations/last-backup-verification.json`. Its SHA-256, backup ID, release ID,
+operation ID, archive SHA-256 and SQLite verification contract are then bound into
+the **same completed backup journal**. The fixed file is bounded to 64 MiB when
+read; it contains file hashes and sizes, not payloads or secret values.
+
+Preparation first considers that current backup's own proof. Its fresh independent
+copy must match the complete recorded SHA-256 and byte count before reusing a
+SQLite check. Current journal, directory and proof permissions/ownership are checked;
+symlinks, hard links and oversized metadata are rejected. Missing, damaged,
+incompatible or stale fresh evidence falls back to the separately retained
+trusted deployment anchor, or a full check. No history search is added.
+
+The next backup does **not** inherit this fresh proof. It must earn its own after
+publication; a failed or interrupted attempt cannot claim success using the
+previous fixed file. Existing deployment-anchor continuity is preserved. Therefore
+one atomically replaced metadata file suffices: when a later backup writes it,
+the previous backup's fresh proof is no longer the current journal's anchor.
+A crash between proof publication and journal binding leaves unanchored metadata.
+A proof-publication failure does not invalidate a successfully uploaded backup
+and does not overwrite the deployment snapshot or its archived journal.
+
+This proof is not a recovery artifact. Routine archives retain their complete,
+self-contained format; restore always verifies archive/file hashes and every
+SQLite database independently. Restore, recovery, release changes and interrupted
+operations cannot promote a stale fresh proof into trusted evidence.
+
+### Expected benefit and limits
+
+An exact match for the observed 7.589 GB catalog could avoid its roughly
+641-second preparation check. That is a conditional opportunity, not a measured
+future deployment reduction. A collection, index migration or other write to the
+catalog invalidates the byte match. Scheduled backups are due at 08:00 and 20:00
+UTC; collection runs every four hours in America/Chicago. There is therefore only
+a limited interval after each backup before the next catalog mutation. In
+particular, release 82 began preparation after the 18:00 local collection, so a
+20:00 UTC backup would likely **not** have avoided that release's catalog check.
+Raw copying may separately shorten routine backup capture; its checks and upload
+still happen in full afterward.
+
+The integration test changes both databases after the deployment anchor, performs
+a complete routine backup, then deploys and reuses both newly earned checks.
+Coverage includes subsequent changes, WAL commits, hot rollback journals, unsafe
+metadata, identity/contract mismatches, capture/check/upload failures, optional
+proof/journal write failures, and actual process death between proof write and
+journal binding. None of those failures grants fresh validation.
+
+### Raw capture measurement
+
+Three alternating trials captured a 1,075,138,560-byte fictional indexed SQLite
+database on a local ARM64 Linux volume, Python 3.12 / SQLite 3.40.1, limited to
+two CPUs and 1 GiB memory. Fixture-only advisory eviction and `mincore` established
+zero resident source pages before each capture. The timed interval includes
+capture and fsync; full SQLite checks, content comparison and hashes ran afterward
+for every output. No production state or service pause was involved.
+
+| Capture | Median | Range | Exact source bytes |
+| --- | ---: | ---: | --- |
+| SQLite backup API | 2.843 s | 0.985–3.232 s | No, header differs |
+| Quiesced raw copy | 0.702 s | 0.691–2.867 s | Yes, every trial |
+
+The shared filesystem had substantial flush-time variability, including a raw
+copy slower than two API trials. These medians are observations, not a reliable
+percentage speedup or an EC2 prediction. The exact byte identity is the necessary
+property for fresh-proof reuse; safe fallback and post-resumption verification are
+more important than a particular copy timing. [Raw results](evidence/backup-raw-capture-2026-10-17.json)
+retain every trial and physical I/O count.
+
+Reproduce only on a bounded local Linux Docker volume with `TMPDIR` on that
+volume, `--cpus 2 --memory 1g --network none`:
+
+```sh
+python -m tests.benchmark_backup_raw_capture --megabytes 1024 --runs 3 \
+  --evict --output .cache/backup-raw-capture.json
+```

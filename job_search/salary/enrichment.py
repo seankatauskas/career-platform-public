@@ -171,6 +171,10 @@ def html_to_text(value: str) -> str:
 
 
 def prepare_enrichment(con: sqlite3.Connection) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional
+    if require_current():
+        check_optional(con, "enrichment")
+        return
     con.executescript(ENRICHMENT_SCHEMA)
 
 

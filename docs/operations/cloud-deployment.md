@@ -3,13 +3,16 @@
 For the Terraform-managed AWS installation, private Tailscale dashboard, fresh
 personal-data seed, and recovery commands, start with [docs/operations/aws-deployment.md](aws-deployment.md).
 
-The supported cloud shape is one Linux VM running Docker Compose. The dashboard,
-Hermes-facing MCP boundary, core worker, model worker, and networkless document-tool
-service are separate containers; an optional overlay adds the supervised Hermes agent.
+The supported cloud shape is one Linux VM running Docker Compose. Use Docker
+Engine 25 or newer and Compose 2.20.2 or newer for startup health-check intervals.
+The dashboard,
+Hermes-facing MCP boundary, batch and interactive workers for each queue lane, and
+networkless document-tool service are separate containers; an optional overlay adds the supervised Hermes agent.
 The application containers share one local-filesystem state
 directory; the tool service receives neither that state nor the private-secret mount.
-Worker ticks remain bounded and sequential, and the existing SQLite lane leases prevent
-accidental overlap. Do not scale any service above one replica and do not place SQLite
+Worker ticks remain bounded and sequential within each execution partition. SQLite
+leases prevent duplicate claims; see [interactive workers](interactive-workers.md) for
+routing, shared inference limits and rollback. Do not scale any service above one replica and do not place SQLite
 on NFS, SMB, or an object-store mount.
 
 This is the same deterministic application system as the macOS setup. Launchd remains
@@ -63,7 +66,7 @@ import json, os
 from pathlib import Path
 path = Path(os.environ["JOB_SEARCH_MAINTENANCE_DIR"]) / "gate.json"
 with path.open("x") as stream:
-    json.dump({"version": 1, "allowed_services": ["dashboard", "mcp", "core", "model", "hermes"],
+    json.dump({"version": 1, "allowed_services": ["dashboard", "mcp", "core", "model", "interactive-core", "interactive-model", "hermes"],
                "draining": False, "initialize_operation": os.environ["JOB_SEARCH_INITIALIZE_OPERATION"]}, stream)
 path.chmod(0o644)
 PY_GATE
@@ -199,7 +202,7 @@ docker compose -f compose.cloud.yaml build
 docker compose -f compose.cloud.yaml config --quiet
 docker compose -f compose.cloud.yaml up -d
 docker compose -f compose.cloud.yaml ps
-docker compose -f compose.cloud.yaml logs -f core model
+docker compose -f compose.cloud.yaml logs -f core model interactive-core interactive-model
 ```
 
 The default Python base is pinned to the official multi-platform image digest resolved
@@ -219,9 +222,14 @@ Normal scheduled cloud operation also requires runtime `inference_config` (or
 `JOB_SEARCH_INFERENCE_CONFIG`) to resolve to `/run/job-search/inference.json`: the
 intentionally slim cloud image omits the Apple/desktop local-model backends.
 
-`initialize` performs the idempotent database migration and schedule seed before the
-dashboard, MCP, and two workers start; the state-free document-tool service can start
-concurrently. Each worker waits five minutes only after its prior bounded tick
+`initialize` runs the explicit `migrate` command for database preparation and schedule
+seeding. Production services use `JOB_SEARCH_SCHEMA_MODE=require_current` and check
+existing schemas without silently preparing them. The `schema-check` service runs
+`check-schema` without migration; the AWS installer's eligible compatible path uses
+that boundary instead of initialization. A normal manual full-stack start can still
+run `initialize`, so use the journaled [deployment workflow](deployment-modes.md) for
+production releases rather than replacing it with ad-hoc Compose commands.
+The state-free document-tool service can start concurrently. Each worker waits five minutes only after its prior bounded tick
 completes. SIGTERM stops after an in-flight tick finishes; the long worker grace period
 prevents Compose from killing a legitimate one-hour scrape. Healthchecks probe both
 HTTP servers and owner-only worker liveness records.
@@ -229,8 +237,11 @@ HTTP servers and owner-only worker liveness records.
 The scraper's repository-relative board cache is symlinked into
 `JOB_SEARCH_STATE_DIR`, and core-worker exports and failed-board reports are written
 beside the persistent jobs database. Container replacement therefore does not discard
-board discovery state or operator diagnostics. Back up the state directory only while
-all Compose services are stopped, or use SQLite's online backup API for each database.
+board discovery state or operator diagnostics. Capture a recovery point for the
+whole application only while all writers are quiesced, using the supported backup
+operation. SQLite's online backup API can make an individual database consistent,
+but separate online copies do not establish a common point across databases and
+related files. Scheduled backups remain independent of compatible releases.
 
 ## Add Hermes and phone notifications
 
@@ -319,7 +330,7 @@ docker compose -f compose.cloud.yaml -f compose.hermes.yaml build
 docker compose -f compose.cloud.yaml -f compose.hermes.yaml config --quiet
 docker compose -f compose.cloud.yaml -f compose.hermes.yaml up -d
 docker compose -f compose.cloud.yaml -f compose.hermes.yaml ps
-docker compose -f compose.cloud.yaml -f compose.hermes.yaml logs -f hermes core model
+docker compose -f compose.cloud.yaml -f compose.hermes.yaml logs -f hermes core model interactive-core interactive-model
 ```
 
 The cloud runtime config's `hermes_telegram_target` and the overlay's

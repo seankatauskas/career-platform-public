@@ -63,6 +63,7 @@ job_search/salary/web/review/*
 !job_search/review_messages.py
 !job_search/resume_integration.py
 !job_search/runtime.py
+!job_search/schema_lifecycle.py
 !job_search/scanning.py
 !job_search/scheduler.py
 !job_search/secure_persistence.py
@@ -193,7 +194,9 @@ deploy/hermes/s6-rc.d/user/contents.d/*
 deploy/runpod/*
 !deploy/runpod/exact_embedding_service.py
 !job_search/collection/boards.py
+!job_search/collection/discovery_index.py
 !job_search/collection/dedupe.py
+!job_search/collection/dedupe_incremental.py
 !job_search/ranking/labeler.py
 !job_search/cli.py
 !job_search/collection/locations.py
@@ -353,6 +356,7 @@ deploy/hermes/plugins/career-interactions/*
 !job_search/job_reviews/model_gateway.py
 !job_search/job_reviews/auth_owner.py
 !job_search/job_reviews/runner.py
+!job_search/job_reviews/resource_monitor.py
 !job_search/job_reviews/benchmark.py
 !job_search/job_reviews/runner_config.py
 !job_search/job_reviews/packing.py

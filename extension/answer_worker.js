@@ -31,6 +31,14 @@ function mergeAnswers(previous, next) {
   return {version:1,fields:kept,omitted_fields:Math.max(previous?.omitted_fields||0,next?.omitted_fields||0)+omitted,
     truncated_values:Math.max(previous?.truncated_values||0,next?.truncated_values||0)};
 }
+async function answerFingerprint(snapshot) {
+  // Captures can arrive from the content script or the network fallback. Compare
+  // merged answers, independent of object/field order; choice order stays exact.
+  const canonical=value=>Array.isArray(value) ? value.map(canonical)
+    : value && typeof value==='object' ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])) : value;
+  const ordered={...snapshot,fields:[...snapshot.fields].sort((a,b)=>a.field_key<b.field_key?-1:a.field_key>b.field_key?1:0)};
+  return answerBase64(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonical(ordered)))));
+}
 async function rememberAnswers(page, snapshot) {
   if (!snapshot || snapshot.version!==1 || !Array.isArray(snapshot.fields)) throw new Error('Invalid application answers.');
   const connection=await trackingConnection();
@@ -38,15 +46,25 @@ async function rememberAnswers(page, snapshot) {
   const stored=(await chrome.storage.local.get(key))[key];
   const previous=stored && JobTracking.sameJob(stored.job,page.job) ? await openAnswers(connection,stored) : null;
   const merged=mergeAnswers(previous,snapshot);
-  await chrome.storage.local.set({[key]:{...await sealAnswers(connection,merged),job:page.job,updated_at:Date.now()}});
+  await chrome.storage.local.set({[key]:{...await sealAnswers(connection,{...merged,...(previous?.last_capture ? {last_capture:previous.last_capture} : {})}),job:page.job,updated_at:Date.now()}});
   return merged;
 }
 async function queueAnswers(page, snapshot, capturedAt) {
   const merged=await rememberAnswers(page,snapshot);
   const connection=await trackingConnection();
+  const draftKey=`tracking-draft-${page.tab_id}-${page.frame_id}`;
+  const draft=(await chrome.storage.local.get(draftKey))[draftKey];
+  const saved=await openAnswers(connection,draft);
+  const fingerprint=await answerFingerprint(merged);
+  if(saved.last_capture?.attempt_id===page.attempt_id && saved.last_capture.fingerprint===fingerprint) return;
   const captureId=crypto.randomUUID();
   const body={capture_id:captureId,attempt_id:page.attempt_id,page_url:page.job.canonical_url,captured_at:capturedAt,snapshot:merged};
-  await chrome.storage.local.set({[`tracking-answer-${captureId}`]:{...await sealAnswers(connection,body),attempt_id:page.attempt_id,queued_at:Date.now()}});
+  // Keep the checkpoint encrypted with the draft, across flushes and worker
+  // restarts. Publish it with the queued capture, never ahead of that write.
+  await chrome.storage.local.set({
+    [`tracking-answer-${captureId}`]:{...await sealAnswers(connection,body),attempt_id:page.attempt_id,queued_at:Date.now()},
+    [draftKey]:{...draft,...await sealAnswers(connection,{...merged,last_capture:{attempt_id:page.attempt_id,fingerprint}})}
+  });
 }
 async function flushAnswers() {
   const connection=await trackingConnection();

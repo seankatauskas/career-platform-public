@@ -7,12 +7,15 @@ from .operation_journal import OpsError
 
 
 def validate_policy(value: dict) -> dict:
-    if not isinstance(value, dict) or set(value) != {"version", "schema_compatibility", "test_baseline_sha", "predecessor"}:
+    required = {"version", "schema_compatibility", "test_baseline_sha", "predecessor"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"deployment_mode"}:
         raise ValueError("invalid release policy fields")
     if value["version"] != 1 or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", str(value["schema_compatibility"])):
         raise ValueError("invalid release compatibility identifier")
     if not re.fullmatch(r"[a-f0-9]{40}", str(value["test_baseline_sha"])):
         raise ValueError("test baseline must be a full commit SHA")
+    if value.get("deployment_mode", "migration") not in ("migration", "compatible"):
+        raise ValueError("invalid deployment mode")
     previous = value["predecessor"]
     if previous is not None:
         if not isinstance(previous, dict) or set(previous) != {"release_id", "source_sha"}:
@@ -58,3 +61,39 @@ def check_transition(target: dict, current: dict | None, *, rollback: bool = Fal
             raise ValueError("installed release differs from tested predecessor")
     except (ValueError, KeyError, TypeError) as error:
         raise OpsError(str(error)) from None
+
+
+def deployment_mode(target: dict, current: dict | None, *, rollback: bool = False) -> tuple[str, str]:
+    """Select the cheaper procedure only for a reviewed, proven release edge.
+
+    check_transition remains mandatory. Missing proof never grants permission to
+    omit a checkpoint; the original migration procedure is the fallback.
+    """
+    newer, older = (current, target) if rollback else (target, current)
+    if newer is None or older is None:
+        return "migration", "first_install"
+    policy = validate_policy(newer.get("release_policy"))
+    if policy.get("deployment_mode", "migration") != "compatible":
+        return "migration", "policy_requires_migration"
+    if any(type(m.get("startup_schema_protocol")) is not int or m["startup_schema_protocol"] != 2
+           for m in (newer, older)):
+        return "migration", "startup_boundary_unavailable"
+    contract = newer.get("runtime_contract_sha256")
+    if not isinstance(contract, str) or not re.fullmatch(r"[a-f0-9]{64}", contract) or older.get("runtime_contract_sha256") != contract:
+        return "migration", "runtime_contract_changed"
+    if (newer.get("hermes_base_image") != older.get("hermes_base_image") or
+            newer.get("tectonic_version") != older.get("tectonic_version") or
+            newer.get("schema_compatibility") != older.get("schema_compatibility")):
+        return "migration", "persistent_runtime_changed"
+    evidence = newer.get("transition_validation", {})
+    proof = evidence.get("compatible_deployment")
+    if (not evidence.get("rollback_passed") or not isinstance(proof, dict) or
+            type(proof.get("protocol")) is not int or proof["protocol"] != 2 or proof.get("passed") is not True or
+            proof.get("baseline_startup_read_only") is not True or
+            proof.get("candidate_startup_read_only") is not True or
+            proof.get("baseline_diagnostics_read_only") is not True or
+            proof.get("candidate_diagnostics_read_only") is not True or
+            proof.get("predecessor_after_candidate_writes") is not True or
+            proof.get("runtime_contract_sha256") != contract):
+        return "migration", "compatible_transition_unproven"
+    return "compatible", "tested_compatible_edge"

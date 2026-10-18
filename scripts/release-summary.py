@@ -22,7 +22,8 @@ def summary(environment, invocation=None):
         if not isinstance(result, dict):
             result = {}
         if invocation.get('Status') == 'Success' and result.get('status') in {'deployed','deployed_paused'}:
-            value.update({key: result.get(key) for key in ('operation_id','previous_release','phase_times','backup')})
+            value.update({key: result.get(key) for key in ('operation_id','previous_release','phase_times','backup',
+                'deployment_mode','deployment_mode_reason','timings_seconds')})
             value['deployment_status'] = result['status']
             value['next_action'] = 'Verify host status; a paused installation still requires explicit activation.'
         elif invocation.get('Status') in {'Failed','Cancelled','TimedOut'}:

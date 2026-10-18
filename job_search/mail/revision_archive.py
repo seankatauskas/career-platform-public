@@ -55,6 +55,10 @@ class ImmutableMailArchive(EncryptedMailArchive):
         # The composition verifies this frozen snapshot against its conversion
         # report. Reads below never initialize or migrate the predecessor schema.
         self.predecessor_path = Path(predecessor_path).resolve() if predecessor_path is not None else None
+        from job_search.schema_lifecycle import require_current, check_optional_path
+        if require_current():
+            check_optional_path(self.db_path, "mail_archive")
+            return
         with connect(self.db_path) as con:
             con.executescript(SCHEMA)
 

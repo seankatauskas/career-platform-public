@@ -230,6 +230,10 @@ def career_source_facts(content: Mapping[str, Any]) -> list[dict[str, Any]]:
 class CareerStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path).expanduser().absolute()
+        from job_search.schema_lifecycle import require_current, check_optional_path
+        if require_current():
+            check_optional_path(self.db_path, "career")
+            return
         with connect(self.db_path) as con:
             con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
 

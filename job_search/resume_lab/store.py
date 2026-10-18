@@ -693,6 +693,10 @@ class ResumeLabStore:
         if supplied.is_symlink():
             raise ResumeBoundaryError("resume-lab database must not be a symbolic link")
         self.db_path = supplied.resolve()
+        from job_search.schema_lifecycle import require_current, check_optional_path
+        if require_current():
+            check_optional_path(self.db_path, "resume")
+            return
         with connect(self.db_path) as connection:
             # Schema creation, compatibility ALTERs, and backfill are one serialized
             # migration.  Several cloud processes can cold-start after the one-shot

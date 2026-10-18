@@ -106,7 +106,7 @@ def main():
     parser.add_argument('--evict', action='store_true')
     parser.add_argument('--check-workers', type=int, choices=(0, 2), default=0)
     parser.add_argument('--ops-source', type=Path)
-    parser.add_argument('--modes', nargs='+', choices=('cold', 'reusable', 'changed', 'changed_largest', 'changed_after', 'wal', 'rollback', 'invalid'),
+    parser.add_argument('--modes', nargs='+', choices=('cold', 'reusable', 'after_backup', 'changed', 'changed_largest', 'changed_after', 'wal', 'rollback', 'invalid'),
                         default=['cold', 'reusable', 'changed', 'changed_after', 'wal', 'invalid'])
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -125,7 +125,9 @@ def main():
               'measurements': []}
     with tempfile.TemporaryDirectory(prefix='career-preparation-bench-') as temporary:
         root = Path(temporary).resolve(); seed(root, args.megabytes)
-        c = {'data_root': str(root), 'secret_arns': {}}
+        releases = root / 'application'; release = releases / 'releases/benchmark'
+        release.mkdir(parents=True); (releases / 'current').symlink_to(release)
+        c = {'data_root': str(root), 'secret_arns': {}, 'release_root': str(releases)}
         with probe(root / 'probe.db') as idle:
             time.sleep(1)
         idle.sort()
@@ -136,6 +138,12 @@ def main():
             for mode in args.modes:
                 if mode == 'cold':
                     shutil.rmtree(root / 'operations', ignore_errors=True)
+                elif mode == 'after_backup':
+                    # Isolate the journal transition that used to discard the
+                    # completed deployment proof. No archive/backup time is
+                    # included; the integration suite runs the full backup.
+                    operation = ops.Operation.begin(c, 'backup', previous_release='benchmark')
+                    operation.finish('snapshot_finished')
                 elif mode in ('changed', 'changed_largest'):
                     db = sqlite3.connect(root / ('state/jobs.db' if mode == 'changed_largest' else 'state/owners.db'))
                     db.execute('UPDATE records SET company=? WHERE id=0', (f'Fictional changed {trial}',))
@@ -177,7 +185,7 @@ def main():
                 verification_started = time.monotonic()
                 ops.verify_snapshot(snapshot)
                 verification_seconds = time.monotonic() - verification_started
-                operation = ops.Operation.begin(c, 'deploy', backup=receipt)
+                operation = ops.Operation.begin(c, 'deploy', backup=receipt, target_release='benchmark')
                 operation.finish('deployed')
                 if previous: shutil.rmtree(previous)
                 previous = snapshot

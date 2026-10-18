@@ -330,6 +330,10 @@ CREATE TABLE IF NOT EXISTS preference_protected_acceptances (
 
 
 def prepare_state(db_path: Path) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional_path
+    if require_current():
+        check_optional_path(db_path, "ranking")
+        return
     with connect_state(db_path) as con:
         con.executescript(STATE_SCHEMA)
         _migrate_json_embedding_cache(con)

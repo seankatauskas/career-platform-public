@@ -1,0 +1,142 @@
+{
+  "scope": "fictional local copy/hash; not EC2 deployment timings",
+  "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+  "bytes": 2147483648,
+  "cache": "fixture-only advisory eviction",
+  "measurements": [
+    {
+      "mode": "serial",
+      "trial": 0,
+      "seconds": 2.7254614590201527,
+      "cpu_seconds": 1.5966110770000004,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "overlap",
+      "trial": 0,
+      "seconds": 2.1594710431527346,
+      "cpu_seconds": 1.7524148669999997,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "overlap",
+      "trial": 1,
+      "seconds": 4.234137543011457,
+      "cpu_seconds": 1.7676343980000002,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "serial",
+      "trial": 1,
+      "seconds": 3.684603876899928,
+      "cpu_seconds": 1.5523942959999992,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "serial",
+      "trial": 2,
+      "seconds": 7.704509212169796,
+      "cpu_seconds": 1.647191340000001,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "overlap",
+      "trial": 2,
+      "seconds": 1.6556014998350292,
+      "cpu_seconds": 1.6952873650000022,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "overlap",
+      "trial": 3,
+      "seconds": 8.560785920824856,
+      "cpu_seconds": 1.8586758900000007,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "serial",
+      "trial": 3,
+      "seconds": 2.178621542872861,
+      "cpu_seconds": 1.5804899389999996,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "serial",
+      "trial": 4,
+      "seconds": 2.2839523758739233,
+      "cpu_seconds": 1.5510678270000007,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    },
+    {
+      "mode": "overlap",
+      "trial": 4,
+      "seconds": 1.552135376026854,
+      "cpu_seconds": 1.7109493100000002,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 524288
+      },
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "physical_read_bytes": 2147483648,
+      "physical_write_bytes": 2147483648
+    }
+  ],
+  "median_seconds": {
+    "serial": 2.7254614590201527,
+    "overlap": 2.1594710431527346
+  }
+}

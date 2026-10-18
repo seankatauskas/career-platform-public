@@ -42,6 +42,24 @@ outcome. Do not cancel an installation to make room for another. These instructi
 coordinate sessions; the workflows and host enforce serialization and transition
 checks. See `docs/operations/coordinated-releases.md` for setup and commands.
 
+Read `docs/operations/deployment-modes.md` before changing release policy, startup,
+migrations, deployment, or recovery. Ordinary compatible releases and migration
+releases have different recovery boundaries. Keep schema changes in explicit
+migration commands; production service startup must check supported state without
+silently migrating it. Protocol 2 permits static assets/docs plus exact audited
+versions of `job_search/runtime_readiness.py`; all other Python and runtime inputs
+remain fingerprinted. Review callers and persisted effects before updating
+`deploy/compatible-backend.json`; never refresh its hashes merely to gain eligibility.
+Both images must pass diagnostics/startup preservation and candidate-write rollback
+probes. Business-logic/schema/dependency changes remain migration releases.
+A compatible release requires tested predecessor/source/image identity and runtime
+compatibility evidence, not a filename heuristic or a flag
+that bypasses backups. Missing eligibility keeps the conservative migration path.
+The first release introducing a new protocol must use that path. Scheduled backups
+remain independent, and application rollback must preserve newer user writes.
+Update the hand-written release/deployment guides with changes to these contracts;
+do not hand-edit generated OpenWiki pages or claim unmeasured deployment savings.
+
 ## Running the tests
 
 The suite is offline, needs no network and no dependencies, and finishes in about a

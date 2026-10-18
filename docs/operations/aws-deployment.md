@@ -5,11 +5,12 @@ Hermes uses hosted conversational inference and Telegram; background embeddings
 and salary extraction use separately configured remote endpoints. The EC2 host
 does not run a GPU model.
 
-**Deployment status:** the implementation and offline tests do not establish a
-running AWS installation. AWS provisioning, account enrollment, real model
-migration, Outlook authentication, replacement-host recovery, and the seven-day
-soak have not been performed. Do not describe the deployment or recovery targets
-as measured resume accomplishments until the live acceptance record is complete.
+**Evidence scope:** this runbook describes the checked-in deployment procedure.
+Inspect the installed release and its private receipts for production status; a
+merged implementation or offline test is not evidence that a new mode is deployed.
+Replacement-host recovery and soak targets require their own live acceptance
+records. See [deployment modes](deployment-modes.md) before selecting the release's
+migration and rollback contract.
 
 ## 1. Prepare accounts and the host
 
@@ -415,8 +416,29 @@ Terraform workflow. The installation summary reports the release, SSM command, b
 timestamps; an unknown SSM result must be inspected before another deployment.
 A repeat request for an already installed healthy release does not reinstall it.
 
-Deployment first prepares private, speculative copies of files at least 1 MiB while
-services remain available, under the existing operations lock. These are scratch
+### Deployment mode selection
+
+The checked-in policy can request `deployment_mode: "compatible"`; omitted or
+`"migration"` selects the conservative procedure. The host chooses the compatible
+procedure only after the exact predecessor, immutable transition evidence, startup
+schema protocol, runtime contract and live schema checks pass. Missing eligibility
+falls back to migration before data changes, with a recorded reason. An unknown
+policy mode is invalid. The first rollout of the startup boundary uses migration.
+See [the complete contract](deployment-modes.md) for eligibility and recovery.
+
+An eligible compatible deployment preserves current data and installed runtime
+configuration/secret versions, skips snapshot preparation/capture and initialization,
+and retains draining, locks, journals, startup gates and health checks. The live
+schema precheck honors WAL state; the stopped recheck uses `check-schema --offline`
+and rejects noncheckpointed journal contents. Failure of the stopped check reverts
+to the predecessor without initialization. It does not provide a new data-restoration
+checkpoint. Scheduled off-host backups are unchanged.
+
+### Migration deployment snapshots
+
+The remaining snapshot procedure in this subsection applies to migration mode.
+It drains background workers, then prepares private, speculative copies of files at
+least 1 MiB while the dashboard remains available, under the existing operations lock. These are scratch
 files, **not rollback points**. Their SQLite checks, hashes and flushes happen
 before downtime. Preparation uses no live SQLite connection and changes no source
 file. A torn database copy is discarded; an I/O or capacity failure aborts before
@@ -424,19 +446,20 @@ stopping services. No new AWS infrastructure or permissions are required.
 
 Preparation hashes each buffer as it is copied, avoiding another destination
 read. It can reuse a successful SQLite check for **exactly those bytes** from the
-last completed deployment/rollback's retained snapshot. The private operation
-journal must commit to that snapshot's manifest digest, and the manifest must
-record the same verification method and SQLite version. Metadata must be regular,
-single-link files owned by the operations user with private permissions. Missing,
-old, damaged or untrusted metadata falls back to a fresh SQLite check. There is no
-separate persistent cache or cache of speculative preparations. The first deployment
-with this capability is cold; scheduled backups/recovery can also replace the
-journal anchor and cause a cold preparation. See [host preparation measurements](host-preparation-performance.md).
+last completed deployment/rollback's retained snapshot, or a newer successfully
+published routine backup. The private operation journal must commit to the
+verification manifest digest, with matching release, operation identity and SQLite
+verification contract. Metadata must be regular, single-link files owned by the
+operations user with private permissions. Missing, old, damaged or untrusted fresh
+backup evidence falls back to the trusted deployment anchor or a full SQLite check.
+A routine backup earns its own bounded private proof only after full validation and
+successful archive/receipt publication. No speculative preparation certifies future
+checks. See [fresh backup verification](host-preparation-performance.md#fresh-verification-from-a-completed-routine-backup).
 
-Workers then stop claiming work between jobs and acknowledge a drain while the
-dashboard stays available. The drain deadline is 70 minutes; exceeding it cancels
-the update before data changes and clears the drain request. Once drained, all
-writers stop. Capture enumerates the stopped tree again, hashes each reuse
+During draining, workers stop claiming work between jobs and acknowledge the request
+while the dashboard stays available. The drain deadline is 70 minutes; exceeding it
+cancels the update before data changes and clears the drain request. After draining
+and speculative preparation, the remaining writers stop. Capture enumerates the stopped tree again, hashes each reuse
 candidate's **entire source**, and reuses its independently checked bytes only if
 the hash and size match. Equal size or timestamps alone never establish equality.
 SQLite with any nonempty WAL or rollback journal always uses the consistent backup
@@ -534,8 +557,10 @@ initializers, validates its evidence, and is safe to repeat with the same operat
 ID. It always leaves the recovered system paused. Other mutations are blocked
 while recovery is unresolved.
 
-Before writes resume, an interrupted deployment can recover its previous snapshot
-and release. After writes may have resumed, recovery preserves current data; use a
+Before writes resume, an interrupted migration deployment can recover its previous
+snapshot and release. A compatible deployment has no data snapshot: recovery
+preserves the existing data and follows its journaled release-switch boundary.
+After writes may have resumed, recovery preserves current data; use a
 forward fix or a tested compatible application rollback. A partially published
 restore recovers its original directory set. A committed restore keeps the restored
 data. Missing evidence or unavailable secret versions require investigation; they
@@ -655,14 +680,17 @@ copies only `OPENROUTER_API_KEY` from the pinned `hermes.env` secret version int
 the dedicated key file. Both files are owner-only and covered by secret-update
 rollback. Recovery derives them from the recorded original secret versions; neither
 requires a separate secret inventory entry. The optional `compose.mail.yaml` overlay
-mounts them read-only into **core and dashboard**. Core uses them for mailbox
+mounts them read-only into **core, interactive-core and dashboard**. The interactive
+core worker uses them for mailbox
 processing; dashboard uses them to recover failed email analysis from the existing
 archive when Review loads. Both honor the remote-mail opt-in. The model worker,
 MCP, and document tools do not receive these mounts in the legacy composition. With
 `application_backend: "owners"`, the additional `compose.applications.yaml` overlay
-mounts the dedicated mail profile, provider key, and archive key into the model
+mounts the dedicated mail profile, provider key, and archive key into the interactive-model
 worker for Understanding. See the [application release gate](../application-redesign/08-production-readiness.md)
-before selecting that backend. Hermes's other environment
+before selecting that backend and [interactive workers](interactive-workers.md)
+for partitioned worker services and rollback. The briefing overlay likewise mounts
+its profile and key into interactive-model. Hermes's other environment
 entries are never exposed to core or dashboard.
 
 Pause through the operations command, materialize secrets, and run a bounded mail
@@ -738,7 +766,8 @@ email drafts, or calendar proposals. Complete those through the existing UI.
 The timer checks every 30 minutes for backups due at 08:00 and 20:00 UTC and retries a
 failed attempt up to three times, 30 minutes apart. It pauses writers, snapshots
 SQLite consistently, captures
-model/resume/Hermes state, resumes the previous services, and uploads a checksummed
+model/resume/Hermes state, resumes the previous services, validates every captured
+database, and uploads a checksummed
 bundle to S3. Encryption keys are retained separately in Secrets Manager. Record
 the backup's exact secret versions and release ID. A backup failing to upload
 must not update the successful-backup timestamp. The receipt distinguishes
@@ -747,6 +776,23 @@ scheduled attempt sends an SNS alert and persists a failure metric. An unresolve
 maintenance operation blocks automatic retries until recovery. The backup-age
 alarm threshold is 24 hours, with normal CloudWatch evaluation latency. A sustained
 backup failure can exceed the 24-hour recovery-point target.
+
+While globally quiesced, routine backups copy a SQLite main file verbatim only
+when no nonempty WAL or rollback journal exists; otherwise SQLite backup handles
+the committed state. Database checks, checksumming and compression run against
+independent captured files after services resume. Failure during these phases publishes no successful
+receipt and preserves the previous successful backup. Capturing still requires
+all writers to stop together; online per-database capture would not preserve
+cross-database consistency. Backup receipts include capture, verification and
+service-pause timings. See [snapshot pause measurements](snapshot-pause-performance.md).
+
+Routine archives use gzip level 3. Each file is checked before packing; its hash
+is computed from the bytes fed to tar, and the manifest is appended last. The
+compressed archive hash is computed while writing, including gzip finalization.
+The archive remains the same self-contained `tar.gz` recovery format. These
+streaming hashes avoid rereading every payload and the completed archive solely
+for checksums. Restore still verifies archive and file hashes plus SQLite checks.
+See [archive efficiency](backup-archive-efficiency.md) for measurements and limits.
 
 The two daily windows leave time for upload and retry before the 24-hour threshold;
 they also produce approximately twice as many retained S3 backups as a daily
@@ -783,11 +829,26 @@ remain errors, not successful deferrals.
 sudo /opt/job-search/current/scripts/job-search-ops backup
 ```
 
-Normal deployments take a predeployment rollback snapshot; successful deployments
+Migration deployments take a predeployment rollback snapshot; eligible compatible
+deployments do not. Successful deployments
 retain the two newest published local snapshots across directory and legacy archive
 formats. Interrupted staging and unknown/operator-created paths are never pruned;
 inspect them explicitly before removing them. A cleanup failure is reported as
 `cleanup_failed_backups_preserved` without changing an already healthy deployment.
+The migration procedure drains background workers before preparing large checked copies while
+the dashboard stays available. It then stops all remaining writers and proves
+full source-content equality before reusing any copy; changed or journaled files
+are recaptured and checked. Unlike routine off-host backups, deployment must
+finish all snapshot verification and durable publication before migration begins.
+The preparation interval pauses automation and is recorded separately from
+dashboard downtime. An interrupted preparation leaves an incomplete operation
+that must be recovered; an ordinary copy failure resumes the drained workers.
+Completed routine backups preserve an explicit reference to the last successful
+deployment's archived verification journal and can publish their own newer proof
+after full checks and successful archive/receipt upload. Matching independent copies may reuse
+those integrity checks on the next deployment; changed, missing or incompatible
+evidence receives fresh validation. Routine backup and restore integrity checks
+remain mandatory. See [validation continuity](host-preparation-performance.md#validation-continuity-across-routine-backups).
 The release tracks
 the previous image and backup. Once normal writes resume, do not automatically
 replace the database with the old snapshot. For a reviewed schema-compatible

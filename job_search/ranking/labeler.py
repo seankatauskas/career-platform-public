@@ -655,6 +655,10 @@ def _migrate_preferences(con: sqlite3.Connection, columns: set[str]) -> None:
 
 
 def prepare_preferences(db_path: Path) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional_path
+    if require_current():
+        check_optional_path(db_path, "preferences")
+        return
     if not db_path.exists():
         raise ValueError(f"database does not exist: {db_path}")
     with connect(db_path) as con:

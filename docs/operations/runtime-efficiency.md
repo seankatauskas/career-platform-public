@@ -264,9 +264,69 @@ support this shortcut. Existing scores without a trusted cache record are
 recomputed during that pass. Subsequent unchanged queued refreshes skip the
 catalog scan. The shortcut applies only to embedding-free policies; dense paths
 retain their existing refresh behavior.
-Source tracking is deliberately conservative: even a collection sweep that only
-updates `last_seen` triggers validation. The shortcut removes duplicate queued
-passes over the same catalog; it does not eliminate validation after collection.
+Observation-only updates to `last_seen` now preserve the score-input revision.
+The next refresh updates the receipt's source watermark without rebuilding
+families or feature documents. Other source columns, including closure/location
+metadata, still invalidate affected families even when timestamps do not change.
+
+### Prepare and score affected families
+
+After one complete pass, transactional journals identify old and new family
+blocks by normalized ATS, company, and title. An indexed block map lets preparation
+read and normalize descriptions only inside changed blocks. Every family within
+a changed block participates in its TF-IDF/template comparison, because a new
+family can change similarity weights for existing members. Historical template
+lineage resolution still reads global lineage/member metadata and redirects
+unaffected blocks when historical groups merge; description processing is scoped.
+
+Sparse policies use a contiguous source-event journal to check affected current
+families and remove affected obsolete scores. Complete coverage still means every
+current family has a score. A changed model, dependency, implementation, source
+schema, database identity, or damaged tracking forces a full validation pass.
+Modified score rows force repair. The journal retains approximately 100,000 source
+mutations between maintenance calls; policies behind that window safely use a
+full pass. An interrupted incremental pass retains committed batches, and its
+retry performs a full fingerprint check before publishing a new coverage seal.
+
+Preparation stages changed block membership in temporary tables, preserving a
+consistent source snapshot without holding the main writer lock during expensive
+normalization/comparison. A concurrent collector commit invalidates the later
+write upgrade and retries safely. Publishing the derived tables, block map, and
+preparation seal is one transaction. Explicit `dedupe prepare` continues to run
+a full rebuild for repair; ranking requests incremental preparation automatically.
+
+**Rollout:** the first refresh after installing this change rebuilds the block
+index and tracking seals and performs a complete scoring validation. It can incur
+the previous full-pass cost; savings apply after that initial pass. Later code or
+normalization changes intentionally invalidate the appropriate seals again.
+Rollback to a predecessor that does not know these tables still records raw and
+derived writes through the installed SQL triggers. Its full preparation advances
+the derived revision without certifying the candidate seal. The release transition
+probe preserves every source/user row, permits only that monotonic counter change,
+and verifies a subsequent candidate full repair against raw fingerprints and
+full-preparation parity.
+
+Refresh results and progress expose `phase_seconds.preparation`,
+`phase_seconds.feature_and_scoring`, and `phase_seconds.total`, plus
+`expected_checked_families` in progress and `changed_families` in both. Preparation
+reports `changed_blocks`, `examined_jobs`, and `prepared_families`. Existing
+`checked_families` and per-policy `recomputed_families` distinguish verification
+from actual new scores.
+
+A bounded local benchmark on October 17 used 3,000 fictional families, 256-family
+batches, and deterministic stub predictions (no provider or model inference):
+
+| Change | Elapsed | Families checked | Families recomputed per policy |
+| --- | ---: | ---: | ---: |
+| Initial scoring pass | 0.755 s | 3,000 | 3,000 |
+| Observation timestamps only | 0.005 s | 0 | 0 |
+| One department edit | 0.007 s | 1 | 1 |
+| One description edit | 0.018 s | 1 | 1 |
+
+The description edit prepared one block and examined one job. Initial full
+preparation took 0.249 s separately. These measurements demonstrate bounded work
+on the fixture; they are not a production runtime forecast. Reproduce with
+`uv run python -m tests.benchmark_incremental_ranking --families 3000`.
 
 The dashboard separates catalog coverage from current activity. “Checking for
 ranking updates” counts families examined, while recomputed counts describe

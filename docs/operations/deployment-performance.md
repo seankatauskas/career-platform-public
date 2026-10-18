@@ -1,5 +1,13 @@
 # Deployment performance
 
+The October 17 [startup follow-up](deployment-startup-performance.md) removes
+duplicate tools recreation, moves immutable reviewer export before downtime, and
+uses fast startup probes while retaining normal health-check intervals.
+
+The October 17 [snapshot pause follow-up](snapshot-pause-performance.md) changes
+the preparation order and routine-backup validation boundary. The historical
+measurements below remain specific to their original implementation.
+
 For the subsequent investigation of the 699-second **online host preparation**,
 including streaming hashes, exact-content verification reuse and per-file
 measurements, see [host preparation performance](host-preparation-performance.md).

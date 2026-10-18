@@ -349,6 +349,11 @@ class OldMethodTests(unittest.TestCase):
                             availability=lambda jobs, **kw: self.observations(rid))
         self.assertEqual(result['status'], 'published')
         self.assertEqual(len(attempts[1]['assessments']), 1)
+        reports = [json.loads(p.read_text()) for p in (config.state_dir/'old-method'/rid).glob('attempt_*/resources.json')]
+        self.assertEqual(len(reports), 2)
+        self.assertEqual({r['review_phase'] for r in reports}, {'failed', 'published'})
+        self.assertTrue(all(r['finished_at'] and r['input_jobs'] == 1 for r in reports))
+        self.assertEqual(next(r for r in reports if r['review_phase'] == 'published')['selected_jobs'], 1)
 
     def test_shutdown_keeps_checkpoint_without_publication(self):
         config = RunnerConfig(application_config=self.root/'app.json', state_dir=self.root/'state', runtime_dir=self.root/'runtime',
@@ -369,6 +374,9 @@ class OldMethodTests(unittest.TestCase):
         self.assertEqual(status['phase'], 'interrupted')
         self.assertEqual(status['assessment_count'], 1)
         self.assertIsNone(status['receipt'])
+        report = json.loads(next((config.state_dir/'old-method'/rid).glob('attempt_*/resources.json')).read_text())
+        self.assertEqual(report['review_phase'], 'interrupted')
+        self.assertIsNotNone(report['finished_at'])
 
     def test_sealed_result_resumes_validation_without_more_inference(self):
         config = RunnerConfig(application_config=self.root/'app.json', state_dir=self.root/'state', runtime_dir=self.root/'runtime',

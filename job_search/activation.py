@@ -60,6 +60,15 @@ def set_control(config, capability: str, enabled: bool, *, expected_revision: in
         old = con.execute('SELECT * FROM automation_controls WHERE capability=?',(capability,)).fetchone()
         revision = old['revision'] if old else 0
         if revision != expected_revision: raise ValueError('automation settings changed; refresh before deciding')
+        if enabled and capability in {"ranking", "salary"}:
+            from .schema_lifecycle import require_current, check_feature_schemas
+            if require_current():
+                try:
+                    check_feature_schemas(config, capability)
+                except (RuntimeError, sqlite3.DatabaseError, OSError) as exc:
+                    raise ValueError("Prepare feature schemas under maintenance before activation: "
+                                     "python -m job_search --config <config> migrate --prepare-feature "
+                                     + capability) from exc
         if enabled and capability == 'mail':
             if not config.outlook_client_id: raise ValueError('configure Outlook before activation')
             con.execute('INSERT OR IGNORE INTO outlook_activation VALUES (?,?)',(config.outlook_account_id,stamp))

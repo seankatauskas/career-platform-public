@@ -42,6 +42,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
+      start_interval: 2s
   hermes:
     environment:
       JOB_SEARCH_INTERACTION_URL: http://interactions:8768

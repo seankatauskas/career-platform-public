@@ -15,11 +15,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from job_search.release_policy import validate_policy, validate_evidence
+from job_search.deployment_contract import describe_commit
 import tarfile
 
 
 ROOT_FILES = frozenset({
-    "deploy/release-policy.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "compose.chief.yaml", "compose.briefing.yaml", "Dockerfile", "Dockerfile.hermes", "Dockerfile.codex-review", "Dockerfile.codex-review.dockerignore", ".dockerignore", "requirements/cloud.txt",
+    "deploy/release-policy.json", "deploy/compatible-backend.json", "compose.cloud.yaml", "compose.hermes.yaml", "compose.mail.yaml", "compose.chief.yaml", "compose.briefing.yaml", "Dockerfile", "Dockerfile.hermes", "Dockerfile.codex-review", "Dockerfile.codex-review.dockerignore", ".dockerignore", "requirements/cloud.txt",
     "job_search/collection/boards.seed.json", "job_search/job_reviews/reviewer_rubric.md", "scripts/job-search-ops",
     "scripts/job-search-seed",
     "compose.applications.yaml",
@@ -50,6 +51,8 @@ def git(repo: Path, *args: str) -> bytes:
 
 
 def build(repo: Path, output: Path, metadata: dict, *, evidence: dict | None = None) -> dict:
+    if {'startup_schema_protocol', 'runtime_contract_sha256'} & metadata.keys():
+        raise ValueError('startup capabilities must be derived from committed source')
     source = metadata.get("source_sha", "")
     if not re.fullmatch(r"[a-f0-9]{40}", source):
         raise ValueError("source_sha must identify one commit")
@@ -93,6 +96,16 @@ def build(repo: Path, output: Path, metadata: dict, *, evidence: dict | None = N
     required = {"compose.cloud.yaml", "job_search/aws_ops.py", "scripts/job-search-ops"}
     if not required <= names:
         raise ValueError("source commit is missing required runtime files")
+    if 'job_search/schema_lifecycle.py' in names:
+        capability = describe_commit(repo, source)
+        manifest.update(startup_schema_protocol=capability['protocol'], runtime_contract_sha256=capability['runtime_contract_sha256'])
+        proof = (evidence or {}).get('compatible_deployment')
+        if isinstance(proof, dict) and proof.get('passed') is True:
+            if (proof.get('runtime_contract_sha256') != manifest['runtime_contract_sha256'] or
+                    type(proof.get('protocol')) is not int or
+                    proof['protocol'] != manifest['startup_schema_protocol'] or
+                    not capability['backend_audit_current']):
+                raise ValueError('compatible transition evidence differs from committed runtime')
     output.mkdir(parents=True, exist_ok=True)
     bundle = output / "release.tar.gz"
     if bundle.exists() or (output / "manifest.json").exists():

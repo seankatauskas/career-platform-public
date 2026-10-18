@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "measured_source_sha": "6eb8534d7ba30c8091cc2efcb1d82cda6166802a",
+  "environment": {
+    "os": "Ubuntu24.04 ARM64 with Rosetta linux/amd64 Docker",
+    "cpus": 6,
+    "memory_gib": 16,
+    "scope": "fictional offline/browser/native acceptance; warm image/toolchain caches; no providers or production changes",
+    "caveats": [
+      "Shared physical Mac; parent macOS suites overlapped part of three-worker measurement.",
+      "Historical release82 serial baseline is a different commit and includes dependency setup.",
+      "Single measurement per worker setting, not a statistically isolated benchmark."
+    ]
+  },
+  "historical_prepare_run": 39079640170,
+  "historical_serial_gate_steps_seconds": 245,
+  "historical_dependency_rebuild_seconds": 27.6,
+  "historical_application_push_seconds": 21.47,
+  "parallel_comparison": [
+    {
+      "schema_version": 1,
+      "passed": true,
+      "seconds": 155.277,
+      "groups": [
+        {
+          "name": "native",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 96.306,
+          "log": ".cache/throughput-benchmark/parallel-3/native.log"
+        },
+        {
+          "name": "offline",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 155.277,
+          "log": ".cache/throughput-benchmark/parallel-3/offline.log"
+        }
+      ],
+      "suite_workers": 3,
+      "min_mem_available_kib": 13207016,
+      "suite_count": 231
+    },
+    {
+      "schema_version": 1,
+      "passed": true,
+      "seconds": 99.852,
+      "groups": [
+        {
+          "name": "native",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 93.058,
+          "log": ".cache/throughput-benchmark/parallel-6/native.log"
+        },
+        {
+          "name": "offline",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 99.852,
+          "log": ".cache/throughput-benchmark/parallel-6/offline.log"
+        }
+      ],
+      "suite_workers": 6,
+      "min_mem_available_kib": 13419164,
+      "suite_count": 231
+    }
+  ],
+  "revision_cache": {
+    "seconds": 0.2374215649906546,
+    "identical_filesystem_layers": true,
+    "filesystem_layer_count": 10,
+    "images": [
+      {
+        "id": "sha256:ad2e193c92e173e426d7d55f7071915ea93f0599306887dace5000e090e0a426",
+        "source_label": "6eb8534d7ba30c8091cc2efcb1d82cda6166802a",
+        "source_environment": "JOB_SEARCH_SOURCE_REVISION=6eb8534d7ba30c8091cc2efcb1d82cda6166802a"
+      },
+      {
+        "id": "sha256:72a099da929d2999a25b9a374cf9129c1f14873591c4d49e7bf35aa61075ffda",
+        "source_label": "1111111111111111111111111111111111111111",
+        "source_environment": "JOB_SEARCH_SOURCE_REVISION=1111111111111111111111111111111111111111"
+      }
+    ]
+  }
+}

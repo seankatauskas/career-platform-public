@@ -1,0 +1,105 @@
+{
+  "scope": "fictional local collected-jobs database; not production downtime",
+  "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+  "sqlite": "3.40.1",
+  "schema": "collection.boards._prepare; grown overflow descriptions and deleted rows",
+  "file_bytes": 3080863744,
+  "sha256": "255f1bac5427685e2dcce0aff5666f09479aa33f0ee03517a188f4f403882310",
+  "cache": "fixture-only advisory eviction",
+  "measurements": [
+    {
+      "mode": "default",
+      "trial": 0,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 10.527948545990512,
+      "cpu_seconds": 3.9606679490000003,
+      "requested_mmap_bytes": 0,
+      "effective_mmap_bytes": 0,
+      "peak_rss_bytes": 41594880,
+      "physical_read_bytes": 3264831488,
+      "result": "ok"
+    },
+    {
+      "mode": "mapped",
+      "trial": 0,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 6.070382502861321,
+      "cpu_seconds": 2.643866794,
+      "requested_mmap_bytes": 2147483648,
+      "effective_mmap_bytes": 2147418112,
+      "peak_rss_bytes": 1048924160,
+      "physical_read_bytes": 5240274944,
+      "result": "ok"
+    },
+    {
+      "mode": "mapped",
+      "trial": 1,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 5.968434335896745,
+      "cpu_seconds": 2.596533181,
+      "requested_mmap_bytes": 2147483648,
+      "effective_mmap_bytes": 2147418112,
+      "peak_rss_bytes": 1055723520,
+      "physical_read_bytes": 5229383680,
+      "result": "ok"
+    },
+    {
+      "mode": "default",
+      "trial": 1,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 10.513486088020727,
+      "cpu_seconds": 3.91712159,
+      "requested_mmap_bytes": 0,
+      "effective_mmap_bytes": 0,
+      "peak_rss_bytes": 41594880,
+      "physical_read_bytes": 3263008768,
+      "result": "ok"
+    },
+    {
+      "mode": "default",
+      "trial": 2,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 10.262721086852252,
+      "cpu_seconds": 3.880768229,
+      "requested_mmap_bytes": 0,
+      "effective_mmap_bytes": 0,
+      "peak_rss_bytes": 41594880,
+      "physical_read_bytes": 3262963712,
+      "result": "ok"
+    },
+    {
+      "mode": "mapped",
+      "trial": 2,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 752164
+      },
+      "seconds": 6.568333168979734,
+      "cpu_seconds": 2.741074387,
+      "requested_mmap_bytes": 2147483648,
+      "effective_mmap_bytes": 2147418112,
+      "peak_rss_bytes": 1056276480,
+      "physical_read_bytes": 5222477824,
+      "result": "ok"
+    }
+  ],
+  "median_seconds": {
+    "default": 10.513486088020727,
+    "mapped": 6.070382502861321
+  }
+}

@@ -77,6 +77,17 @@ class ReviewHostTests(unittest.TestCase):
         with self.assertRaises(OpsError):
             host._native_codex(self.c, REVIEW_IMAGE, run)
 
+    def test_binary_preparation_never_projects_configuration_or_installs_units(self):
+        run = Mock()
+        with patch.object(host, '_native_codex', return_value=Path('/verified/bin/codex')) as native:
+            self.assertEqual(host.prepare_binary(self.c, self.m, run), Path('/verified/bin/codex'))
+            native.assert_called_once_with(self.c, REVIEW_IMAGE, run)
+        run.assert_not_called()
+        self.assertEqual(list(self.data.iterdir()), [])
+        with self.assertRaisesRegex(OpsError, 'pinned application repository'):
+            host.prepare_binary(self.c, {**self.m, 'reviewer_image': 'other/app@sha256:' + 'a' * 64}, run)
+        self.assertIsNone(host.prepare_binary(self.c, {'app_image': IMAGE}, run))
+
     def test_new_image_exports_share_only_identical_verified_files(self):
         content = {"codex": b'fixture-codex', "helper": b'helper-one'}
         def run(args, **kwargs):
@@ -165,6 +176,28 @@ class ReviewHostTests(unittest.TestCase):
         with self.assertRaises(OpsError):
             host.prepare(self.c, self.release, {**self.m, 'reviewer_image': REVIEW_IMAGE.replace('/career/app', '/other')}, Mock())
 
+    def test_compatible_prepare_only_publishes_derived_release_configuration(self):
+        (self.data / 'private').mkdir()
+        source = self.data / 'private/config.json'
+        source.write_text(json.dumps(self.source))
+        directories = [self.data / name for name in ('state/review-runner', 'runtime/reviews', 'operations/review-auth')]
+        for directory in directories:
+            directory.mkdir(parents=True, mode=0o700)
+            (directory / 'existing').write_bytes(b'preserve me')
+        before = [(p.stat().st_mode, (p / 'existing').read_bytes()) for p in directories]
+        run = Mock(return_value='')
+        with patch.object(host, 'prepare_binary', return_value=Path('/verified/bin/codex')):
+            result = host.prepare_compatible(self.c, self.release, self.m, run)
+        self.assertEqual(result['status'], 'prepared_compatible')
+        self.assertEqual(before, [(p.stat().st_mode, (p / 'existing').read_bytes()) for p in directories])
+        self.assertEqual(json.loads(source.read_text()), self.source)
+        run.assert_not_called()
+        self.assertTrue((self.data / 'operations/review-config' / self.release.name / 'runner.json').is_file())
+        directories[0].chmod(0o755)
+        with patch.object(host, 'prepare_binary', return_value=Path('/verified/bin/codex')), self.assertRaises(OpsError):
+            host.prepare_compatible(self.c, self.release, self.m, run)
+        self.assertEqual(directories[0].stat().st_mode & 0o777, 0o755)
+
     def test_busy_runner_blocks_maintenance_and_only_labeled_workers_stop(self):
         state = self.data / 'state/review-runner'
         state.mkdir(parents=True)
@@ -207,12 +240,22 @@ class ReviewHostTests(unittest.TestCase):
             self.assertEqual(aws_ops.project_containers(), ['abcdef123456', 'bcdefa123456'])
 
     def test_pause_and_recovery_request_active_coordinator_drain_before_stopping(self):
+        # Pause discovers the installed release's service set before invoking
+        # Compose. Model that installation even though container I/O is mocked.
+        (self.release_root / 'current').symlink_to(self.release)
+        (self.release / 'release.json').write_text(json.dumps({
+            'version': 1, **self.m, 'hermes_image': IMAGE,
+            'hermes_base_image': IMAGE, 'tectonic_version': '0.15.0',
+        }))
+        (self.release / 'compose.cloud.yaml').write_text(
+            'services:\n' + ''.join(f'  {service}: {{}}\n' for service in aws_ops.SERVICES))
         def assert_gate(c, run, **kwargs):
             value = json.loads((self.data / 'maintenance/gate.json').read_text())
             self.assertEqual(value['allowed_services'], [])
             self.assertTrue(value['draining'])
-        with patch.object(host, 'drain', side_effect=assert_gate), patch.object(aws_ops, 'compose'), patch.object(aws_ops, 'running_services', return_value=[]):
+        with patch.object(host, 'drain', side_effect=assert_gate), patch.object(aws_ops, 'compose') as compose, patch.object(aws_ops, 'running_services', return_value=[]):
             self.assertEqual(aws_ops.pause(self.c)['status'], 'paused')
+        compose.assert_called_once_with(self.c, 'stop', '--timeout', '4200', *aws_ops.SERVICES)
         with patch.object(host, 'drain', side_effect=assert_gate), patch.object(aws_ops, 'project_containers', return_value=[]):
             aws_ops.stop_project(self.c)
 

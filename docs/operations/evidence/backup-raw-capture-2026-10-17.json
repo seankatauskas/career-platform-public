@@ -1,0 +1,97 @@
+{
+  "scope": "fictional stopped SQLite capture only; no production pause measured",
+  "platform": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.36",
+  "sqlite": "3.40.1",
+  "file_bytes": 1075138560,
+  "source_sha256": "cccddcc3e1460d6f73a6a2a84f29a7ea77310da68f27b762e0278c44edbb00e3",
+  "measurements": [
+    {
+      "mode": "sqlite_backup",
+      "trial": 0,
+      "capture_seconds": 3.2318390421569347,
+      "cpu_seconds": 0.7741542609999998,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": false,
+      "full_check": "ok",
+      "physical_read_bytes": 1075138560,
+      "physical_write_bytes": 1075150848
+    },
+    {
+      "mode": "quiesced_raw",
+      "trial": 0,
+      "capture_seconds": 0.7022369168698788,
+      "cpu_seconds": 0.45402823100000056,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": true,
+      "full_check": "ok",
+      "physical_read_bytes": 1075134464,
+      "physical_write_bytes": 1075138560
+    },
+    {
+      "mode": "quiesced_raw",
+      "trial": 1,
+      "capture_seconds": 0.6913606261368841,
+      "cpu_seconds": 0.43859189199999893,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": true,
+      "full_check": "ok",
+      "physical_read_bytes": 1075134464,
+      "physical_write_bytes": 1075138560
+    },
+    {
+      "mode": "sqlite_backup",
+      "trial": 1,
+      "capture_seconds": 2.8431227928958833,
+      "cpu_seconds": 0.8002258930000004,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": false,
+      "full_check": "ok",
+      "physical_read_bytes": 1075138560,
+      "physical_write_bytes": 1075150848
+    },
+    {
+      "mode": "sqlite_backup",
+      "trial": 2,
+      "capture_seconds": 0.984768541995436,
+      "cpu_seconds": 0.7182436359999986,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": false,
+      "full_check": "ok",
+      "physical_read_bytes": 1075138560,
+      "physical_write_bytes": 1075150848
+    },
+    {
+      "mode": "quiesced_raw",
+      "trial": 2,
+      "capture_seconds": 2.866869127145037,
+      "cpu_seconds": 0.5396036039999998,
+      "initial_residency": {
+        "resident_pages": 0,
+        "total_pages": 262485
+      },
+      "same_bytes": true,
+      "full_check": "ok",
+      "physical_read_bytes": 1075134464,
+      "physical_write_bytes": 1075138560
+    }
+  ],
+  "median_capture_seconds": {
+    "sqlite_backup": 2.8431227928958833,
+    "quiesced_raw": 0.7022369168698788
+  }
+}

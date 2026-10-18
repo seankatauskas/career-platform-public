@@ -244,6 +244,7 @@ _SCHEMA = (
         normalization_version INTEGER NOT NULL
     )
     """,
+    "CREATE INDEX IF NOT EXISTS job_families_block ON job_families(ats,company_normalized,title_normalized)",
     "CREATE INDEX IF NOT EXISTS job_family_members_family ON job_family_members(family_id)",
     "CREATE INDEX IF NOT EXISTS job_template_clusters_template ON job_template_clusters(template_cluster_id)",
     "CREATE INDEX IF NOT EXISTS job_template_clusters_leakage ON job_template_clusters(leakage_group_id)",
@@ -264,7 +265,11 @@ def _stable_template_lineages(
     table retains aliases forever. Splits intentionally keep their old shared lineage;
     merges collapse every prior lineage to one deterministic root.
     """
-    con.execute(_SCHEMA[3])
+    from job_search.schema_lifecycle import require_current, check_optional
+    if require_current():
+        check_optional(con, "families")
+    else:
+        con.execute(_SCHEMA[3])
     aliases = {
         str(row[0]): str(row[1])
         for row in con.execute(
@@ -364,7 +369,8 @@ def _stable_template_lineages(
         "(template_cluster_id,lineage_id,normalization_version) VALUES (?,?,?) "
         "ON CONFLICT(template_cluster_id) DO UPDATE SET "
         "lineage_id=excluded.lineage_id,"
-        "normalization_version=excluded.normalization_version",
+        "normalization_version=excluded.normalization_version "
+        "WHERE lineage_id IS NOT excluded.lineage_id OR normalization_version IS NOT excluded.normalization_version",
         [
             (alias, lineage, NORMALIZATION_VERSION)
             for alias, lineage in sorted(aliases.items())
@@ -458,9 +464,14 @@ def _upsert_derived_rows(
     family_rows: Sequence[dict[str, object]],
     member_rows: Sequence[tuple[str, str, str, str]],
     template_rows: Sequence[tuple[str, str, str, int]],
+    *, scoped: bool = False,
 ) -> None:
-    for statement in _SCHEMA:
-        con.execute(statement)
+    from job_search.schema_lifecycle import require_current, check_optional
+    if require_current():
+        check_optional(con, "families")
+    else:
+        for statement in _SCHEMA:
+            con.execute(statement)
 
     con.execute("CREATE TEMP TABLE next_family_ids (family_id TEXT PRIMARY KEY)")
     con.execute(
@@ -512,16 +523,22 @@ def _upsert_derived_rows(
     )
 
     con.execute(
-        "DELETE FROM job_template_clusters WHERE family_id NOT IN "
+        "DELETE FROM job_template_clusters WHERE "
+        + ("family_id IN (SELECT family_id FROM affected_families) AND " if scoped else "")
+        + "family_id NOT IN "
         "(SELECT family_id FROM next_family_ids)"
     )
     con.execute(
-        "DELETE FROM job_family_members WHERE NOT EXISTS "
+        "DELETE FROM job_family_members WHERE "
+        + ("family_id IN (SELECT family_id FROM affected_families) AND " if scoped else "")
+        + "NOT EXISTS "
         "(SELECT 1 FROM next_member_ids n WHERE n.ats=job_family_members.ats "
         "AND n.job_id=job_family_members.job_id)"
     )
     con.execute(
-        "DELETE FROM job_families WHERE family_id NOT IN "
+        "DELETE FROM job_families WHERE "
+        + ("family_id IN (SELECT family_id FROM affected_families) AND " if scoped else "")
+        + "family_id NOT IN "
         "(SELECT family_id FROM next_family_ids)"
     )
 
@@ -529,11 +546,11 @@ def _upsert_derived_rows(
 def prepared_families_are_current(
     db_path: str | Path, *, connection: sqlite3.Connection | None = None,
 ) -> bool:
-    """Verify raw source fingerprints before reusing expensive derived groups.
+    """Verify transactional preparation evidence before reusing derived groups.
 
-    This streams descriptions once without normalizing or comparing templates.
-    New, edited, deleted, or reassigned jobs and old normalization versions force
-    a rebuild, even if a caller changed content without updating its timestamp.
+    SQL triggers track edits even when a caller does not change timestamps.
+    Missing or altered tracking, derived changes, and implementation/normalization
+    changes require a full rebuild; ordinary source edits rebuild affected blocks.
     A supplied connection retains its transaction and lifetime; callers needing
     a stable snapshot must begin their own transaction before passing it.
     ``db_path`` is used only when opening an owned connection.
@@ -546,6 +563,11 @@ def prepared_families_are_current(
 
 
 def _prepared_families_are_current(con: sqlite3.Connection) -> bool:
+    from . import dedupe_incremental
+    return dedupe_incremental.current(con)
+
+
+def _verify_all_families(con: sqlite3.Connection) -> bool:
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not {'jobs', 'job_families', 'job_family_members', 'job_template_clusters'} <= tables:
         return False
@@ -574,11 +596,21 @@ def _prepared_families_are_current(con: sqlite3.Connection) -> bool:
     return True
 
 
-def prepare_families(db_path: str | Path) -> dict[str, int]:
+def prepare_families(db_path: str | Path, *, incremental: bool = False) -> dict[str, int]:
     """Regenerate current opportunity-family metadata and return summary counts."""
     path = Path(db_path)
     if not path.exists():
         raise FileNotFoundError(path)
+    from . import dedupe_incremental
+    from job_search.schema_lifecycle import require_current, read_connection, check_optional
+    if require_current():
+        with closing(read_connection(path)) as installed:
+            check_optional(installed, "families")
+            dedupe_incremental.check_schema(installed)
+    if incremental:
+        result = dedupe_incremental.prepare(path)
+        if result is not None:
+            return result
     # The deployment mounts /tmp as tmpfs. Explicitly place the private scratch
     # database beside the catalog so text staging uses the persistent volume.
     with TemporaryDirectory(prefix=".family-preparation-", dir=path.resolve().parent) as scratch, \
@@ -615,7 +647,9 @@ def prepare_families(db_path: str | Path) -> dict[str, int]:
         family_rows = []
         member_rows = []
         provisional_clusters = {}
+        block_count = 0
         for _, block in groupby(source, key=lambda row: tuple(row[:3])):
+            block_count += 1
             block_families, block_members = _build_rows(block)
             provisional_clusters.update(_template_components(block_families))
             for family in block_families:
@@ -636,6 +670,7 @@ def prepare_families(db_path: str | Path) -> dict[str, int]:
                 (family_id, cluster_by_family[family_id], str(family["leakage_group_id"]), NORMALIZATION_VERSION)
             )
         _upsert_derived_rows(con, family_rows, member_rows, template_rows)
+        dedupe_incremental.seal_full(con)
 
     return {
         "jobs": len(member_rows),
@@ -643,6 +678,8 @@ def prepare_families(db_path: str | Path) -> dict[str, int]:
         "collapsed_jobs": len(member_rows) - len(family_rows),
         "template_clusters": len({row[1] for row in template_rows}),
         "leakage_groups": len({row[2] for row in template_rows}),
+        **({"incremental": False, "changed_blocks": block_count, "prepared_families": len(family_rows),
+            "examined_jobs": len(member_rows)} if incremental else {}),
     }
 
 

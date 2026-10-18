@@ -3,6 +3,8 @@
 Feature sessions work in separate branches/worktrees and hand off tested PRs.
 The release owner selects a batch of merged changes and prepares it once. A
 separate manual installation switches production to that exact candidate.
+Read [deployment modes](deployment-modes.md) when selecting the migration and
+rollback contract; release coordination does not bypass those gates.
 
 ```text
 feature PRs -> reviewed main commit -> Prepare AWS release -> prepared receipt
@@ -129,8 +131,13 @@ policy, and prepare again. Do not edit an existing manifest, substitute its
 checksum, or bypass transition tests. A timed-out or cancelled installer needs
 its existing SSM command and host operation inspected before another install.
 
-Batching reduces the number of maintenance pauses. The installer also prepares
-large rollback files while services are available, then proves equality against
-the stopped source before reuse. Worker draining, migration gates, recovery and
-service health requirements remain in force. See [deployment performance](deployment-performance.md)
-for measured snapshot costs and the distinction between total time and downtime.
+Batching reduces the number of maintenance pauses. Migration deployments prepare
+large rollback files while the dashboard is available, then prove equality against
+the stopped source before reuse. Eligible compatible deployments preserve current
+data/configuration and omit that checkpoint and initialization. A declaration alone
+does not establish eligibility: the host checks the tested predecessor, release
+contract and live schema, and records a conservative fallback when necessary.
+Worker draining, locks, recovery journals and service health remain in force.
+See [deployment modes](deployment-modes.md) for the current contract and
+[deployment performance](deployment-performance.md) for historical snapshot
+measurements, which do not measure the compatible procedure.

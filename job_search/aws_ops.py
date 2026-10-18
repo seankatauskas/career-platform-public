@@ -7,10 +7,12 @@ paused until explicit activation. subprocess errors deliberately omit output.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -31,9 +33,11 @@ ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z")
 DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}\Z")
 SECRET_FILES = {"config.json", "inference.json", "resume-model.json", "runpod-api-key", "mcp-token", "portable-master-key", "hermes.env", "hermes.yaml", "tailscale-auth-key", "interaction-token", "briefing-inference.json", "briefing-api-key"}
-SERVICES = ("tools", "dashboard", "mcp", "core", "model", "hermes")
+SERVICES = ("tools", "dashboard", "mcp", "core", "model", "interactive-core", "interactive-model", "hermes")
+WORKER_SERVICES = {"core", "model", "interactive-core", "interactive-model"}
 REVIEW_SERVICES = ("tools", "dashboard", "mcp", "hermes")
 BACKUP_DIRS = ("state", "hermes", "toolchain")
+BACKUP_COMPRESSION_LEVEL = 3
 # Credential-bearing Hermes files are recovered from Secrets Manager, not the bundle.
 EXCLUDED = {".env", "config.yaml", ".operations.lock", "runtime", "logs", "__pycache__"}
 _STATUS_DEADLINE = ContextVar("status_deadline", default=None)
@@ -42,6 +46,7 @@ MAINTENANCE_GRACE_SECONDS = 3600
 from .operation_journal import (
     OpsError, Operation, read as read_operation, require_idle, set_gate as _set_gate,
     write_json, sync_directory, sync_tree, now as operation_now,
+    private_bytes, private_directory,
 )
 
 
@@ -224,6 +229,11 @@ def running_services(c: dict, release: Path | None = None) -> list[str]:
 
 def configured_services(c: dict, *, review: bool = False, release: Path | None = None) -> list[str]:
     services = list(REVIEW_SERVICES if review else SERVICES)
+    # Predecessor releases do not necessarily contain partitioned workers.
+    # Service keys have a fixed indentation in our verified release asset.
+    composition = (release or release_path(c)) / "compose.cloud.yaml"
+    declared = set(re.findall(r"^  ([a-z][a-z0-9-]*):", composition.read_text(), re.M)) if composition.is_file() else set()
+    services = [s for s in services if not s.startswith("interactive-") or s in declared]
     runtime_path = Path(c["data_root"]) / "private" / "config.json"
     if runtime_path.is_file() and json.loads(runtime_path.read_text()).get("interaction_token_file"):
         if ((release or release_path(c)) / "compose.chief.yaml").is_file():
@@ -251,7 +261,7 @@ def available_space(c: dict, *, restore_bytes: int | None = None, local_snapshot
 
 
 def drain_workers(c: dict, active: list[str], timeout: int = 4200) -> None:
-    lanes = [s for s in active if s in {"core", "model"}]
+    lanes = [s for s in active if s in WORKER_SERVICES]
     set_gate(c, [s for s in active if s not in lanes], draining=True)
     from .review_host import drain as drain_reviews
     drain_reviews(c, run)
@@ -274,7 +284,7 @@ def drain_workers(c: dict, active: list[str], timeout: int = 4200) -> None:
     compose(c, "stop", "--timeout", "30", *lanes)
 
 
-def stop_for_maintenance(c: dict, op: Operation, active: list[str]) -> None:
+def stop_for_maintenance(c: dict, op: Operation, active: list[str], *, before_stop=None) -> None:
     op.update("draining")
     try:
         drain_workers(c, active)
@@ -282,6 +292,23 @@ def stop_for_maintenance(c: dict, op: Operation, active: list[str]) -> None:
         set_gate(c, active)
         op.finish("drain_aborted")
         raise
+    if before_stop is not None:
+        # Workers have stopped, but dashboard and other interactive services
+        # remain available. Final capture still proves equality after all stop.
+        op.update("preparing_snapshot")
+        try:
+            before_stop()
+        except Exception:
+            # No capture or migration began. Restore only drained workers;
+            # interactive services need not suffer an outage on a failed copy.
+            op.update("resuming_after_preparation_failure", writes_possible=True)
+            set_gate(c, active)
+            workers = [s for s in active if s in WORKER_SERVICES]
+            if workers:
+                compose(c, "up", "-d", "--no-deps", "--no-build", *workers)
+                wait_healthy(c, workers)
+            op.finish("preparation_aborted")
+            raise
     op.update("stopping", downtime_started_at=operation_now())
     set_gate(c, [], draining=True)
     remaining = active  # workers have already acknowledged a safe drain
@@ -301,7 +328,7 @@ def quiesced(c: dict):
                          active_services=active, previous_activation=activation(c))
     try:
         stop_for_maintenance(c, op, active)
-        yield
+        yield op
     finally:
         # A normal exception can resume a consistent snapshot source. SIGKILL
         # leaves the journal incomplete and startup gated until explicit recovery.
@@ -340,12 +367,14 @@ def runtime_entries(source: Path, *, hermes: bool = False, snapshot: bool = Fals
 
 
 @contextmanager
-def measured(timings: dict, name: str):
+def measured(timings: dict, name: str, *additional: dict):
     started = time.monotonic()
     try:
         yield
     finally:
-        timings[name] = timings.get(name, 0.0) + time.monotonic() - started
+        elapsed = time.monotonic() - started
+        for target in (timings, *additional):
+            target[name] = target.get(name, 0.0) + elapsed
 
 
 def sqlite_sidecars_empty(path: Path) -> bool:
@@ -354,8 +383,9 @@ def sqlite_sidecars_empty(path: Path) -> bool:
     for suffix in ("-wal", "-journal"):
         sidecar = Path(str(path) + suffix)
         if sidecar.is_symlink(): raise OpsError("database sidecar is a symlink")
-        if sidecar.exists() and (not sidecar.is_file() or sidecar.stat().st_size):
-            return False
+        if sidecar.exists():
+            if not sidecar.is_file(): raise OpsError("database sidecar is not a regular file")
+            if sidecar.stat().st_size: return False
     return True
 
 
@@ -365,37 +395,96 @@ def sqlite_verification_contract() -> dict:
     return {"method": "sqlite-quick-check-v1", "sqlite_version": sqlite3.sqlite_version}
 
 
+def backup_verification_reference(c: dict, operation: dict) -> tuple | None:
+    """Read only the current completed backup's explicitly published proof."""
+    try:
+        receipt = operation.get("backup_verification") or {}
+        installed = release_path(c).name
+        if (operation.get("version") != 1 or operation.get("complete") is not True or
+                operation.get("kind") != "backup" or operation.get("phase") != "snapshot_finished" or
+                operation.get("previous_release") != installed or
+                receipt.get("operation_id") != operation.get("operation_id") or
+                receipt.get("release_id") != installed or
+                receipt.get("sqlite_verification") != sqlite_verification_contract()):
+            return None
+        raw = private_bytes(Path(c["data_root"]) / "operations/last-backup-verification.json", 64 * 1024**2)
+        if hashlib.sha256(raw).hexdigest() != receipt.get("sha256"): return None
+        proof = json.loads(raw)
+        if (proof.get("version") != 1 or proof.get("format") != "backup-verification-v1" or
+                not isinstance(proof.get("files"), dict) or
+                not re.fullmatch(r"[a-f0-9]{32}", proof.get("operation_id", "")) or
+                not DIGEST.fullmatch(proof.get("archive_sha256", "")) or
+                not ID.fullmatch(proof.get("backup_id", "")) or
+                any(proof.get(key) != receipt.get(key) for key in
+                    ("backup_id", "operation_id", "release_id", "archive_sha256", "sqlite_verification"))):
+            return None
+        return proof["files"], "available_backup", proof["backup_id"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def publish_backup_verification(c: dict, operation: Operation, manifest: dict, archive_hash: str) -> None:
+    """Publish optional metadata only after complete archive/receipt publication.
+
+    The next backup starts a fresh journal and does not inherit this proof.
+    Replacing this one bounded file cannot overwrite the separate deploy anchor.
+    A failed write or journal commit leaves missing/mismatched evidence, never a
+    successful new proof. Restores never consult this metadata.
+    """
+    root = Path(c["data_root"]) / "operations"
+    if not private_directory(root): raise OpsError("untrusted backup verification directory")
+    current = json.loads(private_bytes(root / "current.json", 1024**2))
+    if (current.get("operation_id") != operation.value["operation_id"] or
+            current.get("complete") is not True or current.get("kind") != "backup" or
+            current.get("phase") != "snapshot_finished" or
+            current.get("previous_release") != manifest["release_id"] or
+            manifest["release_id"] != release_path(c).name):
+        raise OpsError("backup verification operation mismatch")
+    proof = {"version": 1, "format": "backup-verification-v1", "backup_id": manifest["backup_id"],
+             "operation_id": current["operation_id"], "release_id": manifest["release_id"],
+             "snapshot_at": manifest["snapshot_at"], "archive_sha256": archive_hash,
+             "sqlite_verification": sqlite_verification_contract(), "files": manifest["files"]}
+    path = root / "last-backup-verification.json"
+    write_json(path, proof)
+    receipt = {key: proof[key] for key in
+               ("backup_id", "operation_id", "release_id", "archive_sha256", "sqlite_verification")}
+    receipt["sha256"] = digest(path)
+    operation.update("snapshot_finished", backup_verification=receipt)
+
+
 def preparation_reference(c: dict) -> tuple[dict, str, str | None]:
     """Optional content proofs from the last completed deployment's snapshot.
 
-    Read metadata only. The private operation journal commits to the manifest
-    digest, whose verification contract certifies checks of its recorded bytes.
+    Read metadata only. The private current or explicitly linked archived
+    operation journal commits to the manifest digest, whose verification
+    contract certifies checks of its recorded bytes.
     Never read/reuse old payload bytes or trust an unanchored snapshot directory.
     Missing, old, untrusted or damaged evidence is just a cold-cache preparation.
     """
-    def private_directory(path):
-        info = path.lstat()
-        return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
-
-    def private_bytes(path, limit):
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
-                    info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > limit):
-                raise ValueError("untrusted preparation metadata")
-            value = stream.read(limit + 1)
-            if len(value) > limit: raise ValueError("oversized preparation metadata")
-            return value
-
     root = Path(c["data_root"])
     try:
         if not private_directory(root / "operations") or not private_directory(root / "backups"):
             return {}, "untrusted", None
         operation = json.loads(private_bytes(root / "operations/current.json", 1024**2))
+        fresh = backup_verification_reference(c, operation)
+        if fresh is not None: return fresh
+        if (operation.get("version") == 1 and operation.get("complete") is True and
+                operation.get("kind") == "backup" and operation.get("phase") == "snapshot_finished"):
+            reference = operation.get("verification_operation_id", "")
+            if not isinstance(reference, str) or not re.fullmatch(r"[a-f0-9]{32}", reference):
+                return {}, "unavailable", None
+            installed = release_path(c).name
+            if operation.get("previous_release") != installed:
+                return {}, "incompatible", None
+            operation = json.loads(private_bytes(root / "operations" / (reference + ".json"), 1024**2))
+            if operation.get("operation_id") != reference or operation.get("target_release") != installed:
+                return {}, "incompatible", None
         if (operation.get("version") != 1 or operation.get("complete") is not True or
-                operation.get("kind") not in {"deploy", "rollback"}):
+                operation.get("kind") not in {"deploy", "rollback"} or
+                operation.get("phase") not in {"deployed", "deployed_paused"}):
             return {}, "unavailable", None
+        if operation.get("target_release") and operation["target_release"] != release_path(c).name:
+            return {}, "incompatible", None
         receipt = operation.get("backup") or {}
         if receipt.get("format") != "directory-v1": return {}, "unavailable", None
         snapshot = root / "backups" / (valid_id(receipt["backup_id"]) + ".snapshot")
@@ -406,6 +495,8 @@ def preparation_reference(c: dict) -> tuple[dict, str, str | None]:
         manifest = json.loads(raw)
         if (manifest.get("version") != 1 or manifest.get("format") != "directory-v1" or
                 manifest.get("backup_id") != receipt["backup_id"] or
+                (operation.get("target_release") and manifest.get("release_id") !=
+                 (operation.get("previous_release") or operation["target_release"])) or
                 manifest.get("sqlite_verification") != sqlite_verification_contract() or
                 not isinstance(manifest.get("files"), dict)):
             return {}, "incompatible", None
@@ -414,8 +505,40 @@ def preparation_reference(c: dict) -> tuple[dict, str, str | None]:
         return {}, "invalid_or_missing", None
 
 
+def copy_preparation_file(source: Path, target: Path, size: int, timings: dict) -> tuple[str, int, bytes]:
+    """Copy/hash exactly the accepted bytes with at most one pending hash block.
+
+    Large files overlap one SHA-256 update with the next read/write. One pending
+    1 MiB task bounds extra buffering regardless of file size. Joining the
+    worker on every exit prevents scratch cleanup racing an outstanding task.
+    """
+    hasher = hashlib.sha256(); copied = 0; signature = b""
+    def hash_block(block):
+        with measured(timings, "hash_in_copy"):
+            hasher.update(block)
+    with ExitStack() as stack:
+        pool = stack.enter_context(ThreadPoolExecutor(max_workers=1)) if size >= 32 * 1024**2 else None
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        stream = stack.enter_context(os.fdopen(fd, "rb"))
+        out = stack.enter_context(target.open("xb"))
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise OpsError("candidate is no longer a regular file")
+        remaining = size; pending = None
+        while remaining:
+            block = stream.read(min(remaining, 1024 * 1024))
+            if not block: break
+            if out.write(block) != len(block): raise OSError("short preparation copy write")
+            if not copied: signature = block[:16]
+            if pending is not None: pending.result()
+            if pool is None: hash_block(block)
+            else: pending = pool.submit(hash_block, block)
+            copied += len(block); remaining -= len(block)
+        if pending is not None: pending.result()
+    return hasher.hexdigest(), copied, signature
+
+
 @contextmanager
-def prepare_snapshot(c: dict):
+def prepare_snapshot(c: dict, *, verification_reference: tuple | None = None):
     """Speculative private copies; never a recovery point or a source of truth.
 
     Called under the operations lock while services are still available. Every
@@ -429,7 +552,7 @@ def prepare_snapshot(c: dict):
     stage = Path(tempfile.mkdtemp(prefix="snapshot-preparing-", dir=backup_root(c)))
     prepared = {"root": stage, "files": {}, "timings_seconds": {}, "file_profiles": {}}
     started = time.monotonic()
-    reference, reference_status, reference_id = preparation_reference(c)
+    reference, reference_status, reference_id = verification_reference or preparation_reference(c)
     prepared["verification_reference"] = {"status": reference_status, "backup_id": reference_id}
     try:
         for name in BACKUP_DIRS:
@@ -452,23 +575,8 @@ def prepare_snapshot(c: dict):
                         # may be torn, but it can never be adopted unless its
                         # checked bytes equal the final stopped main file.
                         with measured(timings, "copy_and_hash"):
-                            fd = os.open(item, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                            hasher = hashlib.sha256(); copied = 0; signature = b""
-                            with os.fdopen(fd, "rb") as stream, dest.open("xb") as out:
-                                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                                    raise OpsError("candidate is no longer a regular file")
-                                remaining = info.st_size
-                                while remaining:
-                                    block = stream.read(min(remaining, 1024 * 1024))
-                                    if not block: break
-                                    out.write(block)
-                                    if not copied: signature = block[:16]
-                                    with measured(timings, "hash_in_copy"):
-                                        hasher.update(block)
-                                    copied += len(block)
-                                    remaining -= len(block)
+                            checksum, copied, signature = copy_preparation_file(item, dest, info.st_size, timings)
                         dest.chmod(0o600)
-                        checksum = hasher.hexdigest()
                         metadata = {"sha256": checksum, "size": copied}
                         if signature == b"SQLite format 3\x00":
                             # The hash covers every byte actually written, not
@@ -506,7 +614,9 @@ def prepare_snapshot(c: dict):
 
 def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
                   prepared: dict | None = None, files: dict | None = None,
-                  timings: dict | None = None, counters: dict | None = None) -> None:
+                  timings: dict | None = None, counters: dict | None = None,
+                  validate: bool = True, file_profiles: dict | None = None,
+                  quiesced_raw_sqlite: bool = False) -> None:
     timings = timings if timings is not None else {}
     counters = counters if counters is not None else {}
     target.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -532,13 +642,14 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
                             # A source rollback journal must never be applied
                             # to that independent destination, in either order.
                             continue
+            file_started = time.monotonic(); file_timings = {}
             dest = target / rel; dest.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             with item.open("rb") as stream: is_database = stream.read(16) == b"SQLite format 3\x00"
             key = source.name + "/" + str(rel)
             cached = prepared["files"].get(key) if prepared else None
             source_hash = None
             if cached and cached["size"] == info.st_size and (not is_database or sqlite_sidecars_empty(item)):
-                with measured(timings, "source_hash"):
+                with measured(timings, "source_hash", file_timings):
                     source_hash = digest(item)
             exact_predecessor = False
             if is_database and item.name == "predecessor.sqlite" and not info.st_mode & 0o200:
@@ -546,7 +657,7 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
                 if report_path.is_file() and not report_path.is_symlink():
                     archived=json.loads(report_path.read_text())
                     if source_hash is None:
-                        with measured(timings, "source_hash"):
+                        with measured(timings, "source_hash", file_timings):
                             source_hash = digest(item)
                     if source_hash != archived.get("archive_sha256") or not sqlite_sidecars_empty(item):
                         raise OpsError("application predecessor is not an immutable snapshot")
@@ -557,7 +668,7 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
             if reused:
                 # Independent bytes, never a link to writable live state. The
                 # prepared destination was already checked, hashed and fsynced.
-                with measured(timings, "reuse_publish"):
+                with measured(timings, "reuse_publish", file_timings):
                     candidate_path = prepared["root"] / key
                     os.replace(candidate_path, dest)
                     # Persist the removal as well as the destination tree. A
@@ -568,17 +679,21 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
             else:
                 if cached:
                     (prepared["root"] / key).unlink(missing_ok=True)
-                if is_database and not exact_predecessor:
-                    with measured(timings, "sqlite_backup"):
+                # Only callers that stopped every writer may preserve the main
+                # file verbatim. Other callers retain SQLite online backup safety.
+                raw_sqlite = is_database and quiesced_raw_sqlite and sqlite_sidecars_empty(item)
+                if is_database and not exact_predecessor and not raw_sqlite:
+                    with measured(timings, "sqlite_backup", file_timings):
                         source_db = sqlite3.connect(item.as_uri() + "?mode=ro", uri=True)
                         target_db = sqlite3.connect(dest)
                         try: source_db.backup(target_db)
                         finally: source_db.close(); target_db.close()
                 else:
-                    with measured(timings, "file_copy"):
+                    with measured(timings, "file_copy", file_timings):
                         shutil.copy2(item, dest)
-                with measured(timings, "sqlite_check"):
-                    sqlite_check(dest)
+                if validate:
+                    with measured(timings, "sqlite_check", file_timings):
+                        sqlite_check(dest)
                 counters["copied_bytes"] = counters.get("copied_bytes", 0) + dest.stat().st_size
                 counters["copied_files"] = counters.get("copied_files", 0) + 1
             dest.chmod(0o600 if info.st_mode & 0o200 else 0o400)
@@ -586,8 +701,13 @@ def copy_snapshot(source: Path, target: Path, *, hermes: bool = False,
                 if reused:
                     files[key] = dict(cached)
                 else:
-                    with measured(timings, "destination_hash"):
+                    with measured(timings, "destination_hash", file_timings):
                         files[key] = {"sha256": digest(dest), "size": dest.stat().st_size}
+            if file_profiles is not None:
+                file_profiles[key] = {"sqlite": is_database, "source_size": info.st_size,
+                                      "capture": "reused" if reused else "recaptured",
+                                      "validation": "prepared" if reused else "checked" if validate else "deferred",
+                                      "paused_timings_seconds": {**file_timings, "total": time.monotonic() - file_started}}
         else: raise OpsError("snapshot contains a symlink or special file")
 
 
@@ -600,50 +720,161 @@ def secret_versions(c: dict) -> dict:
             raise OpsError("materialized secret version missing")
     return result
 
+
+class _DigestWriter:
+    """Hash exactly the compressed bytes accepted by the local archive file."""
+    def __init__(self, stream, timings):
+        self.stream, self.timings = stream, timings
+        self.hasher = hashlib.sha256()
+
+    def write(self, data):
+        count = self.stream.write(data)
+        if count != len(data): raise OpsError("short backup archive write")
+        with measured(self.timings, "archive_hash"):
+            self.hasher.update(data)
+        return count
+
+    def flush(self):
+        self.stream.flush()
+
+
+class _DigestReader:
+    """Hash the same bytes consumed by tar; never read the payload twice."""
+    def __init__(self, stream, timings, file_timings):
+        self.stream, self.timings, self.file_timings = stream, timings, file_timings
+        self.hasher = hashlib.sha256()
+        self.size = 0
+
+    def read(self, size):
+        data = self.stream.read(size)
+        with measured(self.timings, "destination_hash", self.file_timings):
+            self.hasher.update(data)
+        self.size += len(data)
+        return data
+
+
+class _TimedCompressor:
+    def __init__(self, stream, timings):
+        self.stream, self.timings = stream, timings
+
+    def write(self, data):
+        with measured(self.timings, "compression"):
+            return self.stream.write(data)
+
+
+def build_backup_archive(stage: Path, bundle: Path, manifest: dict, *, timings: dict,
+                         compression_level: int = BACKUP_COMPRESSION_LEVEL) -> str:
+    """Validate independent captures and produce the existing self-contained tar.gz.
+
+    Payload hashes cover the bytes fed to tar. The manifest is appended after
+    those hashes are known; the archive hash includes gzip's finalized trailer.
+    This function publishes nothing. Its caller must fsync before uploading and
+    must publish a successful receipt only after both uploads succeed.
+    """
+    if type(compression_level) is not int or not 1 <= compression_level <= 9:
+        raise OpsError("invalid backup compression level")
+    if (stage / "backup.json").exists(): raise OpsError("backup manifest already exists")
+    entries = sorted(runtime_entries(stage), key=lambda pair: str(pair[0]))
+    files = manifest["files"] = {}
+    profiles = manifest.setdefault("capture_files", {})
+    manifest["compression"] = {"format": "gzip", "level": compression_level}
+    with measured(timings, "archive_build"), bundle.open("xb") as raw:
+        output = _DigestWriter(raw, timings)
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, compresslevel=compression_level, mtime=0) as compressed:
+            with tarfile.open(fileobj=_TimedCompressor(compressed, timings), mode="w|", bufsize=1024**2, copybufsize=1024**2) as tar:
+                for path, info in entries:
+                    name = str(path.relative_to(stage))
+                    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink == 1):
+                        raise OpsError("backup contains a link or special file")
+                    member = tar.gettarinfo(str(path), arcname=name)
+                    if member.isdir():
+                        tar.addfile(member)
+                        continue
+                    profile = profiles.setdefault(name, {})
+                    postresume = profile.setdefault("postresume_timings_seconds", {})
+                    with measured(timings, "sqlite_check", postresume):
+                        sqlite_check(path)
+                    profile["validation"] = "checked_after_resume"
+                    with path.open("rb") as source:
+                        payload = _DigestReader(source, timings, postresume)
+                        tar.addfile(member, payload)
+                        if payload.size != member.size or source.read(1):
+                            raise OpsError("backup capture changed during archive creation")
+                    files[name] = {"sha256": payload.hasher.hexdigest(), "size": payload.size}
+                # The manifest must not include its own hash. Existing extraction
+                # and restore validate the complete tree independent of ordering.
+                manifest["timings_seconds"] = {key: round(value, 3) for key, value in timings.items()}
+                write_json(stage / "backup.json", manifest)
+                tar.add(stage / "backup.json", arcname="backup.json", recursive=False)
+            with measured(timings, "compression"):
+                compressed.close()
+        output.flush()
+    return output.hasher.hexdigest()
+
+
 def backup_unlocked(c: dict, *, paused: bool = False, upload: bool = True, release_id: str | None = None,
                     prepared: dict | None = None) -> dict:
     if paused and not upload:
         return local_snapshot_unlocked(c, release_id=release_id, prepared=prepared)
+    started = time.monotonic()
+    timings = {}
     available_space(c)
     snapshot_at = operation_now()
     bid = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(4).hex()
     d = Path(c["data_root"]); backups = d / "backups"; backups.mkdir(mode=0o700, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="backup-", dir=backups) as temp:
         stage = Path(temp) / "payload"; stage.mkdir(mode=0o700)
-        versions = {}
+        versions = {}; file_profiles = {}; operation = None; proof_status = "not_applicable"
         def capture():
             nonlocal snapshot_at
             snapshot_at = operation_now()
             versions.update(secret_versions(c))
-            for name in BACKUP_DIRS: copy_snapshot(d / name, stage / name, hermes=name == "hermes")
+            with measured(timings, "capture"):
+                for name in BACKUP_DIRS:
+                    copy_snapshot(d / name, stage / name, hermes=name == "hermes", validate=False,
+                                  timings=timings, file_profiles=file_profiles, quiesced_raw_sqlite=True)
         if paused: capture()
         else:
-            with quiesced(c): capture()
-        files = {str(p.relative_to(stage)): {"sha256": digest(p), "size": p.stat().st_size}
-                 for p in stage.rglob("*") if p.is_file()}
+            with quiesced(c) as operation: capture()
+            timings.update(operation.durations())
         m = {"version": 1, "backup_id": bid, "created_at": snapshot_at, "snapshot_at": snapshot_at,
-             "release_id": release_id or release_path(c).name, "secrets": versions, "files": files}
-        write_json(stage / "backup.json", m)
+             "release_id": release_id or release_path(c).name, "secrets": versions,
+             "capture_files": file_profiles, "sqlite_verification": sqlite_verification_contract()}
         bundle = Path(temp) / "backup.tar.gz"
-        # Routine off-host backup compression still runs after services resume.
-        with tarfile.open(bundle, "w:gz", compresslevel=9) as tar:
-            for p in sorted(stage.rglob("*")):
-                tar.add(p, arcname=str(p.relative_to(stage)), recursive=False)
-        sync_tree(Path(temp))
-        archive_hash = digest(bundle)
+        # Checks, hashing and compression share the captured-file read path and
+        # happen after services resume, never against mutable live sources.
+        archive_hash = build_backup_archive(stage, bundle, m, timings=timings)
+        with measured(timings, "sync"):
+            sync_tree(Path(temp))
         if upload:
             key = f"backups/{bid}/backup.tar.gz"
-            aws(c, "s3", "cp", str(bundle), f"s3://{c['backup_bucket']}/{key}", "--only-show-errors")
-            receipt = {"version": 1, "backup_id": bid, "sha256": archive_hash, "created_at": m["created_at"], "snapshot_at": snapshot_at, "uploaded_at": operation_now(), "release_id": m["release_id"]}
+            with measured(timings, "archive_upload"):
+                aws(c, "s3", "cp", str(bundle), f"s3://{c['backup_bucket']}/{key}", "--only-show-errors")
+            receipt = {"version": 1, "backup_id": bid, "sha256": archive_hash, "created_at": m["created_at"], "snapshot_at": snapshot_at, "uploaded_at": operation_now(), "release_id": m["release_id"], "compression": m["compression"], "timings_seconds": {key: round(value, 3) for key, value in timings.items()}}
             write_json(Path(temp) / "receipt.json", receipt)
-            aws(c, "s3", "cp", str(Path(temp) / "receipt.json"), f"s3://{c['backup_bucket']}/backups/{bid}/receipt.json", "--only-show-errors")
+            with measured(timings, "receipt_upload"):
+                aws(c, "s3", "cp", str(Path(temp) / "receipt.json"), f"s3://{c['backup_bucket']}/backups/{bid}/receipt.json", "--only-show-errors")
+            # The remote receipt cannot include its own eventual upload time.
+            # Keep that completed phase in local operational evidence and output.
+            receipt["timings_seconds"]["receipt_upload"] = round(timings["receipt_upload"], 3)
             write_json(d / "last-backup.json", receipt)
+            if operation is not None:
+                # Optional optimization failure must not invalidate the uploaded
+                # backup or replace the prior deployment's verification anchor.
+                try:
+                    publish_backup_verification(c, operation, m, archive_hash)
+                    proof_status = "published"
+                except (OSError, ValueError, TypeError, KeyError, OpsError):
+                    proof_status = "unavailable"
         else:
             destination = backups / (bid + ".tar.gz")
             shutil.copy2(bundle, destination)
             with destination.open("rb") as stream: os.fsync(stream.fileno())
             sync_directory(backups)
-        return {"status": "backed_up", "backup_id": bid, "sha256": archive_hash}
+        return {"status": "backed_up", "backup_id": bid, "sha256": archive_hash,
+                "preparation_proof": proof_status,
+                "timings_seconds": {**{key: round(value, 3) for key, value in timings.items()},
+                                    "total": round(time.monotonic() - started, 3)}}
 
 
 def backup_root(c: dict) -> Path:
@@ -672,16 +903,17 @@ def local_snapshot_unlocked(c: dict, *, release_id: str | None = None, prepared:
     published = backups / (bid + ".snapshot")
     try:
         versions = secret_versions(c)
-        files, timings, counters = {}, {}, {}
+        files, timings, counters, file_profiles = {}, {}, {}, {}
         for name in BACKUP_DIRS:
             copy_snapshot(d / name, stage / name, hermes=name == "hermes", prepared=prepared,
-                          files=files, timings=timings, counters=counters)
+                          files=files, timings=timings, counters=counters, file_profiles=file_profiles)
         captured = time.monotonic()
         directories = sorted(str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_dir())
         m = {"version": 1, "format": "directory-v1", "backup_id": bid,
              "created_at": snapshot_at, "snapshot_at": snapshot_at,
              "release_id": release_id or release_path(c).name, "secrets": versions,
              "files": files, "directories": directories,
+             "capture_files": file_profiles,
              "sqlite_verification": sqlite_verification_contract()}
         if prepared:
             # File names stay in the private manifest, never in public deployment
@@ -1101,6 +1333,29 @@ def stop_project(c: dict) -> None:
         raise OpsError("project still has writers; recovery cannot proceed")
 
 
+def restore_compatible_release(c: dict, op: Operation) -> None:
+    """Undo only a release switch; compatible operations never replace data.
+
+    Runtime secrets and host configuration are deliberately retained throughout
+    this mode. Per-release reviewer projections are immutable disposable outputs.
+    """
+    if op.value.get("writes_possible"):
+        raise OpsError("application writes resumed; preserve the installed release and data")
+    if not op.value.get("previous_release"):
+        raise OpsError("compatible deployment has no predecessor")
+    if secret_versions(c) != op.value.get("retained_secret_versions"):
+        raise OpsError("runtime secret versions changed; preserve configuration for inspection")
+    point_current(c, release_path(c, op.value["previous_release"]))
+    path = Path(c["data_root"]) / "release-state.json"
+    previous = op.value.get("previous_release_state")
+    if previous is None:
+        if path.exists():
+            path.unlink()
+            sync_directory(path.parent)
+    else:
+        write_json(path, previous)
+
+
 def recover(c: dict, operation_id: str) -> dict:
     value = read_operation(c)
     if not value or value["operation_id"] != operation_id:
@@ -1114,7 +1369,9 @@ def recover(c: dict, operation_id: str) -> dict:
         undo_restore(c, op)
     if value["kind"] in {"deploy", "rollback"} and not value["writes_possible"]:
         snapshot = value.get("backup")
-        if snapshot:
+        if value.get("deployment_mode") == "compatible":
+            restore_compatible_release(c, op)
+        elif snapshot:
             restore_unlocked(c, local_backup_path(c, snapshot),
                              snapshot["sha256"], replace=True, _operation=op)
         elif value.get("state_mutation_started"):
@@ -1152,7 +1409,7 @@ def wait_healthy(c: dict, expected: list[str], timeout: int = 180) -> None:
 
 def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
     started = time.monotonic()
-    from .release_policy import check_transition
+    from .release_policy import check_transition, deployment_mode
     require_idle(c)
     target = release_path(c, release_id); candidate = manifest(target)
     root = Path(c["release_root"]); current = root / "current"
@@ -1163,52 +1420,118 @@ def deploy(c: dict, release_id: str, *, rollback: bool = False) -> dict:
         if active and not healthy(c, active):
             raise OpsError("release already installed but unhealthy; inspect status before retrying")
         return {"status": "deployed" if active else "deployed_paused", "release_id": release_id, "already_installed": True}
-    check_transition(candidate, manifest(previous) if previous else None, rollback=rollback)
+    installed = manifest(previous) if previous else None
+    check_transition(candidate, installed, rollback=rollback)
+    mode, mode_reason = deployment_mode(candidate, installed, rollback=rollback)
     compose(c, "config", "--quiet", release=target)
     compose(c, "pull", release=target)
     if candidate.get("reviewer_image"):
         run(["docker", "pull", candidate["reviewer_image"]], timeout=1800)
+        # Immutable, digest-addressed export only: no live config, service unit,
+        # gate or application state changes. prepare() re-verifies it at cutover.
+        from .review_host import prepare_binary
+        prepare_binary(c, candidate, run)
     if preflight(c)["issues"]:
         raise OpsError("preflight is incomplete")
-    available_space(c, local_snapshot=True)
+    if mode == "compatible":
+        try:
+            # No database initialization, model calls or network access. The
+            # service mounts state read-only and checks supported schema contracts.
+            compose(c, "run", "--rm", "--no-deps", "schema-check", release=target)
+            secret_versions(c)
+        except (OpsError, OSError, ValueError):
+            mode, mode_reason = "migration", "installed_state_requires_migration"
+    if mode == "migration":
+        available_space(c, local_snapshot=True)
     active = running_services(c) if previous else []
     prior_activation = activation(c)
-    with prepare_snapshot(c) as prepared:
+    with ExitStack() as preparation:
         result = install_prepared(c, target, candidate, previous, active, prior_activation,
-                                  rollback=rollback, prepared=prepared, started=started)
+                                  rollback=rollback, preparation=preparation, started=started,
+                                  mode=mode, mode_reason=mode_reason)
     result["timings_seconds"]["total_including_cleanup"] = round(time.monotonic() - started, 3)
     return result
 
 
 def install_prepared(c: dict, target: Path, candidate: dict, previous: Path | None,
                      active: list[str], prior_activation: dict, *, rollback: bool,
-                     prepared: dict, started: float) -> dict:
+                     preparation: ExitStack, started: float, mode: str = "migration",
+                     mode_reason: str = "policy_requires_migration") -> dict:
     release_id = target.name
+    cutover_timings = {}
+    # Capture the trusted completed-operation reference before beginning this
+    # operation replaces the journal anchor. Only metadata is retained in memory.
+    verification_reference = preparation_reference(c) if mode == "migration" else None
+    previous_release_state = None
+    state_path = Path(c["data_root"]) / "release-state.json"
+    if mode == "compatible" and state_path.exists():
+        previous_release_state = json.loads(private_bytes(state_path, 1024**2))
     op = Operation.begin(c, "rollback" if rollback else "deploy", previous_release=previous.name if previous else None,
                          target_release=release_id, active_services=active, previous_activation=prior_activation,
-                         backup=None, state_mutation_started=False,
+                         backup=None, state_mutation_started=False, deployment_mode=mode,
+                         deployment_mode_reason=mode_reason, previous_release_state=previous_release_state,
+                         retained_secret_versions=secret_versions(c) if mode == "compatible" else None,
                          recovery_tool=str(Path(__file__).resolve().parent.parent / "scripts" / "job-search-ops"))
     try:
-        stop_for_maintenance(c, op, active)
-        # Fresh seed state also needs a recoverable snapshot before initialization.
-        op.update("snapshotting")
-        snapshot = backup_unlocked(c, paused=True, upload=False, release_id=previous.name if previous else release_id, prepared=prepared)
-        op.update("snapshotted", backup=snapshot)
-        op.update("preparing_runtime", state_mutation_started=True)
-        materialize_secrets(c); chown_runtime(c)
-        from .review_host import prepare as prepare_reviewer
-        prepare_reviewer(c, target, candidate, run)
-        if preflight(c)["issues"]: raise OpsError("preflight is incomplete")
-        point_current(c, target)
-        set_gate(c, [], initialize=op.id)
-        op.update("initializing")
-        compose(c, "run", "--rm", "--no-deps", "--env", "JOB_SEARCH_INITIALIZE_OPERATION=" + op.id, "initialize")
+        prepared = None
+        def prepare_after_drain():
+            nonlocal prepared
+            prepared = preparation.enter_context(prepare_snapshot(c, verification_reference=verification_reference))
+        if mode == "migration":
+            stop_for_maintenance(c, op, active, before_stop=prepare_after_drain)
+            # Fresh seed state also needs a recoverable snapshot before initialization.
+            op.update("snapshotting")
+            snapshot = backup_unlocked(c, paused=True, upload=False, release_id=previous.name if previous else release_id, prepared=prepared)
+            op.update("snapshotted", backup=snapshot)
+            op.update("preparing_runtime", state_mutation_started=True)
+            with measured(cutover_timings, "secret_materialization"):
+                materialize_secrets(c)
+            with measured(cutover_timings, "runtime_ownership"):
+                chown_runtime(c)
+            from .review_host import prepare as prepare_reviewer
+            with measured(cutover_timings, "reviewer_configuration"):
+                prepare_reviewer(c, target, candidate, run)
+            with measured(cutover_timings, "runtime_preflight"):
+                if preflight(c)["issues"]: raise OpsError("preflight is incomplete")
+            point_current(c, target)
+            set_gate(c, [], initialize=op.id)
+            op.update("initializing")
+            with measured(cutover_timings, "initialize"):
+                compose(c, "run", "--rm", "--no-deps", "--env", "JOB_SEARCH_INITIALIZE_OPERATION=" + op.id, "initialize")
+        else:
+            stop_for_maintenance(c, op, active)
+            op.update("checking_schema")
+            # Recheck after all writers stop. A failure here reverts the release
+            # pointer, without ever initializing or restoring application data.
+            with measured(cutover_timings, "schema_check"):
+                compose(c, "run", "--rm", "--no-deps", "schema-check", "--config",
+                        "/run/job-search/config.json", "check-schema", "--offline", release=target)
+            from .review_host import prepare_compatible
+            with measured(cutover_timings, "reviewer_configuration"):
+                prepare_compatible(c, target, candidate, run)
+            op.update("switching_release")
+            point_current(c, target)
+        supported = configured_services(c, release=target)
+        resumed = [s for s in active if s in supported]
+        for lane in ("core", "model"):
+            interactive = "interactive-" + lane
+            if lane in resumed and interactive in supported and interactive not in resumed:
+                resumed.append(interactive)
         op.update("validating")
         set_gate(c, [], draining=True)
-        compose(c, "up", "-d", "--no-deps", "--no-build", "tools")
-        wait_healthy(c, ["tools"])
-        compose(c, "stop", "tools")
-        if prior_activation.get("enabled"): model_readiness(c)
+        with measured(cutover_timings, "tools_create"):
+            compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", "tools")
+        with measured(cutover_timings, "tools_health"):
+            wait_healthy(c, ["tools"])
+        # The networkless tools service has no application-state mount. Keep its
+        # verified target container for active deployments instead of stopping
+        # and recreating it twice; a paused deployment must still leave it down.
+        if "tools" not in resumed:
+            with measured(cutover_timings, "tools_stop"):
+                compose(c, "stop", "tools")
+        if prior_activation.get("enabled"):
+            with measured(cutover_timings, "model_readiness"):
+                model_readiness(c)
         write_json(Path(c["data_root"]) / "release-state.json", {"current": release_id,
                    "previous": previous.name if previous else None, "backup": op.value["backup"]})
     except Exception:
@@ -1224,7 +1547,10 @@ def install_prepared(c: dict, target: Path, candidate: dict, previous: Path | No
         elif op.value["state_mutation_started"]:
             op.update("recovery_required")
             raise
-        point_current(c, previous)
+        if mode == "compatible":
+            restore_compatible_release(c, op)
+        else:
+            point_current(c, previous)
         # Recovered old state is consistent; any subsequent writes forbid rewind.
         op.update("resuming_previous", writes_possible=True)
         set_gate(c, active)
@@ -1235,20 +1561,27 @@ def install_prepared(c: dict, target: Path, candidate: dict, previous: Path | No
         op.finish("deployment_reverted")
         raise
     try:
-        op.update("resuming", writes_possible=bool(active))
-        set_gate(c, active)
-        if active:
-            compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *active)
-            wait_healthy(c, active)
+        op.update("resuming", writes_possible=bool(resumed), resumed_services=resumed)
+        set_gate(c, resumed)
+        if resumed:
+            restarting = [s for s in resumed if s != "tools"]
+            if restarting:
+                with measured(cutover_timings, "services_create"):
+                    compose(c, "up", "-d", "--no-deps", "--no-build", "--force-recreate", *restarting)
+            with measured(cutover_timings, "services_health"):
+                wait_healthy(c, resumed)
         write_json(Path(c["data_root"]) / "activation.json", prior_activation)
-        op.finish("deployed" if active else "deployed_paused", downtime_finished_at=operation_now())
+        op.finish("deployed" if resumed else "deployed_paused", downtime_finished_at=operation_now(),
+                  cutover_steps_seconds={name: round(seconds, 3) for name, seconds in cutover_timings.items()})
     except Exception:
         pause(c, reason="release failed after validation; data retained for inspection")
         op.update("recovery_required")
         raise
     deployment_seconds = time.monotonic() - started
-    retention = "retained_two_newest"
-    try: prune_local_backups(c, keep_backup=op.value["backup"]["backup_id"])
+    retention = "retained_two_newest" if op.value["backup"] else "unchanged_no_snapshot"
+    try:
+        if op.value["backup"]:
+            prune_local_backups(c, keep_backup=op.value["backup"]["backup_id"])
     except (OSError, OpsError):
         # Deployment is already complete. Keep old evidence rather than turn a
         # cleanup failure into an ambiguous failed deployment or stop writers.
@@ -1261,8 +1594,10 @@ def install_prepared(c: dict, target: Path, candidate: dict, previous: Path | No
         pass
     return {"status": op.value["phase"], "release_id": release_id, "operation_id": op.id,
             "previous_release": op.value["previous_release"], "phase_times": op.value["phase_times"],
+            "deployment_mode": mode, "deployment_mode_reason": mode_reason,
             "backup": op.value["backup"], "local_backup_retention": retention,
             "local_image_retention": image_retention,
+            "cutover_steps_seconds": op.value["cutover_steps_seconds"],
             "timings_seconds": {"through_service_health": round(deployment_seconds, 3),
                                 **op.durations()}}
 

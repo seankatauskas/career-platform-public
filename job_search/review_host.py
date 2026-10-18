@@ -149,22 +149,39 @@ def _verify_native(root):
     return binary
 
 
-def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system')):
-    """Provision a pinned host runner, without signing in or enabling a schedule."""
+def prepare_binary(c, manifest, run):
+    """Export immutable pinned executable bytes before application downtime.
+
+    This cache is outside the snapshot trees. It grants no runtime authority:
+    prepare() must verify it again before configuring the installed release.
+    """
     image = manifest.get('reviewer_image')
     if image is None:
-        return {'status': 'not_in_release'}
+        return None
     from .aws_ops import IMAGE
     if not IMAGE.fullmatch(image) or image.split('@', 1)[0] != manifest['app_image'].split('@', 1)[0]:
         raise OpsError('reviewer image must use the pinned application repository')
+    return _native_codex(c, image, run)
+
+
+def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system'), _compatible=False):
+    """Provision a pinned host runner, without signing in or enabling a schedule."""
+    binary = prepare_binary(c, manifest, run)
+    if binary is None:
+        return {'status': 'not_in_release'}
+    image = manifest['reviewer_image']
     d = Path(c['data_root'])
-    binary = _native_codex(c, image, run)
     configs = _private(d / 'operations' / 'review-config' / manifest['release_id'])
-    _private(d / 'operations' / 'review-auth')
-    _private(d / 'runtime' / 'reviews')
     state = d / 'state' / 'review-runner'
-    # Host maintenance repairs this subtree to root after restore/chown.
-    _private(state)
+    for directory in (d / 'operations' / 'review-auth', d / 'runtime' / 'reviews', state):
+        if _compatible:
+            # Ordinary releases may publish only their own derived configuration.
+            # Never repair durable state, permissions, auth or installed units.
+            from .operation_journal import private_directory
+            if not directory.exists() or not private_directory(directory):
+                raise OpsError('compatible review preparation requires existing private directories')
+        else:
+            _private(directory)
     source = d / 'private' / 'config.json'
     if source.is_symlink() or not source.is_file() or source.stat().st_size > 65536:
         raise OpsError('invalid review application configuration source')
@@ -184,6 +201,8 @@ def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system
                  'benchmark_check_all'):
         runner[name] = getattr(RunnerConfig, name)
     write_json(configs / 'runner.json', runner)
+    if _compatible:
+        return {'status': 'prepared_compatible', 'schedule_enabled': False, 'schedule_calendar': None}
     unit = release / 'deploy/aws' / UNIT
     if unit.is_symlink() or not unit.is_file():
         raise OpsError('release is missing review runner service')
@@ -215,6 +234,11 @@ def prepare(c, release, manifest, run, *, systemd_root=Path('/etc/systemd/system
     # Poll the durable request queue only. This never schedules new reviews.
     run(['systemctl', 'enable', '--now', GENERATOR_UNITS[1]])
     return {'status': 'prepared', 'schedule_enabled': False, 'schedule_calendar': None}
+
+
+def prepare_compatible(c, release, manifest, run):
+    """Publish disposable release-specific projections without changing live state."""
+    return prepare(c, release, manifest, run, _compatible=True)
 
 
 def worker_containers(run):

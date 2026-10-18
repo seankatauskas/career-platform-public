@@ -123,7 +123,7 @@ class Transaction:
 
 
 class CommandExecutor:
-    def __init__(self, path, schemas: Mapping[str,str], clock=None, schema_migrations=None):
+    def __init__(self, path, schemas: Mapping[str,str], clock=None, schema_migrations=None, require_schema=False):
         self.path = Path(path)
         self.clock = clock or utc_now
         from .installation import SCHEMA as CONTROL_SCHEMA, SCHEMA_MIGRATIONS as CONTROL_MIGRATIONS
@@ -137,6 +137,12 @@ class CommandExecutor:
                 if table in self.owners:
                     raise DomainError("invalid_input", "A table has two owners")
                 self.owners[table] = owner
+        from ..schema_lifecycle import require_current, read_connection, check_owner
+        if require_schema or require_current():
+            with closing(read_connection(self.path)) as con:
+                check_owner(con, self.schemas)
+                self._installation_id = self.installation_identity(con)
+            return
         self.path.parent.mkdir(parents=True,exist_ok=True)
         with closing(self._connect()) as con:
             existing = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}

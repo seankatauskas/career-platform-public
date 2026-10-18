@@ -429,12 +429,17 @@ def workflow_health(db_path: Path, now: datetime) -> dict[str, Any]:
             lane_counts[str(row["lane"])][str(row["status"])] = int(row["count"])
         lanes = {}
         for lane, counts in lane_counts.items():
-            lease_name = "job-search-worker" if lane == "core" else "job-search-worker:model"
-            lease = con.execute(
-                "SELECT lease_name,owner,heartbeat_at,expires_at FROM worker_leases "
-                "WHERE lease_name=?",
-                (lease_name,),
-            ).fetchone()
+            from .worker import WORK_PARTITIONS, worker_lease_name
+            partitions = {}
+            for partition in sorted(WORK_PARTITIONS):
+                row = con.execute(
+                    "SELECT lease_name,owner,heartbeat_at,expires_at FROM worker_leases WHERE lease_name=?",
+                    (worker_lease_name(lane, partition),),
+                ).fetchone()
+                partitions[partition] = dict(row) if row else None
+            # Retain the legacy summary field while exposing all execution leases.
+            lease = next((value for value in partitions.values() if value and value["expires_at"] > stamp), None)
+            lease = lease or next((value for value in partitions.values() if value), None)
             lanes[lane] = {
                 "counts": counts,
                 "overdue": int(
@@ -445,6 +450,7 @@ def workflow_health(db_path: Path, now: datetime) -> dict[str, Any]:
                     ).fetchone()[0]
                 ),
                 "worker_lease": dict(lease) if lease else None,
+                "worker_partitions": partitions,
             }
 
         latest_watermarks: dict[str, Any] = {}
@@ -531,10 +537,6 @@ def automation_health(db_path: Path, now: datetime) -> dict[str, Any]:
                 value = dict(latest)
                 value["last_success_at"] = success[0] if success else None
                 last_runs.append(value)
-        lease = con.execute(
-            "SELECT lease_name,owner,heartbeat_at,expires_at FROM worker_leases "
-            "WHERE lease_name='job-search-worker'"
-        ).fetchone()
         result = {
             "checked_at": stamp,
             "schedules": schedules,
@@ -549,7 +551,7 @@ def automation_health(db_path: Path, now: datetime) -> dict[str, Any]:
                 (stamp,),
             ).fetchone()[0]),
             "last_runs": last_runs,
-            "worker_lease": dict(lease) if lease else None,
         }
     result["workflow"] = workflow_health(db_path, now)
+    result["worker_lease"] = result["workflow"]["lanes"]["core"]["worker_lease"]
     return result

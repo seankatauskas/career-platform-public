@@ -22,6 +22,11 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
   # Account-wide spending is intentional: include untaggable transfer/tax costs.
+  # Track underlying spend even while promotional credits cover the invoice.
+  cost_types {
+    include_credit = false
+    include_refund = false
+  }
   dynamic "notification" {
 
     for_each = [80, 100]

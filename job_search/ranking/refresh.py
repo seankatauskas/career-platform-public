@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -120,7 +121,7 @@ def _prepared_snapshot(jobs_db, *, tracked):
     from . import model, refresh_freshness as freshness
     from job_search.collection.dedupe import prepare_families, prepared_families_are_current
     if not tracked:
-        dedupe = {'reused': True} if prepared_families_are_current(jobs_db) else prepare_families(jobs_db)
+        dedupe = {'reused': True} if prepared_families_are_current(jobs_db) else prepare_families(jobs_db, incremental=True)
         with closing(model.connect_source(jobs_db)) as source:
             source.execute('BEGIN')
             yield source, dedupe
@@ -131,7 +132,7 @@ def _prepared_snapshot(jobs_db, *, tracked):
         dedupe = {'reused': True}
         if not prepared_families_are_current(jobs_db, connection=source):
             source.close()
-            dedupe = prepare_families(jobs_db)
+            dedupe = prepare_families(jobs_db, incremental=True)
             # Preparation may have introduced derived tables since tracking began.
             freshness.ensure_tracking(jobs_db, 'source')
             source = model.connect_source(jobs_db)
@@ -160,7 +161,14 @@ def _reuse_completed(jobs_db, preference_db, proxy_db, runs, signatures, active_
             return None
         _require_models(preference_db, proxy_db, runs, signatures, active_components_only)
         _require_identities(identities, jobs_db, preference_db)
-        return receipts, totals.pop(), watermarks.pop()
+        # Observation timestamps are freshness metadata, not model inputs. Keep
+        # the coverage receipt current without rebuilding or rescoring families.
+        watermark = source.execute('SELECT MAX(last_seen) FROM jobs').fetchone()[0]
+        for policy, receipt in receipts.items():
+            if receipt['source_watermark'] != watermark:
+                receipt['source_watermark'] = watermark
+                model._set_state(state, 'policy_refresh:' + policy, json.dumps(receipt, sort_keys=True))
+        return receipts, totals.pop(), watermark
 
 def refresh_policies(
     jobs_db: Path, preference_db: Path, proxy_db: Path, *, device='auto',
@@ -203,6 +211,7 @@ def refresh_policies(
     # reuse check or a long scoring snapshot, so collectors can still commit.
     # A rejected no-embedding request must not change either database's mode.
     with _enable_refresh_wal(jobs_db), _enable_refresh_wal(preference_db):
+        refresh_started = time.perf_counter()
         started = datetime.now(timezone.utc).isoformat()
         progress = {'status': 'checking' if tracked else 'preparing', 'started_at': started, 'processed_families': 0,
                     'checked_families': 0, 'reused': False,
@@ -237,13 +246,14 @@ def refresh_policies(
                     results = {policy: {'run_id': runs[policy], 'checked_families': 0,
                                'recomputed_families': 0, 'updated_families': 0, 'removed_families': 0, 'reused_families': total}
                                for policy in policies}
-                    report(status='succeeded', reused=True, reuse_reason='inputs_unchanged',
+                    phase_seconds = {'total': round(time.perf_counter() - refresh_started, 3)}
+                    report(status='succeeded', reused=True, phase_seconds=phase_seconds, reuse_reason='inputs_unchanged',
                            total_families=total, source_watermark=watermark, policies=results, embeddings={})
                     # Preserve the original completion timestamp and coverage seal;
                     # only this invocation's result describes zero new work.
                     returned = {policy: {**receipt, 'result': {**receipt['result'], **results[policy]}}
                                 for policy, receipt in receipts.items()}
-                    return {'status': 'ready', 'reused': True, 'reason': 'already_current',
+                    return {'status': 'ready', 'reused': True, 'phase_seconds': phase_seconds, 'reason': 'already_current',
                             'reuse_reason': 'inputs_unchanged', 'policies': returned, 'dedupe': {'reused': True},
                             'embeddings': {}, 'processed_families': 0, 'checked_families': 0,
                             'total_families': total, 'selected_policies': list(policies),
@@ -264,10 +274,13 @@ def refresh_policies(
                     source.execute('BEGIN')
                     yield source, None
             snapshot = sample_snapshot() if sample_size is not None else _prepared_snapshot(jobs_db, tracked=tracked)
+            preparation_started = time.perf_counter()
             with snapshot as (source, dedupe), closing(model.connect_state(preference_db)) as state:
+                phase_seconds = {'preparation': round(time.perf_counter() - preparation_started, 3)}
+                scoring_started = time.perf_counter()
                 # One SQLite read transaction binds validation, watermark, features,
                 # and selected policies to the same view while ingestion can continue in WAL.
-                model.validate_family_schema(source, require_complete=sample_size is None)
+                model.validate_family_schema(source, require_complete=sample_size is None and not tracked)
                 source_token = freshness.revision_token(source, jobs_db, 'source') if tracked else None
                 expected_scores = {}
                 force_rescore = {}
@@ -282,22 +295,46 @@ def refresh_policies(
                 watermark = source.execute('SELECT MAX(last_seen) FROM jobs').fetchone()[0]
                 total = source.execute('SELECT COUNT(*) FROM job_families').fetchone()[0]
                 family_ids = None
+                affected_ids = None
+                if tracked:
+                    candidates = [freshness.incremental_families(source, state, preference_db, policy,
+                                  runs[policy], signatures[policy], source_token) for policy in policies]
+                    if all(ids is not None for ids in candidates):
+                        affected_ids = sorted(set().union(*map(set, candidates)))
+                        family_ids = []
+                        for start in range(0, len(affected_ids), 800):
+                            chunk = affected_ids[start:start + 800]
+                            family_ids.extend(row[0] for row in source.execute(
+                                'SELECT family_id FROM job_families WHERE family_id IN (' + ','.join('?' for _ in chunk) + ')', chunk))
+                        family_ids.sort()
                 if sample_size is not None:
                     ids = [row[0] for row in source.execute('SELECT family_id FROM job_families ORDER BY family_id')]
                     size = min(sample_size, len(ids))
                     family_ids = [ids[round(i * (len(ids) - 1) / max(1, size - 1))] for i in range(size)]
                     total = size
+                expected_checked = len(family_ids) if family_ids is not None else total
+                report(incremental=affected_ids is not None, expected_checked_families=expected_checked,
+                       changed_families=len(affected_ids) if affected_ids is not None else None,
+                       dedupe=dedupe, phase_seconds=phase_seconds)
                 report(status='embedding_and_scoring' if embedding_policies else 'scoring',
                        total_families=total, source_watermark=watermark)
                 state.execute('CREATE TEMP TABLE refresh_families (family_id TEXT PRIMARY KEY)')
+                if affected_ids is not None:
+                    state.execute('CREATE TEMP TABLE refresh_affected (family_id TEXT PRIMARY KEY)')
+                    state.executemany('INSERT INTO refresh_affected VALUES (?)', [(f,) for f in affected_ids])
+                    state.commit()
                 encoders = {}
                 embedded = {}
                 results = {policy: {'run_id': runs[policy], 'updated_families': 0,
                                    'checked_families': 0, 'recomputed_families': 0, 'reused_families': 0}
                            for policy in policies}
-                for documents in model.iter_family_document_batches(
-                    jobs_db, batch_size=batch_size, connection=source, family_ids=family_ids,
-                ):
+                def document_batches():
+                    # Bound SQLite parameters even when many blocks changed.
+                    groups = [None] if family_ids is None else (family_ids[i:i + 800] for i in range(0, len(family_ids), 800))
+                    for group in groups:
+                        yield from model.iter_family_document_batches(
+                            jobs_db, batch_size=batch_size, connection=source, family_ids=group)
+                for documents in document_batches():
                     for policy in policies:
                         if policy not in embedding_policies:
                             continue
@@ -344,9 +381,10 @@ def refresh_policies(
                     report(processed_families=progress['processed_families'] + len(documents),
                            checked_families=progress['checked_families'] + len(documents),
                            batches=progress['batches'] + 1, embeddings=embedded, policies=results)
-                if progress['processed_families'] != total:
+                if progress['processed_families'] != expected_checked:
                     raise model.PreferenceModelError('catalog snapshot did not yield every expected family')
-                # Only a completed full pass may prune obsolete scores and certify freshness.
+                # Prune only after completing the entire catalog or a proven delta
+                # from a complete receipt; samples cannot certify coverage.
                 receipts = {}
                 if sample_size is None:
                     with state:
@@ -360,14 +398,16 @@ def refresh_policies(
                                     raise RefreshDatabaseBusyError('ranking scores changed before completion; retry refresh')
                         for policy in policies:
                             results[policy]['removed_families'] = state.execute(
-                                'DELETE FROM preference_scores WHERE run_id=? AND family_id NOT IN '
-                                '(SELECT family_id FROM refresh_families)', (runs[policy],),
+                                'DELETE FROM preference_scores WHERE run_id=? AND '
+                                + ('family_id IN (SELECT family_id FROM refresh_affected) AND ' if affected_ids is not None else '')
+                                + 'family_id NOT IN (SELECT family_id FROM refresh_families)', (runs[policy],),
                             ).rowcount
                             results[policy]['scored_families'] = state.execute(
                                 'SELECT COUNT(*) FROM preference_scores WHERE run_id=?', (runs[policy],),
                             ).fetchone()[0]
                             if results[policy]['scored_families'] != total:
                                 raise model.PreferenceModelError('score coverage does not match the completed catalog snapshot')
+                            results[policy]['reused_families'] = total - results[policy]['updated_families']
                             receipts[policy] = {'run_id': runs[policy], 'source_watermark': watermark,
                                 'active_components_only': active_components_only,
                                 'completed_at': datetime.now(timezone.utc).isoformat(), 'result': results[policy]}
@@ -378,9 +418,12 @@ def refresh_policies(
                                     receipts[policy]['reuse'] = {**checkpoint, 'source': source_token,
                                         'complete': True, 'family_count': total}
                             model._set_state(state, 'policy_refresh:' + policy, json.dumps(receipts[policy], sort_keys=True))
-                report(status='succeeded')
+                phase_seconds.update(feature_and_scoring=round(time.perf_counter() - scoring_started, 3),
+                                     total=round(time.perf_counter() - refresh_started, 3))
+                report(status='succeeded', phase_seconds=phase_seconds)
                 return {'status': 'sample_passed' if sample_size is not None else 'ready',
-                        'reused': False, 'checked_families': progress['checked_families'], 'total_families': total,
+                        'phase_seconds': phase_seconds, 'changed_families': len(affected_ids) if affected_ids is not None else None,
+                        'reused': False, 'incremental': affected_ids is not None, 'checked_families': progress['checked_families'], 'total_families': total,
                         'policies': receipts or results, 'dedupe': dedupe, 'embeddings': embedded,
                         'processed_families': progress['processed_families'],
                         'selected_policies': list(policies), 'active_components_only': active_components_only,

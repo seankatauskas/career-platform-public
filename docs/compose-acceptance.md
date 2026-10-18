@@ -88,6 +88,12 @@ inventory. Those checks still require their corresponding external configuration
 
 ## Release transition and interruption checks
 
+[Deployment modes](operations/deployment-modes.md) define the explicit migration and
+read-only startup boundary. A generic passing upgrade receipt is not sufficient
+proof that a deployment can omit its data checkpoint. Compatible eligibility needs
+the matching runtime contract, supported startup protocol and exact-source Docker
+transition evidence. Local fixture results cannot grant production eligibility.
+
 The AWS checks and release workflow also run:
 
 ```sh

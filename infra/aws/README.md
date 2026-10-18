@@ -74,6 +74,14 @@ Pin the resolved `ami_id` output before later plans so a Canonical AMI refresh d
 not unexpectedly replace the host. Changing user data also replaces the host;
 review the plan and perform replacements in a maintenance window after a backup.
 
+The account-wide $100 monthly budget excludes credits and refunds, so promotional
+credits cannot mask underlying spend. Existing $80/$100 actual-cost alerts remain.
+Use `scope=monthly-budget` in `aws-terraform.yml` to roll out this cost-basis change:
+first review `operation=plan`, then run `operation=apply`. The saved-plan validator
+allows only these two inclusion flags on the existing budget. It rejects changes
+to limits, filters, delivery, other cost types, and other infrastructure, including
+EC2 bootstrap drift. This scope uses the same remote state and production lock.
+
 ## First boot and persistent storage
 
 `initialize_data_volume = true` is an explicit first-install authorization to

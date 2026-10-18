@@ -1,0 +1,16 @@
+{
+  "scope": "single read-only retained production snapshot probe; no live database writes or cache eviction",
+  "decision": "reject default mmap; no demonstrated host benefit",
+  "comparison_limit": "earlier deployment and probe have different cache and preceding workload conditions; not a controlled regression measurement",
+  "sqlite_version": "3.45.1",
+  "database_bytes": 7588659200,
+  "effective_mmap_bytes": 2147418112,
+  "result": "ok",
+  "elapsed_seconds": 663.805825,
+  "cpu_seconds": 48.921262,
+  "peak_rss_kib": 2113424,
+  "physical_read_bytes": 8825921536,
+  "physical_write_bytes": 0,
+  "rchar_bytes": 6995751018,
+  "earlier_deployment_check_seconds": 641.565
+}

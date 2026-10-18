@@ -239,6 +239,10 @@ def connect_source(path: Path) -> sqlite3.Connection:
 
 
 def prepare_schema(path: Path) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional_path
+    if require_current():
+        check_optional_path(path, "proxy")
+        return
     with connect_proxy(path) as con:
         con.executescript(DDL)
 

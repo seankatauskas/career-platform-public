@@ -29,6 +29,7 @@ from .worker import (
     OutboxContext,
     TaskContext,
     Worker,
+    WORK_PARTITIONS,
     _safe_error,
     _unavailable_outlook_handler,
     preference_outbox_handler,
@@ -509,8 +510,8 @@ class RuntimeConfigV1:
                     or profile["structured_generation"]["kind"] != "openrouter"):
                 raise ValueError("mail_inference_profile must be a generation-only OpenRouter profile")
             # This is host projection metadata. Do not load its credential here:
-            # dashboard, model, and MCP deliberately never receive the mail key.
-            # Core validates the complete materialized profile before inference.
+            # Only explicitly selected services receive the mail key through
+            # their Compose overlay. The handler validates it before inference.
         if self.shortlist_notification_start_at is not None:
             from .contracts import parse_utc
             parse_utc(self.shortlist_notification_start_at)
@@ -754,14 +755,25 @@ class Runtime:
     worker: Worker
     schedules: Mapping[str, Any]
 
-    def tick(self, now: Optional[datetime] = None, *, should_stop: Callable[[], bool] = lambda: False) -> Mapping[str, Any]:
+    def tick(self, now: Optional[datetime] = None, *, should_stop: Callable[[], bool] = lambda: False,
+             include_diagnostics: bool = True, refresh_dependencies: bool = True) -> Mapping[str, Any]:
         if should_stop():
             return {"acquired": False, "reason": "worker draining"}
-        if self.lane == "core":
+        observation = None
+        if self.lane == "core" and refresh_dependencies:
             from .dependency_health import dependency_health
             from .dependency_snapshot import publish_snapshot
-            publish_snapshot(self.config.application_db, dependency_health(self.config))
-        return self.worker.tick(now=now, should_stop=should_stop)
+            dependencies = dependency_health(self.config)
+            publish_snapshot(self.config.application_db, dependencies)
+            # A failed local bridge observation during startup should not linger
+            # for a whole normal refresh interval. Never return raw dependency
+            # details here: they may contain private paths and configuration.
+            notification = dependencies.get("notifications", {})
+            observation = {"notification_retry": notification.get("status") == "blocked_setup"}
+        report = self.worker.tick(now=now, should_stop=should_stop, include_diagnostics=include_diagnostics)
+        if observation is not None:
+            report = {**report, "dependency_snapshot": observation}
+        return report
 
 
 def _configured_mail_models(
@@ -1034,6 +1046,7 @@ def build_runtime(
     config: RuntimeConfigV1,
     *,
     lane: str = "core",
+    partition: str = "all",
     now_provider: Optional[Callable[[], datetime]] = None,
     task_overrides: Optional[
         Mapping[str, Callable[[Mapping[str, Any], TaskContext], Mapping[str, Any]]]
@@ -1050,6 +1063,8 @@ def build_runtime(
     config.validate()
     if lane not in {"core", "model"}:
         raise ValueError("lane must be core or model")
+    if partition not in WORK_PARTITIONS:
+        raise ValueError("unknown worker partition")
     clock = now_provider or (lambda: datetime.now(timezone.utc))
     now = clock()
     prepare_database(config.application_db, utc_stamp(now))
@@ -1064,8 +1079,13 @@ def build_runtime(
             "hermes_executable is required unless hermes_notification_socket is configured when delivery is enabled"
         )
     from .application_installation import LEGACY_TASKS
-    schedules = seed_default_schedules(config.application_db, now, environment,
-        excluded_tasks=LEGACY_TASKS if config.application_backend == "owners" else ())
+    from .schema_lifecycle import require_current, check_config, STARTUP_POLICY
+    if require_current():
+        check_config(config)
+        schedules = {"seeded": 0, "schema_policy": STARTUP_POLICY}
+    else:
+        schedules = seed_default_schedules(config.application_db, now, environment,
+            excluded_tasks=LEGACY_TASKS if config.application_backend == "owners" else ())
 
     def environment_provider() -> Mapping[str, str]:
         return environment
@@ -1255,6 +1275,7 @@ def build_runtime(
         outbox_handlers=outbox_handlers,
         now_provider=clock,
         lane=lane,
+        partition=partition,
         deferred_task_kinds=deferred,
         max_work_per_tick=max_work_per_tick,
         max_outbox_per_tick=max_outbox_per_tick,

@@ -30,6 +30,8 @@ from .worker import (
     DEFAULT_MAX_OUTBOX_PER_TICK,
     DEFAULT_MAX_WORK_PER_TICK,
     WORK_LANES,
+    WORK_PARTITIONS,
+    worker_service_name,
     _safe_error,
 )
 
@@ -37,11 +39,14 @@ from .worker import (
 DEFAULT_TICK_INTERVAL_SECONDS = 5 * 60
 MAX_CATCH_UP_TICKS = 3
 CATCH_UP_INTERVAL_SECONDS = 1
+DEPENDENCY_REFRESH_INTERVAL_SECONDS = 5 * 60
+DEPENDENCY_RECOVERY_INTERVALS_SECONDS = (30, 60, 120)
 DEFAULT_HTTP_POLL_SECONDS = 0.5
 DEFAULT_HEALTH_DIR = Path("/tmp/job-search-health")
 DEFAULT_IDLE_HEALTH_SECONDS = 15 * 60
 DEFAULT_RUNNING_HEALTH_SECONDS = 70 * 60
 HEALTH_SCHEMA_VERSION = 1
+WORKER_SERVICES = WORK_LANES | frozenset({"interactive-core", "interactive-model"})
 
 
 def _utc_now() -> datetime:
@@ -49,7 +54,7 @@ def _utc_now() -> datetime:
 
 
 def _health_path(directory: Path, lane: str) -> Path:
-    if lane not in WORK_LANES:
+    if lane not in WORKER_SERVICES:
         raise ValueError("lane must be core or model")
     return Path(directory) / f"worker-{lane}.json"
 
@@ -95,7 +100,7 @@ def _worker_health_record(
     detail: Optional[Mapping[str, Any]] = None,
 ) -> Mapping[str, Any]:
     allowed_states = {"starting", "running", "idle", "drained", "stopped", "failed"}
-    if lane not in WORK_LANES or state not in allowed_states:
+    if lane not in WORKER_SERVICES or state not in allowed_states:
         raise ValueError("worker health state is invalid")
     record: dict[str, Any] = {
         "schema_version": HEALTH_SCHEMA_VERSION,
@@ -137,6 +142,7 @@ def run_worker_loop(
     config: RuntimeConfigV1,
     *,
     lane: str,
+    partition: str = "all",
     interval_seconds: float = DEFAULT_TICK_INTERVAL_SECONDS,
     max_work: int = DEFAULT_MAX_WORK_PER_TICK,
     max_outbox: int = DEFAULT_MAX_OUTBOX_PER_TICK,
@@ -149,13 +155,12 @@ def run_worker_loop(
 ) -> int:
     """Run bounded sequential ticks, briefly catching up when eligible work remains."""
 
-    if lane not in WORK_LANES:
-        raise ValueError("lane must be core or model")
+    service = worker_service_name(lane, partition)
     if not 1 <= interval_seconds <= 24 * 60 * 60:
         raise ValueError("interval_seconds must be between 1 second and 24 hours")
     if not 0 <= max_work <= 100 or not 0 <= max_outbox <= 100:
         raise ValueError("per-tick bounds must be between 0 and 100")
-    if lane == "model" and max_outbox:
+    if (lane == "model" or partition == "batch") and max_outbox:
         # Worker itself forces this to zero; recording the effective value here
         # keeps the operator-facing contract unambiguous.
         max_outbox = 0
@@ -164,45 +169,69 @@ def run_worker_loop(
 
         runtime_factory = build_runtime
 
-    health_path = _health_path(health_dir, lane)
+    health_path = _health_path(health_dir, service)
     stop_event = stop or threading.Event()
     started = now_provider()
-    _write_health(health_path, _worker_health_record(lane, "starting", started))
+    _write_health(health_path, _worker_health_record(service, "starting", started))
     runtime = runtime_factory(
         config,
         lane=lane,
+        **({"partition": partition} if partition != "all" else {}),
         max_work_per_tick=max_work,
         max_outbox_per_tick=max_outbox,
     )
 
     exit_code = 0
     catch_up_ticks = 0
+    next_dependency_refresh = 0.0
+    dependency_recovery_attempts = 0
     with _shutdown_signals(stop_event):
         while not stop_event.is_set():
             if draining():
                 catch_up_ticks = 0
-                _write_health(health_path, _worker_health_record(lane, "drained", now_provider()))
+                _write_health(health_path, _worker_health_record(service, "drained", now_provider()))
                 stop_event.wait(1)
                 continue
             tick_started = now_provider()
             _write_health(
                 health_path,
                 _worker_health_record(
-                    lane,
+                    service,
                     "running",
                     tick_started,
                     detail={"tick_started_at": utc_stamp(tick_started)},
                 ),
             )
+            # Dependency snapshots are diagnostics, not execution authorization.
+            # Their 15-minute validity remains unchanged. One core process checks
+            # every five minutes, with bounded early retries after a failed local
+            # notification probe; task handlers still validate dependencies.
+            refresh_dependencies = lane == "core" and (
+                once or (partition != "batch" and time.monotonic() >= next_dependency_refresh)
+            )
+            dependency_check_started = time.monotonic()
             try:
-                report = dict(runtime.tick(should_stop=lambda: stop_event.is_set() or draining()))
+                report = dict(runtime.tick(
+                    should_stop=lambda: stop_event.is_set() or draining(),
+                    include_diagnostics=once,
+                    refresh_dependencies=refresh_dependencies,
+                ))
+                if refresh_dependencies:
+                    refresh_interval = DEPENDENCY_REFRESH_INTERVAL_SECONDS
+                    if report.get("dependency_snapshot", {}).get("notification_retry") is True:
+                        if dependency_recovery_attempts < len(DEPENDENCY_RECOVERY_INTERVALS_SECONDS):
+                            refresh_interval = DEPENDENCY_RECOVERY_INTERVALS_SECONDS[dependency_recovery_attempts]
+                            dependency_recovery_attempts += 1
+                    else:
+                        dependency_recovery_attempts = 0
+                    next_dependency_refresh = dependency_check_started + refresh_interval
             except Exception as exc:
                 failed = now_provider()
                 error = _safe_error(exc)
                 _write_health(
                     health_path,
                     _worker_health_record(
-                        lane, "failed", failed, detail={"error": error}
+                        service, "failed", failed, detail={"error": error}
                     ),
                 )
                 print(f"job-search {lane} worker failed: {error}", file=sys.stderr)
@@ -212,6 +241,8 @@ def run_worker_loop(
             summary = {
                 "component": "worker",
                 "lane": lane,
+                "partition": partition,
+                "service": service,
                 "tick_started_at": utc_stamp(tick_started),
                 "tick_completed_at": utc_stamp(completed),
                 "report": report,
@@ -220,7 +251,7 @@ def run_worker_loop(
             _write_health(
                 health_path,
                 _worker_health_record(
-                    lane,
+                    service,
                     "idle",
                     completed,
                     detail={
@@ -246,7 +277,7 @@ def run_worker_loop(
         stopped = now_provider()
         _write_health(
             health_path,
-            _worker_health_record(lane, "stopped", stopped),
+            _worker_health_record(service, "stopped", stopped),
         )
     return exit_code
 
@@ -392,6 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = commands.add_parser("worker", help="run one bounded worker lane forever")
     worker.add_argument("--lane", choices=tuple(sorted(WORK_LANES)), required=True)
+    worker.add_argument("--partition", choices=tuple(sorted(WORK_PARTITIONS)), default="all")
     worker.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_TICK_INTERVAL_SECONDS
     )
@@ -411,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--allowed-host", action="append", default=[])
 
     health = commands.add_parser("healthcheck", help="probe one local component")
-    health.add_argument("component", choices=("dashboard", "mcp", "interactions", "core", "model"))
+    health.add_argument("component", choices=("dashboard", "mcp", "interactions", *sorted(WORKER_SERVICES)))
     health.add_argument("--health-dir", type=Path, default=DEFAULT_HEALTH_DIR)
     health.add_argument(
         "--max-idle-seconds", type=int, default=DEFAULT_IDLE_HEALTH_SECONDS
@@ -421,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     health.add_argument("--timeout", type=float, default=3)
     drain = commands.add_parser("draincheck", help="confirm a worker has no active task")
-    drain.add_argument("lane", choices=("core", "model"))
+    drain.add_argument("lane", choices=tuple(sorted(WORKER_SERVICES)))
     drain.add_argument("--health-dir", type=Path, default=DEFAULT_HEALTH_DIR)
     return parser
 
@@ -433,8 +465,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record = json.loads(_health_path(args.health_dir, args.lane).read_text())
             return 0 if record.get("state") == "drained" else 1
         if args.command in {"worker", "serve"}:
-            require_start(args.lane if args.command == "worker" else args.service)
-        if args.command == "healthcheck" and args.component in WORK_LANES:
+            require_start(worker_service_name(args.lane, args.partition) if args.command == "worker" else args.service)
+        if args.command == "healthcheck" and args.component in WORKER_SERVICES:
             healthy = check_worker_health(
                 _health_path(args.health_dir, args.component),
                 max_idle_seconds=args.max_idle_seconds,
@@ -447,6 +479,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_worker_loop(
                 config,
                 lane=args.lane,
+                partition=args.partition,
                 interval_seconds=args.interval_seconds,
                 max_work=args.max_work,
                 max_outbox=args.max_outbox,

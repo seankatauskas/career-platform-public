@@ -129,6 +129,71 @@ async function currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThe
   }
 }
 
+async function networkFallbackBeforeClickCaptureKeepsOneAnswerHistoryEntry() {
+  const h=harness();delete h.page.attempt_id;delete h.page.last_attempt;
+  h.storage['tracking-page-1-0']=h.page;
+  h.context.chrome.tabs.sendMessage=async()=>({page_url:h.page.job.canonical_url,snapshot:h.snapshot});
+  const request={tabId:1,frameId:0,documentId:'document',requestId:'request',method:'POST',url:'https://job-boards.greenhouse.io/applications'};
+  await h.context.networkObservation(request,'request_sent');
+  const attempt=h.storage['tracking-page-1-0'].attempt_id;
+  await h.context.trackingPage({type:'trackingAttempt',page_url:h.page.job.canonical_url,
+    answer_snapshot:h.snapshot,captured_at:new Date().toISOString()},
+    {tab:{id:1},frameId:0,documentId:'document',url:h.page.job.canonical_url});
+  const answers=Object.entries(h.storage).filter(([key])=>key.startsWith('tracking-answer-')&&!key.startsWith('tracking-answer-result-'));
+  assert.equal(h.storage['tracking-page-1-0'].attempt_id,attempt);
+  assert.equal(answers.length,1,'network fallback and delayed content capture belong to one history entry');
+}
+
+async function captureCheckpointSurvivesFlushRestartAndKeepsChangedAnswers() {
+  const h=harness();
+  await h.context.queueAnswers(h.page,h.snapshot,'2026-10-17T01:00:00Z');
+  h.storage['tracking-result-fixture-attempt']={application_id:'application-one'};
+  h.context.post=async(_base,_path,body)=>({saved:true,capture_id:body.capture_id,application_id:'application-one',field_count:body.snapshot.fields.length});
+  await h.context.flushAnswers();
+  const restarted=harness();Object.assign(restarted.storage,structuredClone(h.storage));
+  const pending=()=>Object.keys(restarted.storage).filter(k=>k.startsWith('tracking-answer-')&&!k.startsWith('tracking-answer-result-'));
+  await restarted.context.rememberAnswers(restarted.page,restarted.snapshot);
+  await restarted.context.queueAnswers(restarted.page,restarted.snapshot,'2026-10-17T01:00:01Z');
+  assert.equal(pending().length,0,'acknowledged capture stays deduplicated after worker restart and draft updates');
+  const changed=structuredClone(restarted.snapshot);changed.fields[0].value='Changed answer';
+  await restarted.context.queueAnswers(restarted.page,changed,'2026-10-17T01:00:02Z');
+  await restarted.context.queueAnswers(restarted.page,changed,'2026-10-17T01:00:03Z');
+  assert.equal(pending().length,1,'changed same-attempt answers are captured once');
+  await restarted.context.queueAnswers(restarted.page,restarted.snapshot,'2026-10-17T01:00:04Z');
+  assert.equal(pending().length,2,'changing back retains the answer history');
+  await restarted.context.queueAnswers({...restarted.page,attempt_id:'later-attempt'},restarted.snapshot,'2026-10-17T01:00:05Z');
+  assert.equal(pending().length,3,'identical answers in a later attempt are still captured');
+  assert(!JSON.stringify(restarted.storage).includes('Private synthetic answer.'));
+  assert(!JSON.stringify(restarted.storage).includes('Changed answer'));
+  assert(!JSON.stringify(restarted.storage).includes('fingerprint'),'capture checkpoint is encrypted too');
+  const body=await restarted.context.openAnswers(restarted.connection,restarted.storage[pending()[0]]);
+  assert(!('last_capture' in body.snapshot),'internal checkpoint cannot leak into API snapshots');
+}
+
+async function failedCaptureWriteDoesNotPublishDeduplicationCheckpoint() {
+  const h=harness(), save=h.context.chrome.storage.local.set;
+  let fail=true;
+  h.context.chrome.storage.local.set=async values=>{
+    if(fail && Object.keys(values).some(k=>k.startsWith('tracking-answer-'))) {fail=false;throw new Error('storage unavailable');}
+    return save(values);
+  };
+  await assert.rejects(()=>h.context.queueAnswers(h.page,h.snapshot,'2026-10-17T01:00:00Z'),/storage unavailable/);
+  await h.context.queueAnswers(h.page,h.snapshot,'2026-10-17T01:00:01Z');
+  assert.equal(Object.keys(h.storage).filter(k=>k.startsWith('tracking-answer-')).length,1,'retry must still queue the failed capture');
+}
+
+async function captureFingerprintUsesMergedCanonicalFields() {
+  const h=harness();
+  const other={field_key:'earlier',prompt:'Earlier step',section:'',control:'text',value:'Earlier answer'};
+  await h.context.rememberAnswers(h.page,{...h.snapshot,fields:[other]});
+  await h.context.queueAnswers(h.page,h.snapshot,'2026-10-17T01:00:00Z');
+  // A fallback can send a complete merged draft where the click sends only the
+  // visible step. Property and field ordering cannot manufacture new history.
+  const reordered=Object.fromEntries(Object.entries(h.snapshot.fields[0]).reverse());
+  await h.context.queueAnswers(h.page,{...h.snapshot,fields:[reordered,other]},'2026-10-17T01:00:01Z');
+  assert.equal(Object.keys(h.storage).filter(k=>k.startsWith('tracking-answer-')).length,1);
+}
+
 async function nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers() {
   const listeners={}, timers=[], messages=[];
   let now=10000, answer='original';
@@ -162,7 +227,7 @@ async function nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers(
   assert.equal(captures().length,4,'a later keyboard submission is a separate attempt');
 }
 
-const tests=[pendingConnectionChangesPreserveAnswers,explicitDisconnectCanDiscardLocalData,permissionRevocationDoesNotErasePendingAnswers,incorrectSaveAcknowledgmentCannotDiscardAnswers,requestFallbackPreservesDraftAfterNavigation,unrelatedRequestsCannotCreateAttempts,currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThem,nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers];
+const tests=[pendingConnectionChangesPreserveAnswers,explicitDisconnectCanDiscardLocalData,permissionRevocationDoesNotErasePendingAnswers,incorrectSaveAcknowledgmentCannotDiscardAnswers,requestFallbackPreservesDraftAfterNavigation,unrelatedRequestsCannotCreateAttempts,currentAshbyRequestsRecoverDirectApplicationsWithoutConfirmingThem,networkFallbackBeforeClickCaptureKeepsOneAnswerHistoryEntry,captureCheckpointSurvivesFlushRestartAndKeepsChangedAnswers,failedCaptureWriteDoesNotPublishDeduplicationCheckpoint,captureFingerprintUsesMergedCanonicalFields,nativeSubmitPairsAcrossSlowHandlersWithoutDroppingChangedAnswers];
 (async()=>{
   let failures=0;
   for(const test of tests) {

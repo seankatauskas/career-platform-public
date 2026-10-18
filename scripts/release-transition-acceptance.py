@@ -16,6 +16,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from job_search.release_policy import validate_policy
+from job_search.deployment_contract import PROTOCOL, describe_commit
 
 
 def run(argv, **kwargs):
@@ -112,10 +113,48 @@ def main():
                 report['phase'] = 'rollback_predecessor'
                 report['checks'].append(probe('rollback', old=True))
                 report['rollback_passed'] = True
+                report['phase'] = 'ranking_reupgrade_candidate'
+                report['checks'].append(probe('ranking_reupgrade'))
             else:
                 report['checks'].append({'action': 'rollback', 'status': 'unsupported', 'reason': 'predecessor lacks the same hardened compatibility policy'})
+            report['phase'] = 'production_startup_boundary'
+            candidate_contract = describe_commit(ROOT, source)
+            baseline_contract = describe_commit(ROOT, policy['test_baseline_sha'])
+            contract = candidate_contract['runtime_contract_sha256']
+            same_runtime = (candidate_contract['protocol'] == baseline_contract['protocol'] == PROTOCOL and
+                            candidate_contract['backend_audit_current'] and baseline_contract['backend_audit_current'] and
+                            baseline_contract['runtime_contract_sha256'] == contract)
+            # An old predecessor cannot certify the new boundary. Still exercise
+            # candidate migration + actual strict worker startup on every release.
+            report['checks'].append(probe('startup-prepare', old=bool(same_runtime)))
+            report['checks'].append(probe('startup-check'))
+            compatible = {'protocol': PROTOCOL, 'passed': False,
+                          'baseline_diagnostics_read_only': False,
+                          'candidate_diagnostics_read_only': False,
+                          'runtime_contract_sha256': contract,
+                          'candidate_startup_read_only': True,
+                          'baseline_startup_read_only': False,
+                          'predecessor_after_candidate_writes': False}
+            if same_runtime and rollback_expected:
+                report['checks'].append(probe('startup-check', old=True))
+                report['checks'].append(probe('startup-write'))
+                report['checks'].append(probe('diagnostics-check'))
+                report['checks'].append(probe('startup-rollback', old=True))
+                report['checks'].append(probe('diagnostics-check', old=True))
+                compatible.update(baseline_startup_read_only=True,
+                                  predecessor_after_candidate_writes=True)
+            if not (same_runtime and rollback_expected):
+                report['checks'].append(probe('diagnostics-check'))
+            report['compatible_deployment'] = compatible
+            # Ownership conversion deliberately freezes legacy writers. Exercise
+            # it after legacy roundtrip/startup probes, never reopen a stale config.
             report['phase'] = 'application_owners'
             report['checks'].append(probe('owners'))
+            report['checks'].append(probe('diagnostics-owners-check'))
+            compatible['candidate_diagnostics_read_only'] = True
+            if same_runtime and rollback_expected:
+                report['checks'].append(probe('diagnostics-owners-check', old=True))
+                compatible.update(passed=True, baseline_diagnostics_read_only=True)
             report['phase'] = 'complete'
             report['passed'] = True
     except Exception as error:

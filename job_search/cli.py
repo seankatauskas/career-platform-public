@@ -16,14 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from job_search.contracts import ContractError, MutationContext, utc_now
-from job_search.db import prepare_database
 from job_search.runtime import (
     DEFAULT_CONFIG_PATH,
     RuntimeConfigV1,
     load_runtime_config,
     override_runtime_config,
 )
-from job_search.scheduler import automation_health, seed_default_schedules
+from job_search.scheduler import automation_health
 from job_search.service import JobSearchLedger
 
 
@@ -97,9 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
     automation.add_argument("capability", nargs="?")
     automation.add_argument("--expected-revision", type=int, default=0)
     automation.add_argument("--idempotency-key")
-    commands.add_parser(
-        "init", help="create/migrate the private ledger and seed schedules"
-    )
+    for command, help_text in (
+        ("init", "create/migrate the private ledger and seed schedules"),
+        ("migrate", "explicitly migrate stored schemas and seed schedules during maintenance"),
+    ):
+        migration = commands.add_parser(command, help=help_text)
+        migration.add_argument("--prepare-feature", choices=("ranking", "salary"), action="append", default=[],
+                               help="prepare optional schemas during maintenance without activating automation or models")
+    schema_check = commands.add_parser("check-schema", help="check installed schema compatibility without modifying data")
+    schema_check.add_argument("--offline", action="store_true", help="inspect checkpointed databases only; all writers must be stopped")
     readiness = commands.add_parser("readiness", help="inspect configuration and workflow progress without starting work")
     readiness.add_argument("--monitor", action="store_true", help="use recorded dependency and workflow health without scanning ranking scores")
     commands.add_parser("work-list", help="show bounded failed-work recovery options")
@@ -588,26 +593,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.idempotency_key:
             raise SystemExit("automation decisions require --idempotency-key")
         _json(set_control(config,args.capability,args.action == "enable",expected_revision=args.expected_revision,command_id=args.idempotency_key)); return 0
-    if args.command == "init":
-        stamp = utc_now()
-        prepare_database(db_path, stamp)
-        from .application_installation import require_backend, LEGACY_TASKS
-        require_backend(config)
-        schedules = seed_default_schedules(
-            db_path, datetime.now(timezone.utc), config.environment(os.environ),
-            excluded_tasks=LEGACY_TASKS if config.application_backend == "owners" else (),
-        )
-        if config.application_backend == "owners":
-            from .application_runtime import ApplicationRuntime
-            ApplicationRuntime(config.application_owner_db)
-        _json(
-            {
-                "database": str(db_path),
-                "schema": "ready",
-                "runtime_config_version": config.version,
-                "schedules": schedules,
-            }
-        )
+    if args.command == "check-schema":
+        from .schema_lifecycle import check_config
+        _json(check_config(config, offline=args.offline))
+        return 0
+    if args.command in {"init", "migrate"}:
+        from .schema_lifecycle import migrate_config
+        _json(migrate_config(config, prepare_features=args.prepare_feature))
         return 0
     if args.command == "outlook-auth":
         from job_search.outlook.auth import BASE_SCOPES, DRAFT_SCOPES, HOLD_SCOPES, SEND_SCOPES

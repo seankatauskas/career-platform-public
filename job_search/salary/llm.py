@@ -119,6 +119,10 @@ def _connect(db: Path) -> sqlite3.Connection:
 
 
 def prepare_schema(con: sqlite3.Connection) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional
+    if require_current():
+        check_optional(con, "salary_llm")
+        return
     prepare_enrichment(con)
     con.executescript(DDL)
     columns = {row[1] for row in con.execute("PRAGMA table_info(salary_llm_queue)")}
@@ -693,6 +697,18 @@ def run_worker(
 
 
 def status(db: Path) -> dict[str, Any]:
+    from job_search.schema_lifecycle import require_current, read_connection
+    if require_current():
+        from contextlib import closing
+        with closing(read_connection(db)) as existing:
+            if not existing.execute(
+                "SELECT 1 FROM sqlite_master WHERE name GLOB 'salary_llm_*' LIMIT 1"
+            ).fetchone():
+                # A fresh collector can inspect the disabled salary side branch
+                # without implicitly installing or activating an optional model.
+                return {"activated_at": None, "counts": {}, "actionable": 0,
+                        "oldest_queue_hours": None, "queue_age_warning": False,
+                        "estimated_seconds": 0.0}
     with _connect(db) as con:
         prepare_schema(con)
         activated = _setting(con, "activated_at")

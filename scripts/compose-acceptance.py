@@ -18,7 +18,22 @@ import subprocess
 import tempfile
 import time
 
-SERVICES = ("tools", "dashboard", "mcp", "core", "model", "interactions")
+SERVICES = ("tools", "dashboard", "mcp", "core", "model", "interactive-core", "interactive-model", "interactions")
+# This fixture selects legacy mail and briefing overlays, not the owners overlay.
+PRIVATE_FILE_SERVICES = {
+    "mail-inference.json": {"core", "interactive-core", "dashboard"},
+    "openrouter-api-key": {"core", "interactive-core", "dashboard"},
+    "briefing-inference.json": {"interactive-model"},
+    "briefing-api-key": {"interactive-model"},
+    "interaction-token": {"interactions"},
+}
+
+
+def assert_private_mounts(service, mounts):
+    for name, present in mounts.items():
+        expected = service in PRIVATE_FILE_SERVICES[name]
+        assert present == expected, f"{service}: {name} mount present={present}, expected={expected}"
+
 
 
 def run(argv, *, env=None, input=None, timeout=180):
@@ -102,11 +117,11 @@ def main():
         env["JOB_SEARCH_ACCEPTANCE_STATE_VOLUME"] = state_volumes["original"]
         override = {"services": {}, "volumes": {"acceptance-tools": {"external": True, "name": socket_volume}}}
         override["volumes"]["acceptance-state"] = {"external": True, "name": "${JOB_SEARCH_ACCEPTANCE_STATE_VOLUME:?set fixture state volume}"}
-        for service in ("tools", "dashboard", "core", "model"):
+        for service in ("tools", "dashboard", "core", "model", "interactive-core", "interactive-model"):
             override["services"][service] = {"volumes": [{"type": "volume", "source": "acceptance-tools", "target": "/run/job-search-tools", "read_only": service != "tools"}]}
         # Only services that already have the production state mount receive it.
         # Document tools retain their existing isolated filesystem boundary.
-        for service in ("initialize", "dashboard", "mcp", "core", "model", "interactions"):
+        for service in ("initialize", "dashboard", "mcp", "core", "model", "interactive-core", "interactive-model", "interactions"):
             override["services"].setdefault(service, {}).setdefault("volumes", []).append(
                 {"type": "volume", "source": "acceptance-state", "target": "/var/lib/job-search", "volume": {"nocopy": True}})
         override_file = temporary / "desktop.override.json"
@@ -291,22 +306,30 @@ print(json.dumps({'supervisor_exec':True,'temporary_exec_blocked':True}))
                        "--entrypoint", "/toolchain/tectonic", image, "--version"])
         assert args.tectonic_version in version
         report["toolchain"] = {"version": version, **{name + "_sha256": hashlib.sha256((data / "toolchain" / name).read_bytes()).hexdigest() for name in ("tectonic", "tectonic.bundle")}}
+        # Candidate-only image contract: predecessor releases are allowed to
+        # lack caches, so do not put this in generic transition/restore checks.
+        bytecode_probe = (repo / "tests/probe_python_bytecode.py").read_text()
+        report["python_bytecode"] = json.loads(run([
+            "docker", "run", "--rm", "--network", "none", "--read-only",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m",
+            "--entrypoint", "python", image, "-c", bytecode_probe,
+        ]))
+        report["checks"].append("Candidate stdlib/application checked-hash bytecode matches source, is immutable to the runtime user, and rejects stale source even with preserved size/mtime.")
         startup_started = time.monotonic()
         compose("up", "--detach", "--no-build", *SERVICES, timeout=200)
         await_healthy()
         report["timings_seconds"]["initialization_and_service_health"] = round(time.monotonic() - startup_started, 3)
-        report["checks"].append("All six application Compose services, including the interactions broker, are healthy with generated fixture configuration.")
+        report["checks"].append(f"All {len(SERVICES)} application Compose services, including four workers and the interactions broker, are healthy with generated fixture configuration.")
         if mail_overlay.is_file():
             for service in SERVICES:
                 mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("mail-inference.json","openrouter-api-key")}))')
-                assert all(value == (service in {"core", "dashboard"}) for value in mounts.values()), service
-            report["checks"].append("Only core and dashboard receive the dedicated mail profile and OpenRouter key for mail processing and archived review analysis.")
+                assert_private_mounts(service, mounts)
+            report["checks"].append("Only core, interactive-core and dashboard receive the dedicated mail profile and OpenRouter key in the legacy mail fixture.")
 
         for service in SERVICES:
             mounts = execute(service, 'import json; from pathlib import Path; print(json.dumps({n:Path("/run/job-search",n).is_file() for n in ("briefing-inference.json","briefing-api-key","interaction-token")}))')
-            assert mounts['briefing-inference.json'] == (service == 'model'), service
-            assert mounts['briefing-api-key'] == (service == 'model'), service
-            assert mounts['interaction-token'] == (service == 'interactions'), service
+            assert_private_mounts(service, mounts)
         interaction = execute('interactions', """
 import json,urllib.request,urllib.error
 from pathlib import Path
@@ -323,7 +346,7 @@ with urllib.request.urlopen(request,timeout=10) as response:
 print(json.dumps({'authenticated':True,'unauthenticated_rejected':True}))
 """)
         assert interaction['authenticated'] and interaction['unauthenticated_rejected']
-        report['checks'].append('Interactions require their separate bearer; only model receives briefing profile/key, and application services cannot read the interaction bearer except its broker.')
+        report['checks'].append('Interactions require their separate bearer; only interactive-model receives briefing profile/key, and application services cannot read the interaction bearer except its broker.')
 
         dashboard = execute("dashboard", 'import json,urllib.request; print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:28766/api/v1/ops"))))')
         assert dashboard["health"]
@@ -366,7 +389,7 @@ print(json.dumps({"pdf_sha256":result.pdf_sha256,"bytes":len(result.pdf_bytes),"
         compose("cp", "dashboard:/var/lib/job-search/acceptance.pdf", str(output / "acceptance.pdf"))
         report["checks"].append("A real PDF compiles and extracts through the networkless production Unix-socket tool service.")
 
-        compose("kill", "--signal", "SIGKILL", "core", "model")
+        compose("kill", "--signal", "SIGKILL", "core", "model", "interactive-core", "interactive-model")
         # Simulate a worker interrupted after a local-only claim. Its lease is in
         # the past; provider writes are never injected or retried by this check.
         seed = execute("dashboard", r'''
@@ -382,7 +405,7 @@ with sqlite3.connect(db) as con:
  con.execute("INSERT INTO work_items(work_id,task_kind,dedupe_key,payload_json,status,priority,due_at,attempts,max_attempts,lease_owner,lease_token,lease_expires_at,created_at,lane) VALUES('acceptance-recovery','system.worker_tick','acceptance-recovery','{}','running',100,?,1,3,'terminated-fixture-worker','expired-fixture-token',?,?,'core')",(old,old,old))
 print(json.dumps({"application_id":app}))
 ''')
-        compose("up", "--detach", "--no-build", "core", "model")
+        compose("up", "--detach", "--no-build", "core", "model", "interactive-core", "interactive-model")
         await_healthy()
         # Liveness accepts a worker that is still starting or running its first
         # tick. Wait for durable recovery evidence independently of that probe.
@@ -395,7 +418,7 @@ print(json.dumps({"application_id":app}))
                 raise RuntimeError(f"Worker did not recover expired work within 150 seconds: {recovered}")
             time.sleep(2)
         assert recovered == {"status": "succeeded", "attempts": 2}, recovered
-        report["checks"].append("After SIGKILL and restart, the core worker recovers an expired local-work lease exactly once; both worker lanes recover health.")
+        report["checks"].append("After SIGKILL and restart, the interactive core worker recovers an expired local-work lease exactly once; all four worker services recover health.")
         report["recovered_work"] = recovered
 
         compose("stop", "--timeout", "15", *SERVICES)
@@ -427,8 +450,8 @@ print(json.dumps({"application_id":app}))
         result = execute("dashboard", 'import hashlib,json; from pathlib import Path; print(json.dumps({"sha256":hashlib.sha256(Path("/var/lib/job-search/acceptance.pdf").read_bytes()).hexdigest()}))')
         assert result["sha256"] == pdf["pdf_sha256"]
         running = compose("ps", "--services", "--status", "running").splitlines()
-        assert "core" not in running and "model" not in running
-        report["checks"].append("Restored dashboard reads the same application event and PDF bytes; core/model remain stopped pending activation.")
+        assert not set(("core", "model", "interactive-core", "interactive-model")) & set(running)
+        report["checks"].append("Restored dashboard reads the same application event and PDF bytes; all four workers remain stopped pending activation.")
         report["passed"] = True
     except Exception as error:
         report["error"] = str(error)

@@ -1243,6 +1243,11 @@ def _migration_statements(sql: str) -> Iterable[str]:
 def migrate(path: Path, applied_at: str) -> None:
     """Apply all ordered migrations, rejecting drift or a newer database."""
 
+    from .schema_lifecycle import require_current, check_ledger
+    if require_current():
+        check_ledger(path)
+        return
+
     with connect(path) as con:
         try:
             # Serialize before reading the migration ledger. Both launchd lanes may

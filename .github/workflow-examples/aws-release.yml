@@ -54,7 +54,7 @@ jobs:
         run: |
           npm ci --prefix extension
           npx --prefix extension playwright-core install --with-deps chromium
-      - name: Validate release settings and run offline checks
+      - name: Validate release settings and install check dependencies
         if: steps.selection.outputs.build == 'true'
         run: |
           set -euo pipefail
@@ -65,22 +65,9 @@ jobs:
           [[ "$HERMES_BASE_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]
           test -n "$TECTONIC_VERSION"
           python3 -m pip install -r requirements/cloud.txt -r requirements/demo.txt
-          python3 scripts/check-system.py --browser --output .cache/system-checks.json
-      - name: Validate the release image against production Compose
+      - name: Validate offline, native and Hermes release gates in parallel
         if: steps.selection.outputs.build == 'true'
-        run: |
-          set -euo pipefail
-          docker build --platform linux/amd64 --build-arg SOURCE_REVISION="$GITHUB_SHA" --tag career-platform:release-candidate .
-          docker run --rm career-platform:release-candidate --help
-          docker build --platform linux/amd64 --file Dockerfile.codex-review --tag career-platform:reviewer-candidate .
-          reviewer_id=$(docker image inspect career-platform:reviewer-candidate --format '{{.Id}}')
-          python3 -m tests.probe_codex_review_container --image "$reviewer_id"
-          python3 -m tests.probe_codex_review_container --image "$reviewer_id" --screening
-          python3 -m tests.probe_codex_review_container --image "$reviewer_id" --adjudicator
-          sudo "$(command -v python3)" -B -m tests.probe_old_method_container --image "$reviewer_id" --require-host-runtime
-          python3 scripts/prepare-acceptance-toolchain.py --output .cache/acceptance-toolchain
-          python3 scripts/compose-acceptance.py --image career-platform:release-candidate --toolchain-dir .cache/acceptance-toolchain --output .cache/compose-acceptance --require-linux-host
-          python3 scripts/release-transition-acceptance.py --candidate-image career-platform:release-candidate
+        run: python3 scripts/validate-release.py
       - name: Preserve offline validation evidence
         if: always() && steps.selection.outputs.build == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -89,6 +76,7 @@ jobs:
           path: |
             .cache/release-transition.json
             .cache/system-checks.json
+            .cache/release-validation/
             .cache/compose-acceptance/
             .cache/acceptance-toolchain/receipt.json
             extension/test-results/
@@ -101,7 +89,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: career-release-${{ github.run_id }}
-      - name: Build and publish immutable images
+      - name: Publish validated immutable images
         if: steps.selection.outputs.build == 'true'
         run: |
           set -euo pipefail
@@ -111,8 +99,8 @@ jobs:
           docker tag career-platform:release-candidate "$APP_REPOSITORY:$RELEASE_ID"
           docker tag career-platform:reviewer-candidate "$APP_REPOSITORY:$RELEASE_ID-reviewer"
           docker run --rm "$APP_REPOSITORY:$RELEASE_ID" --help
-          docker build --platform linux/amd64 --file Dockerfile.hermes --build-arg "HERMES_BASE_IMAGE=$HERMES_BASE_IMAGE" --tag "$HERMES_REPOSITORY:$RELEASE_ID" .
-          python3 scripts/hermes-healthcheck-acceptance.py --image "$HERMES_REPOSITORY:$RELEASE_ID"
+          hermes_candidate=$(python3 scripts/validate-release-hermes.py --validated-image-id)
+          docker tag "$hermes_candidate" "$HERMES_REPOSITORY:$RELEASE_ID"
           docker push "$APP_REPOSITORY:$RELEASE_ID"
           docker push "$APP_REPOSITORY:$RELEASE_ID-reviewer"
           docker push "$HERMES_REPOSITORY:$RELEASE_ID"

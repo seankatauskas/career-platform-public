@@ -66,16 +66,21 @@ prerequisite setup, and the release-owner handoff.
    was installed in the meantime, the predecessor check rejects the stale candidate
    before stopping production. Prepare a newly tested release for the new baseline.
 
-The current SQLite/Compose design uses one host. The actual installation still
-needs a maintenance pause while writers stop, a consistent rollback snapshot is
-taken, and the new release initializes. Workers drain before that pause, while the
-dashboard remains available. Build and image downloads happen before the pause.
-Predeployment rollback snapshots are checksummed directories published atomically,
-so compression and an extra archive copy are no longer part of the pause. Regular
-off-host backups remain compressed archives. Recovery verifies the entire snapshot
-before changing data, and preserves writes made after a release resumes. This is
-not a guarantee of uninterrupted access or a fixed outage length. The deployment
-receipt records snapshot-phase timings and the measured pause.
+The current SQLite/Compose design uses one host and retains a maintenance pause
+while services switch. [Deployment modes](operations/deployment-modes.md) distinguish
+migration releases, which take a verified data checkpoint before explicit
+initialization, from eligible compatible releases, which keep current data and
+installed configuration without taking that checkpoint. Missing compatibility
+evidence selects the conservative migration path. Workers drain while the dashboard
+remains available; builds and image downloads happen before the pause.
+
+Migration checkpoints are checksummed directories published atomically. Regular
+off-host backups remain compressed archives and run independently of application
+releases. Snapshot recovery verifies the retained data before replacing it;
+application rollback preserves writes made after a release resumes. Neither mode
+guarantees uninterrupted access or a fixed outage length. Use the deployment
+receipt's selected mode, fallback reason and measured pause, not historical snapshot
+benchmarks, to evaluate the compatible procedure.
 
 For an application submitted on an employer's site during a dashboard outage,
 the paired extension durably queues captured tracking observations and replays

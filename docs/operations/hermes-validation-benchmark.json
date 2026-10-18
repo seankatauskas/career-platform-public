@@ -1,0 +1,124 @@
+{
+  "scope": "Local Linux fixture validation only; no image publication, production data, or paid models",
+  "environment": {
+    "runner": "career-platform-linux",
+    "cpus": 6,
+    "memory_gib": 16,
+    "github_jobs_concurrent": false,
+    "source_sha": "a2ae61233bb8810b2e2427e46a34fc2024a8c79c"
+  },
+  "methodology": [
+    "Both arrangements run the same committed source and actual offline/browser, native Compose/upgrade/rollback, and Hermes native gates.",
+    "Offline: python3 scripts/check-system.py --browser --jobs 6; native: bash scripts/validate-release-image.sh; Hermes: python3 scripts/validate-release-hermes.py.",
+    "Serial arrangement joins offline/native, then runs Hermes. Parallel arrangement joins all three.",
+    "Application image and hash-verified acceptance toolchain were warm. Serial ran first and rebuilt small Hermes filesystem steps; parallel reused them.",
+    "Hermes Docker Hub metadata resolution took 0.4 seconds serial and 0.0 seconds parallel; no slow upstream resolver was reproduced in real gates.",
+    "MemAvailable sampled every 0.5 seconds. Git HEAD and clean worktree checked for each result. All fixture containers were removed.",
+    "One sequential pair on a shared physical Mac host is observational evidence, not an isolated production forecast."
+  ],
+  "linux_trials": [
+    {
+      "schema_version": 1,
+      "passed": true,
+      "seconds": 110.05330327199772,
+      "groups": [
+        {
+          "name": "native",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 59.119,
+          "log": ".cache/hermes-benchmark/False/native.log"
+        },
+        {
+          "name": "offline",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 105.392,
+          "log": ".cache/hermes-benchmark/False/offline.log"
+        },
+        {
+          "name": "hermes",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 4.66,
+          "log": ".cache/hermes-benchmark/serial-hermes/hermes.log"
+        }
+      ],
+      "parallel_hermes": false,
+      "min_mem_available_kib": 13237144,
+      "source_sha": "a2ae61233bb8810b2e2427e46a34fc2024a8c79c",
+      "working_tree_dirty": false,
+      "suite_count": 234
+    },
+    {
+      "schema_version": 1,
+      "passed": true,
+      "seconds": 105.9703245810233,
+      "groups": [
+        {
+          "name": "hermes",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 5.462,
+          "log": ".cache/hermes-benchmark/True/hermes.log"
+        },
+        {
+          "name": "native",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 58.474,
+          "log": ".cache/hermes-benchmark/True/native.log"
+        },
+        {
+          "name": "offline",
+          "passed": true,
+          "exit_code": 0,
+          "seconds": 105.97,
+          "log": ".cache/hermes-benchmark/True/offline.log"
+        }
+      ],
+      "parallel_hermes": true,
+      "min_mem_available_kib": 13467404,
+      "source_sha": "a2ae61233bb8810b2e2427e46a34fc2024a8c79c",
+      "working_tree_dirty": false,
+      "suite_count": 234
+    }
+  ],
+  "synthetic_resolver_delay": {
+    "scope": "scaled sleeps using observed release-83 gate durations; no actual network/build workload",
+    "scale": 0.01,
+    "observed_seconds": {
+      "offline": 110.152,
+      "native": 65.608,
+      "hermes": 51.811
+    },
+    "trials": [
+      {
+        "parallel_hermes": false,
+        "seconds": 1.671327917
+      },
+      {
+        "parallel_hermes": true,
+        "seconds": 1.1369771249999998
+      },
+      {
+        "parallel_hermes": false,
+        "seconds": 1.68899825
+      },
+      {
+        "parallel_hermes": true,
+        "seconds": 1.1353354590000002
+      },
+      {
+        "parallel_hermes": false,
+        "seconds": 1.6954487079999998
+      },
+      {
+        "parallel_hermes": true,
+        "seconds": 1.1359390000000005
+      }
+    ],
+    "serial_hermes_median_seconds": 1.68899825,
+    "parallel_hermes_median_seconds": 1.1359390000000005
+  }
+}

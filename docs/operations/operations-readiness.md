@@ -53,8 +53,11 @@ actual CloudWatch/SNS delivery still requires deployment and account configurati
 
 Host probes use `readiness --monitor`: the same durable workflow, work-queue,
 inference-usage, and dependency-snapshot observations without expensive ranking
-score/catalog scans or fresh dependency probes. Ordinary `readiness` retains the
-detailed per-policy coverage. Stale dependency snapshots remain visible failures.
+score/catalog scans or fresh dependency probes. Dashboard `/api/v1/ops/readiness`
+and MCP health use this same inexpensive composition. Ordinary CLI `readiness`
+retains detailed per-policy coverage, including saved coverage while ranking is
+paused. The dashboard's explicit pipeline/progress view retains its detailed
+coverage calculation. Stale dependency snapshots remain visible failures.
 
 ## Scan now and ranking progress
 
@@ -187,8 +190,17 @@ not establish live connector authorization or alert delivery.
 ## Shared diagnostics and delivery decisions
 
 The CLI `readiness`, dashboard Ops view and MCP health capability share the same
-schema. The core process records a sanitized dependency observation before each
-tick. The dashboard and MCP read this snapshot from the application database;
+schema. The interactive core process records a sanitized dependency observation
+on startup and every five minutes; batch core does not duplicate that work.
+After a failed local notification bridge observation, it schedules up to three
+earlier observations, after 30, 60 and 120 seconds respectively, on the next
+eligible worker tick. Persistent failure then returns to the five-minute cadence;
+a recovered or disabled transport resets this retry budget. Work polling, task
+checks and the 15-minute snapshot expiry stay unchanged. This handles a bridge
+that starts after the core worker without probing on every dashboard request or
+worker poll. A reachable bridge is still `configured_unverified` for external
+Telegram delivery, never evidence that a message was delivered.
+The dashboard and MCP read this snapshot from the application database;
 they do not need the inference configuration or provider credentials to diagnose
 worker readiness. Only capability codes, booleans, observation time and release
 revision are persisted. Missing observations are unverified. Observations older

@@ -1,9 +1,10 @@
 {
+  "deployment_mode": "migration",
   "predecessor": {
-    "release_id": "e17ee70decea58462fcc27b0b07dc86f9d589ba4-76",
-    "source_sha": "e17ee70decea58462fcc27b0b07dc86f9d589ba4"
+    "release_id": "6d89e801ac7bb2de38ec6680ebbd5b03e6c22a11-85",
+    "source_sha": "6d89e801ac7bb2de38ec6680ebbd5b03e6c22a11"
   },
   "schema_compatibility": "career-application-owners-1-v1",
-  "test_baseline_sha": "e17ee70decea58462fcc27b0b07dc86f9d589ba4",
+  "test_baseline_sha": "6d89e801ac7bb2de38ec6680ebbd5b03e6c22a11",
   "version": 1
 }

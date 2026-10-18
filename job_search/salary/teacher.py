@@ -221,6 +221,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def prepare_schema(db_path: Path) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional_path
+    if require_current():
+        check_optional_path(db_path, "salary_teacher")
+        return
     if not db_path.exists():
         raise ValueError(f"database does not exist: {db_path}")
     with connect(db_path) as con:

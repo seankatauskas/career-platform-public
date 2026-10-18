@@ -429,7 +429,8 @@ class PolicyRefreshTests(unittest.TestCase):
                     con.execute('UPDATE jobs SET ' + assignment + " WHERE id='2'")
                 result = self.sparse_refresh()
                 self.assertFalse(result['reused'])
-                self.assertEqual(result['checked_families'], 3)
+                self.assertTrue(result['incremental'])
+                self.assertEqual(result['checked_families'], 1)
                 self.assertTrue(self.sparse_refresh()['reused'])
 
     def test_new_deleted_and_reassigned_families_do_not_reuse_by_count(self):
@@ -444,6 +445,97 @@ class PolicyRefreshTests(unittest.TestCase):
         with sqlite3.connect(self.jobs) as con:
             con.execute("UPDATE job_family_members SET family_id='invalid' WHERE job_id='2'")
         self.assertFalse(self.sparse_refresh()['reused'])
+        self.assertTrue(self.sparse_refresh()['reused'])
+
+    def test_observation_only_refresh_updates_watermark_without_reading_documents(self):
+        self.configure_sparse()
+        self.sparse_refresh()
+        before = self.scores()
+        completed = self.receipts()['policy_refresh:broad']['completed_at']
+        with sqlite3.connect(self.jobs) as con:
+            con.execute("UPDATE jobs SET last_seen='2026-10-17'")
+        with patch.object(model, 'iter_family_document_batches', side_effect=AssertionError('document scan')), \
+             patch('job_search.collection.dedupe.prepare_families', side_effect=AssertionError('preparation')):
+            result = self.sparse_refresh()
+        self.assertTrue(result['reused'])
+        self.assertEqual(self.scores(), before)
+        receipt = self.receipts()['policy_refresh:broad']
+        self.assertEqual(receipt['source_watermark'], '2026-10-17')
+        self.assertEqual(receipt['completed_at'], completed)
+
+    def test_incremental_scores_match_full_pass_for_edits_moves_insertions_and_deletions(self):
+        self.configure_sparse()
+        def deterministic_predictions(state, documents, artifact, modules, **kwargs):
+            return [dict(dense_linear=None, dense_neighbor=None, sparse=int(d.fingerprint[:6], 16) / 0xffffff,
+                         final=int(d.fingerprint[:6], 16) / 0xffffff,
+                         similar_liked_family_ids=[], positive_sparse_phrases=[], computed_components=['sparse']) for d in documents]
+        self.predict.side_effect = deterministic_predictions
+        self.sparse_refresh()
+        mutations = [
+            "UPDATE jobs SET description='Different work',department='New department' WHERE id='2'",
+            "UPDATE jobs SET title='Moved role',company='Another' WHERE id='2'",
+            "INSERT INTO jobs(ats,id,title,description,last_seen) VALUES ('lever','4','New role','New work','2026-10-17')",
+            "UPDATE jobs SET ats='greenhouse',id='moved-key' WHERE id='2'",
+            "UPDATE jobs SET closed_at='2026-10-17' WHERE id='3'",
+            "DELETE FROM jobs WHERE id='moved-key'",
+            "DELETE FROM jobs",
+        ]
+        for statement in mutations:
+            with self.subTest(statement=statement):
+                with sqlite3.connect(self.jobs) as con:
+                    con.execute(statement)
+                result = self.sparse_refresh()
+                self.assertTrue(result['incremental'])
+                with sqlite3.connect(self.state) as con:
+                    incremental = con.execute('SELECT run_id,family_id,feature_fingerprint,sparse_score,final_score,explanation_json FROM preference_scores ORDER BY run_id,family_id').fetchall()
+                    # Force independent full score computation, not a cache hit.
+                    con.execute("DELETE FROM preference_state WHERE key LIKE 'policy_refresh:%' OR key LIKE 'policy_refresh_cache:%'")
+                prepare_families(self.jobs)
+                full_result = self.sparse_refresh()
+                self.assertFalse(full_result['incremental'])
+                with sqlite3.connect(self.state) as con:
+                    full = con.execute('SELECT run_id,family_id,feature_fingerprint,sparse_score,final_score,explanation_json FROM preference_scores ORDER BY run_id,family_id').fetchall()
+                self.assertEqual(incremental, full)
+
+    def test_missing_or_corrupt_delta_events_require_full_pass(self):
+        self.configure_sparse()
+        self.sparse_refresh()
+        for damage in ("UPDATE ranking_refresh_source_events SET families_json='[]' WHERE revision=(SELECT MAX(revision) FROM ranking_refresh_source_events)",
+                       "DELETE FROM ranking_refresh_source_events WHERE revision=(SELECT MAX(revision) FROM ranking_refresh_source_events)",
+                       "UPDATE ranking_refresh_source_events SET families_json='broken' WHERE revision=(SELECT MAX(revision) FROM ranking_refresh_source_events)"):
+            with self.subTest(damage=damage):
+                with sqlite3.connect(self.jobs) as con:
+                    con.execute("UPDATE jobs SET team=COALESCE(team,'') || ' changed' WHERE id='2'")
+                    con.execute(damage)
+                result = self.sparse_refresh()
+                self.assertFalse(result['incremental'])
+                self.assertEqual(result['checked_families'], 3)
+                self.assertTrue(self.sparse_refresh()['reused'])
+
+    def test_failed_incremental_batch_preserves_scores_and_resumes(self):
+        self.configure_sparse()
+        self.sparse_refresh()
+        with sqlite3.connect(self.jobs) as con:
+            con.execute("UPDATE jobs SET team='New work'")
+        predict = self.predict.side_effect
+        calls = 0
+        def fail(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise RuntimeError('incremental batch interrupted')
+            return predict(*args, **kwargs)
+        self.predict.side_effect = fail
+        receipt = self.receipts()
+        with self.assertRaisesRegex(RuntimeError, 'incremental batch interrupted'):
+            self.sparse_refresh()
+        self.assertEqual(self.receipts(), receipt)
+        committed = self.scores()
+        self.predict.side_effect = predict
+        result = self.sparse_refresh()
+        self.assertFalse(result['incremental'])
+        self.assertEqual([r['result']['updated_families'] for r in result['policies'].values()], [2, 2])
+        self.assertTrue(any(row in self.scores() for row in committed))
         self.assertTrue(self.sparse_refresh()['reused'])
 
     def test_tampered_score_with_same_fingerprint_is_recomputed(self):

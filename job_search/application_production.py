@@ -115,20 +115,35 @@ def _sync_handler(config,runtime,environment):
         folder_refs=config.outlook_mail_folders,max_messages=100,activation_start=start)
 
 
+def _owner_schedule_kinds(config, environment):
+    kinds = {'applications.tick': 1, 'application.dispatch': 1,
+             'application.feedback.dispatch': 1, 'applications.briefing.tick': 1}
+    if config.remote_mail_inference_enabled or environment.get("OUTLOOK_CLIENT_ID"):
+        kinds['applications.mail.dispatch'] = 1
+    if environment.get("OUTLOOK_CLIENT_ID"):
+        kinds['applications.mail.sync'] = config.outlook_poll_interval_minutes
+    return kinds
+
+
+def check_owner_schedules(config, environment):
+    """Startup validates initialization metadata without updating timestamps."""
+    from contextlib import closing
+    from .schema_lifecycle import read_connection
+    with closing(read_connection(config.application_db)) as con:
+        installed = dict(con.execute("SELECT schedule_key,task_kind FROM schedule_specs"))
+    if any(installed.get(kind) != kind for kind in _owner_schedule_kinds(config, environment)):
+        raise RuntimeError("Initialization required: owner schedules are missing or incompatible")
+
+
 def _seed(config,clock,environment):
     from .db import connect
     from .scheduler import utc_stamp
     from .contracts import canonical_json
     now=clock();stamp=utc_stamp(now)
-    kinds={'applications.tick':1,'application.dispatch':1,'application.feedback.dispatch':1, 'applications.briefing.tick':1}
-    if config.remote_mail_inference_enabled or environment.get("OUTLOOK_CLIENT_ID"):
-        kinds['applications.mail.dispatch']=1
-    if environment.get("OUTLOOK_CLIENT_ID"):
-        kinds['applications.mail.sync']=config.outlook_poll_interval_minutes
     with connect(config.application_db) as con:
         from .activation import disabled_tasks
         disabled=set(disabled_tasks(con))
-        for kind,minutes in kinds.items():
+        for kind,minutes in _owner_schedule_kinds(config, environment).items():
             schedule = {'kind':'interval','minutes':minutes}
             if kind == 'applications.briefing.tick':
                 schedule.update(priority=95, max_attempts=3)
@@ -137,6 +152,9 @@ def _seed(config,clock,environment):
 
 
 def build_owner_handlers(config,environment,*,lane,clock,ledger=None):
+    from .schema_lifecycle import require_current
+    if require_current():
+        check_owner_schedules(config, environment)
     from .application_runtime import ApplicationRuntime
     runtime=ApplicationRuntime(config.application_owner_db,clock=lambda:clock().isoformat().replace('+00:00','Z'))
     from .service import JobSearchLedger
@@ -174,7 +192,8 @@ def build_owner_handlers(config,environment,*,lane,clock,ledger=None):
         handlers['applications.briefing.compose'] = compose_briefing
         handlers['applications.mail.understand']=mail('applications.mail.understand')
         return handlers
-    _seed(config,clock,environment)
+    if not require_current():
+        _seed(config,clock,environment)
     handlers['applications.briefing.tick'] = briefing_tick
     for kind in ('applications.mail.dispatch','applications.mail.project','applications.mail.outgoing'):
         handlers[kind]=mail(kind)

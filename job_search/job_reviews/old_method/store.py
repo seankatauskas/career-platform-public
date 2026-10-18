@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 
 from ...contracts import ContractError, canonical_json, payload_sha256
+from ...collection.discovery_index import CANDIDATE_SQL, candidate_bounds
 from ...db import connect
 from ..brief import current_search_brief
 from ..context import review_context
@@ -93,7 +94,7 @@ class Store:
         return True
 
     def _snapshot(self, start, end):
-        """Read dates first; load descriptions only for eligible open discoveries."""
+        """Index candidate dates; freeze exact eligible rows in one read snapshot."""
         with closing(sqlite3.connect(self.service.catalog.jobs_db.as_uri() + '?mode=ro', uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute('BEGIN')
@@ -101,7 +102,7 @@ class Store:
             if not {'ats', 'id', 'posted_at', 'first_seen', 'closed_at', 'description'}.issubset(columns):
                 raise ContractError('job catalog lacks required discovery provenance or descriptions')
             identities = [(r['ats'], r['id']) for r in db.execute(
-                'SELECT ats,id,posted_at,first_seen,closed_at FROM jobs')
+                CANDIDATE_SQL, candidate_bounds(start, end))
                 if eligible(dict(r), start, end)]
             fields = ','.join(f for f in REVIEW_JOB_FIELDS if f in columns)
             jobs = [dict(db.execute('SELECT ' + fields + ' FROM jobs WHERE ats=? AND id=?', key).fetchone())

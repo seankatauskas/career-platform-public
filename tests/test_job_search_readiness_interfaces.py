@@ -13,7 +13,7 @@ from job_search.service import JobSearchLedger
 from unittest.mock import patch, Mock
 
 from job_search import cli as job_search_app
-from job_search.runtime import RuntimeConfigV1, build_runtime
+from job_search.runtime import Runtime, RuntimeConfigV1, build_runtime
 from job_search.runtime_readiness import runtime_readiness
 from tests.test_job_search_dashboard import dashboard, request, session
 
@@ -160,6 +160,43 @@ def test_paused_ranking_keeps_details_without_stale_health_alarm():
         assert item["status"] == "paused" and not item["enabled"]
         assert report["ranking_policies"]["selective"]["status"] == "stale"
         assert report["metrics"]["stale_capabilities"] == 0
+
+
+
+def test_dashboard_and_mcp_readiness_do_not_scan_ranking_or_probe_dependencies():
+    from job_search.system import build_dashboard_controller, build_hermes_sources_from_config
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        config = replace(RuntimeConfigV1.defaults(Path(directory)), shortlist_policy="compare")
+        controller = build_dashboard_controller(config)
+        sources = build_hermes_sources_from_config(config, mail_source=Mock())
+        with sqlite3.connect(config.application_db) as con:
+            con.execute("INSERT OR REPLACE INTO automation_controls VALUES ('ranking',0,1,?)", (datetime.now(timezone.utc).isoformat(),))
+        with patch('job_search.ranking.refresh.inspect_policies', side_effect=AssertionError('catalog scan')), \
+             patch('job_search.runtime_readiness.dependency_health', side_effect=AssertionError('live probe')):
+            for report in (controller.readiness_view(), sources.readiness()):
+                assert 'ranking_policies' not in report
+                assert next(item for item in report['capabilities'] if item['id'] == 'ranking')['status'] == 'paused'
+                assert any(item['id'] == 'dependency_snapshot' for item in report['capabilities'])
+
+
+def test_failed_notification_observation_recovers_without_claiming_external_delivery():
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        config = RuntimeConfigV1.defaults(Path(directory))
+        JobSearchLedger(config.application_db)
+        worker = Mock()
+        worker.tick.return_value = {'acquired': True}
+        runtime = Runtime(config, 'core', worker, {})
+        for status, expected in [('blocked_setup', 'blocked'), ('ready', 'configured_unverified'), ('blocked_setup', 'blocked')]:
+            with patch('job_search.dependency_health.dependency_health', return_value={
+                    'notifications': {'configured': True, 'status': status}}):
+                runtime.tick(include_diagnostics=False)
+            observed = read_snapshot(config.application_db)
+            assert observed[0]['id'] == 'notification_transport'
+            assert observed[0]['status'] == expected
+            assert observed[0]['last_success_at'] is None
+        expired = read_snapshot(config.application_db, now=datetime.now(timezone.utc)+timedelta(minutes=16))
+        assert expired[0]['status'] == 'stale'
+        assert expired[0]['reason_code'] == 'dependency_snapshot_expired'
 
 
 def main():

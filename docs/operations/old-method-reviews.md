@@ -16,6 +16,24 @@ can overlap. The on-demand generator below derives boundaries from its run histo
 neither workflow compares previous list contents.
 Starting a review does not collect jobs or run ranking.
 
+Input preparation uses the catalog's `jobs_discovery_candidates` covering index
+to read candidate dates before loading eligible descriptions. Its local-date range
+extends one day beyond each UTC boundary to include timezone offsets. Alternate
+ISO representations use a fallback bucket; Python still applies the exact window,
+posting-age and open-status rules, including microseconds. Candidate selection and
+description reads share one SQLite read transaction, and final ordering and frozen
+source contents are unchanged. Existing catalogs remain readable before migration.
+
+`job_search init` installs the additive index on an existing provenance-capable
+catalog; collector schema preparation also installs it for new or older catalogs.
+The first installation reads the catalog once and adds index storage, so it can
+extend that release's maintenance pause. Subsequent initialization reuses the index.
+SQLite also maintains the index when collection inserts or updates its date/status
+fields; this trades modest additional storage and write work for bounded review reads.
+The review path never creates indexes or writes to the catalog. Old malformed or
+non-extended ISO discovery dates remain in the fallback bucket and are checked on
+every run; broad date windows naturally read more index entries.
+
 New runs record `window_policy=first-seen-posted-24h-v1` in their metadata and frozen
 packet. Previously saved runs without that field retain `start < posted_at <= end`
 and their original packet hashes when resumed.
@@ -196,6 +214,64 @@ payload and forwards the original stream unchanged. Metadata never supplies outp
 declares tools, or satisfies completion; normal tool, identity, and stream validation
 still applies. Failed generation is displayed as **Generation failed**, separately
 from **Generation interrupted**. Both retain the explicit resume control.
+
+## Resource evidence for the next generation
+
+Every new attempt automatically records host-only `resources.json` (summary) and
+`resources.jsonl` (timestamped samples) alongside its gateway diagnostics under
+`state/review-runner/old-method/REVIEW_ID/attempt_*/`. Both files are mode 0600,
+remain outside the reviewer mounts, and are included in normal state backups.
+Resuming creates a separate attempt; earlier evidence is retained. Already
+published requests do not launch a monitor or repeat work.
+
+Sampling normally runs every two seconds, with a longer interval for invocation
+limits over two hours. It covers input freezing/loading, the worker, validation
+and publication. The summary is atomically checkpointed every 30 seconds and on
+exit, including exceptions and interruption. After a hard kill or host crash,
+`finished_at: null` / `status: in_progress` identifies incomplete coverage; use the
+last sample timestamp, never infer that a run completed. The timeline is capped
+at 16 MiB per attempt; summary aggregation continues after truncation. Sampling
+or file-write errors are counted and never change the review outcome. No paid
+model run, new CloudWatch metric, infrastructure change or schedule is introduced.
+
+The receipts contain only fixed resource counters, timestamps, phase/count
+metadata, model/image identity, and known running task categories:
+
+- Host available RAM, anonymous memory, cache and swap allocation; swap-in/out
+  page counters distinguish actual paging from an allocated swap file.
+- Host CPU busy/total ticks and CPU, memory and I/O pressure stall counters.
+- Coordinator process RSS and CPU time; these exclude child processes.
+- The exact review worker and known application containers: cgroup CPU time
+  including descendants, quota throttling, memory charge/anonymous/file/cache,
+  swap, memory-limit/OOM events and block I/O. Container identity separates
+  restarts. Existing service lifetime counters require first-to-last deltas;
+  memory high-water marks may precede this review.
+- Running collection, ranking and interactive task counts from a bounded,
+  read-only query every ten seconds. This is sampled overlap, not an exhaustive
+  task history. The query does not read task payloads.
+
+Read the compact assessment through the existing host administration path:
+
+```sh
+python3 -m job_search.job_reviews.resource_monitor \
+  /var/lib/job-search/state/review-runner/old-method/REVIEW_ID/attempt_ATTEMPT
+```
+
+Worker CPU seconds are the last observed new-container lifetime counter, a lower
+bound because Docker removes the container at exit. Very short workers, brief
+peaks, final OOM events and the exit tail may be missed. Missing counters mean
+unknown, never zero. Worker memory includes reclaimable cache; peaks for separate
+counters must not be added. Use the timeline for simultaneous host headroom and
+service contention. `review_phase` records the application outcome separately
+from whether the monitor exited normally. Input/selected job counts and existing
+same-attempt gateway timing/token receipts provide workload size and remote-model
+context without duplicating job text or model responses.
+
+For a t3.medium assessment, review the complete run and overlapping workload,
+then correlate its UTC interval with EC2 CPU-credit and EBS-balance metrics. A
+small sampled worker footprint alone cannot establish sustainable T3 credits,
+predict the smaller filesystem cache, or prove a 4 GiB host has sufficient room.
+The report deliberately does not approve a resize automatically.
 
 ## Deployment and validation
 

@@ -14,6 +14,7 @@ x-control-plane: &control-plane
   read_only: true
   environment: &control-environment
     JOB_SEARCH_MAINTENANCE_GATE: /run/job-search-maintenance/gate.json
+    JOB_SEARCH_SCHEMA_MODE: require_current
     HOME: /var/lib/job-search/home
     XDG_DATA_HOME: /var/lib/job-search/private-state
   tmpfs:
@@ -24,7 +25,7 @@ x-control-plane: &control-plane
     - no-new-privileges:true
 
 # Individual mounts are intentionally assigned per service below. In particular,
-# the core worker and authenticated dashboard recovery boundary receive the
+# core workers and the authenticated dashboard recovery boundary receive the
 # notification socket. No service receives the whole private directory.
 x-maintenance-volume: &maintenance-volume
   type: bind
@@ -130,6 +131,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+      start_interval: 2s
     deploy:
       replicas: 1
 
@@ -139,11 +141,24 @@ services:
       <<: *control-environment
       JOB_SEARCH_INITIALIZE_OPERATION: "${JOB_SEARCH_INITIALIZE_OPERATION:-}"
     entrypoint: ["python", "-m", "job_search.maintenance", "initialize", "python", "-m", "job_search"]
-    command: ["--config", "/run/job-search/config.json", "init"]
+    command: ["--config", "/run/job-search/config.json", "migrate"]
     network_mode: none
     volumes:
       - *maintenance-volume
       - *state-volume
+      - *config-volume
+    restart: "no"
+
+  schema-check:
+    <<: *control-plane
+    entrypoint: ["python", "-m", "job_search"]
+    command: ["--config", "/run/job-search/config.json", "check-schema"]
+    network_mode: none
+    volumes:
+      - type: bind
+        source: "${JOB_SEARCH_STATE_DIR:?set JOB_SEARCH_STATE_DIR}"
+        target: /var/lib/job-search
+        read_only: true
       - *config-volume
     restart: "no"
 
@@ -183,6 +198,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+      start_interval: 2s
     deploy:
       replicas: 1
 
@@ -222,6 +238,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+      start_interval: 2s
     deploy:
       replicas: 1
 
@@ -229,7 +246,7 @@ services:
     <<: *control-plane
     network_mode: host
     command:
-      ["--config", "/run/job-search/config.json", "worker", "--lane", "core", "--interval-seconds", "300"]
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "core", "--partition", "batch", "--interval-seconds", "300"]
     restart: unless-stopped
     stop_grace_period: 70m
     volumes:
@@ -256,6 +273,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+      start_interval: 2s
     deploy:
       replicas: 1
 
@@ -263,7 +281,7 @@ services:
     <<: *control-plane
     network_mode: host
     command:
-      ["--config", "/run/job-search/config.json", "worker", "--lane", "model", "--interval-seconds", "300", "--max-outbox", "0"]
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "model", "--partition", "batch", "--interval-seconds", "300", "--max-outbox", "0"]
     restart: unless-stopped
     stop_grace_period: 70m
     volumes:
@@ -286,6 +304,81 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+      start_interval: 2s
+    deploy:
+      replicas: 1
+
+  interactive-core:
+    <<: *control-plane
+    network_mode: host
+    command:
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "core", "--partition", "interactive", "--interval-seconds", "15"]
+    restart: unless-stopped
+    stop_grace_period: 70m
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    cpu_shares: 2048
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *portable-key-volume
+      - *inference-config-volume
+      - *runpod-key-volume
+      # The core image does not invoke the resume model, but the documented one-shot
+      # aggregate status command runs here and must validate every configured provider.
+      - *resume-model-volume
+      - *tool-socket-volume
+      - *notification-socket-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "healthcheck", "interactive-core"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    deploy:
+      replicas: 1
+
+  interactive-model:
+    <<: *control-plane
+    network_mode: host
+    command:
+      ["--config", "/run/job-search/config.json", "worker", "--lane", "model", "--partition", "interactive", "--interval-seconds", "15", "--max-outbox", "0"]
+    restart: unless-stopped
+    stop_grace_period: 70m
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    cpu_shares: 2048
+    volumes:
+      - *maintenance-volume
+      - *state-volume
+      - *config-volume
+      - *inference-config-volume
+      - *runpod-key-volume
+      - *resume-model-volume
+      - *tool-socket-volume
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python", "-m", "job_search.cloud", "healthcheck", "interactive-model"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
     deploy:
       replicas: 1
 

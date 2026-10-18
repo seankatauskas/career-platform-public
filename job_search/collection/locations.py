@@ -281,6 +281,10 @@ def normalize_location(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_schema(con: sqlite3.Connection) -> None:
+    from job_search.schema_lifecycle import require_current, check_optional
+    if require_current():
+        check_optional(con, "locations")
+        return
     con.executescript(SCHEMA)
 
 

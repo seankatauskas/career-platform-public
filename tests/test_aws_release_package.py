@@ -24,6 +24,7 @@ def repository(root: Path) -> str:
     git(root, "init", "--quiet")
     for name in ("compose.cloud.yaml", "job_search/aws_ops.py", "scripts/job-search-ops",
                  "job_search/worker.py", "job_search/web/app.js", "compose.hermes.yaml",
+                 "job_search/collection/discovery_index.py",
                  "compose.applications.yaml", "job_search/secret.txt"):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,7 @@ def test_package_uses_commit_blobs_preserves_modes_and_excludes_private_files() 
             names = set(archive.getnames())
             assert "job_search/worker.py" in names and "compose.hermes.yaml" in names
             assert "compose.applications.yaml" in names
+            assert archive.extractfile("job_search/collection/discovery_index.py").read() == b"committed runtime\n"
             assert not names.intersection({"job_search/secret.txt", "job_search/history.db", ".env", "personal-resume.pdf", "job_search/new.py"})
             assert archive.extractfile("job_search/worker.py").read() == b"committed runtime\n"
             assert archive.getmember("scripts/job-search-ops").mode == 0o755
@@ -119,9 +121,77 @@ def test_committed_personal_artifacts_block_release() -> None:
         assert not (root / "output").exists()
 
 
+def test_startup_contract_is_derived_from_commit_and_proof_must_match() -> None:
+    from job_search.deployment_contract import from_commit
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository(root)
+        (root / 'job_search/schema_lifecycle.py').write_text('STARTUP_POLICY = "require-current-v1"\n')
+        git(root, 'add', '.')
+        git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'boundary')
+        source = git(root, 'rev-parse', 'HEAD')
+        contract = from_commit(root, source)
+        result = package.build(root, root / 'valid', metadata(source), evidence=evidence(source))
+        assert result['startup_schema_protocol'] == 1
+        assert result['runtime_contract_sha256'] == contract
+        for values, proof in (
+            ({**metadata(source), 'runtime_contract_sha256': '0' * 64}, evidence(source)),
+            (metadata(source), {**evidence(source), 'compatible_deployment': {'passed': True, 'runtime_contract_sha256': '0' * 64}}),
+        ):
+            try:
+                package.build(root, root / 'invalid', values, evidence=proof)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('caller-provided capability or mismatched transition proof accepted')
+
+
+def test_protocol_two_requires_matching_reviewed_source_and_proof_protocol() -> None:
+    from job_search.deployment_contract import AUDIT_PATH, from_commit
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        repository(root)
+        module = root / 'job_search/runtime_readiness.py'
+        module.write_text('def runtime_readiness(): return {}\n')
+        (root / 'job_search/schema_lifecycle.py').write_text('boundary')
+        (root / 'job_search/deployment_contract.py').write_text('PROTOCOL = 2\n')
+        (root / AUDIT_PATH).write_text(json.dumps({'protocol': 2, 'modules': {
+            'job_search/runtime_readiness.py': hashlib.sha256(module.read_bytes()).hexdigest()}}))
+        git(root, 'add', '.')
+        git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'reviewed backend')
+        source = git(root, 'rev-parse', 'HEAD')
+        proof = {'protocol': 2, 'passed': True, 'runtime_contract_sha256': from_commit(root, source)}
+        result = package.build(root, root / 'valid', metadata(source), evidence={
+            **evidence(source), 'compatible_deployment': proof})
+        assert result['startup_schema_protocol'] == 2
+        with tarfile.open(root / 'valid/release.tar.gz') as archive:
+            assert AUDIT_PATH in archive.getnames()
+        for protocol in (None, 1, True, 3):
+            try:
+                package.build(root, root / 'invalid', metadata(source), evidence={
+                    **evidence(source), 'compatible_deployment': {**proof, 'protocol': protocol}})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('incorrect proof protocol accepted')
+        module.write_text('unreviewed contents')
+        git(root, 'add', 'job_search/runtime_readiness.py')
+        git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'stale review')
+        source = git(root, 'rev-parse', 'HEAD')
+        try:
+            package.build(root, root / 'stale', metadata(source), evidence={**evidence(source),
+                'compatible_deployment': {**proof, 'runtime_contract_sha256': from_commit(root, source)}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('stale backend audit granted compatible evidence')
+
+
 if __name__ == "__main__":
     test_package_uses_commit_blobs_preserves_modes_and_excludes_private_files()
     test_cost_monitor_code_and_units_are_in_the_release_allowlist()
     test_symlinks_and_unpinned_images_fail_closed()
     test_committed_personal_artifacts_block_release()
-    print("ok (4 release packaging security tests)")
+    test_startup_contract_is_derived_from_commit_and_proof_must_match()
+    test_protocol_two_requires_matching_reviewed_source_and_proof_protocol()
+    print("ok (6 release packaging security tests)")

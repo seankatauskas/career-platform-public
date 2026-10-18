@@ -58,6 +58,7 @@ def host_runtime_probe(image):
     from job_search.job_reviews.old_method import runtime
     from job_search.job_reviews.old_method.workspace import validate_result
     from job_search.job_reviews.runner_config import RunnerConfig
+    from job_search.job_reviews.resource_monitor import AttemptResources
 
     job = {'ats': 'ashby', 'id': 'probe', 'title': 'Software Engineer', 'company': 'example',
            'location': 'United States', 'description': 'Build Python APIs.',
@@ -75,7 +76,7 @@ def host_runtime_probe(image):
         requests.append(json.loads(body))
         assert 'Authorization' not in headers and 'authorization' not in headers
         if len(requests) == 1:
-            command = "python -c 'from job_search.job_reviews.old_method.workspace import Review; r=Review(); print(r.finish([]))'"
+            command = "python -c 'import time; time.sleep(3); from job_search.job_reviews.old_method.workspace import Review; r=Review(); print(r.finish([]))'"
             item = {'type': 'custom_tool_call', 'id': 'ct_host_probe', 'call_id': 'call_host_probe',
                     'namespace': 'functions', 'name': 'exec', 'status': 'completed',
                     'input': 'text(await tools.exec_command(' + json.dumps({'cmd': command}) + '));'}
@@ -100,9 +101,13 @@ def host_runtime_probe(image):
         with patch.object(runtime, 'NativeAuthOwner', return_value=fake_auth), \
              patch.object(runtime, 'gateway_server', gateway), \
              patch.object(runtime, 'cleanup_inventory', return_value={'removed_container_ids': []}):
-            with runtime.worker(config, packet, root/'attempt') as handle:
+            (root/'attempt').mkdir(mode=0o700)
+            with AttemptResources(root/'attempt', root/'unused.db') as resources, \
+                 runtime.worker(config, packet, root/'attempt') as handle:
+                resources.worker(handle.runtime_id)
                 deadline = time.monotonic() + 120
                 while handle.poll() is None and time.monotonic() < deadline:
+                    resources.sample()
                     time.sleep(.1)
                 if handle.poll() is None:
                     handle.terminate()
@@ -112,6 +117,12 @@ def host_runtime_probe(image):
                 result = runtime.read_output(handle.output_directory/'result.json')
                 validate_result(packet, result)
                 assert result == runtime.read_output(handle.output_directory/'progress.json')
+        report = json.loads((root/'attempt/resources.json').read_text())
+        assert report['finished_at'] and report['samples'] >= 2, report
+        assert report['assessment']['host_total_bytes'], report
+        assert report['assessment']['worker_cpu_seconds_observed_lower_bound'] is not None, report
+        assert report['assessment']['worker_observed_lifetime_peak_bytes'], report
+        assert (root/'attempt/resources.json').stat().st_mode & 0o777 == 0o600
         assert len(requests) == 2, len(requests)
     return 'passed'
 

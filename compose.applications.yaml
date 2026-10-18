@@ -1,7 +1,7 @@
-# Selected only with the owners backend. Understanding runs on the model lane
+# Selected only with the owners backend. Understanding runs on the interactive model worker
 # with its dedicated mail profile; the MCP agent receives neither credential.
 services:
-  model:
+  interactive-model:
     volumes:
       - type: bind
         source: "${JOB_SEARCH_PRIVATE_DIR:?set JOB_SEARCH_PRIVATE_DIR}/mail-inference.json"

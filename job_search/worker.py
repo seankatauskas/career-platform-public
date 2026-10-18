@@ -31,6 +31,30 @@ from .scheduler import (
 
 WORKER_LEASE_NAME = "job-search-worker"
 WORK_LANES = frozenset({"core", "model"})
+WORK_PARTITIONS = frozenset({"all", "batch", "interactive"})
+_PARTITION_GUARD_TOKEN = "partitioned-workers-v1"
+# Partition execution, not the persisted lane: queued rows, lineage, and dedupe
+# keys survive upgrades and rollback unchanged. New task kinds default to the
+# interactive partition; add long catalog/document jobs here explicitly.
+BATCH_TASK_KINDS = (
+    "ats.authoritative", "ats.new_only", "ats.refresh_recent",
+    "opportunity.location_refresh", "opportunity.preference_refresh",
+    "opportunity.salary_drain", "notification.shortlist_evaluate", "resume.optimize",
+)
+
+
+def worker_lease_name(lane: str, partition: str = "all") -> str:
+    if lane not in WORK_LANES or partition not in WORK_PARTITIONS:
+        raise ValueError("unknown worker lane or partition")
+    base = WORKER_LEASE_NAME if lane == "core" else f"{WORKER_LEASE_NAME}:{lane}"
+    return base if partition == "all" else f"{base}:{partition}"
+
+
+def worker_service_name(lane: str, partition: str = "all") -> str:
+    worker_lease_name(lane, partition)  # validate both public inputs
+    return f"interactive-{lane}" if partition == "interactive" else lane
+
+
 DEFAULT_LEASE_SECONDS = 240
 DEFAULT_MAX_WORK_PER_TICK = 10
 DEFAULT_MAX_OUTBOX_PER_TICK = 20
@@ -230,22 +254,36 @@ def acquire_worker_lease(
     now: datetime,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
     lane: str = "core",
+    partition: str = "all",
 ) -> str | None:
     if lease_seconds < 1:
         raise ValueError("lease_seconds must be positive")
-    if lane not in WORK_LANES:
-        raise ValueError("unknown worker lane")
-    lease_name = WORKER_LEASE_NAME if lane == "core" else f"{WORKER_LEASE_NAME}:{lane}"
+    lease_name = worker_lease_name(lane, partition)
     now = as_utc(now)
     stamp = utc_stamp(now)
     expires = utc_stamp(now + timedelta(seconds=lease_seconds))
     token = uuid.uuid4().hex
     with connect(db_path) as con:
         con.execute("BEGIN IMMEDIATE")
+        # A new unpartitioned CLI worker excludes both cloud partitions. The
+        # partitions exclude an unpartitioned worker and themselves, but may run
+        # together. Every check and acquisition shares one SQLite transaction.
+        conflicts = (tuple(worker_lease_name(lane, value) for value in sorted(WORK_PARTITIONS))
+                     if partition == "all" else (lease_name,))
+        if partition != "all":
+            legacy = con.execute(
+                "SELECT token FROM worker_leases WHERE lease_name=? AND expires_at>?",
+                (worker_lease_name(lane), stamp),
+            ).fetchone()
+            if legacy and legacy["token"] != _PARTITION_GUARD_TOKEN:
+                con.rollback()
+                return None
+        marks = ",".join("?" for _ in conflicts)
         current = con.execute(
-            "SELECT * FROM worker_leases WHERE lease_name=?", (lease_name,)
+            f"SELECT 1 FROM worker_leases WHERE lease_name IN ({marks}) AND expires_at>?",
+            (*conflicts, stamp),
         ).fetchone()
-        if current and current["expires_at"] > stamp:
+        if current:
             con.rollback()
             return None
         con.execute(
@@ -256,19 +294,50 @@ def acquire_worker_lease(
             "heartbeat_at=excluded.heartbeat_at,expires_at=excluded.expires_at",
             (lease_name, owner, token, stamp, stamp, expires),
         )
+        if partition != "all":
+            _refresh_partition_guard(con, lane, stamp, allow_takeover=True)
         con.commit()
     return token
 
 
-def release_worker_lease(db_path: Path, token: str, *, lane: str = "core") -> None:
-    if lane not in WORK_LANES:
-        raise ValueError("unknown worker lane")
-    lease_name = WORKER_LEASE_NAME if lane == "core" else f"{WORKER_LEASE_NAME}:{lane}"
-    with connect(db_path) as con:
+def _refresh_partition_guard(con: Any, lane: str, stamp: str, *, allow_takeover: bool = False) -> bool:
+    """Block predecessor binaries using their original lease name, transactionally.
+
+    Each partition retains its exact ownership token. The shared guard only keeps
+    unpartitioned workers out and lasts until the latest partition lease expires.
+    """
+    base = worker_lease_name(lane)
+    current = con.execute("SELECT token FROM worker_leases WHERE lease_name=?", (base,)).fetchone()
+    # Only acquisition, after excluding a live predecessor in this same write
+    # transaction, may replace its row. A delayed heartbeat/release must never
+    # take back a lane that an unpartitioned worker has acquired after expiry.
+    if not allow_takeover and (current is None or current["token"] != _PARTITION_GUARD_TOKEN):
+        return False
+    expires = con.execute(
+        "SELECT MAX(expires_at) FROM worker_leases WHERE lease_name IN (?,?)",
+        (worker_lease_name(lane, "batch"), worker_lease_name(lane, "interactive")),
+    ).fetchone()[0]
+    if expires is None:
+        con.execute("DELETE FROM worker_leases WHERE lease_name=? AND token=?", (base, _PARTITION_GUARD_TOKEN))
+    else:
         con.execute(
+            "INSERT INTO worker_leases (lease_name,owner,token,acquired_at,heartbeat_at,expires_at) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(lease_name) DO UPDATE SET "
+            "owner=excluded.owner,token=excluded.token,heartbeat_at=excluded.heartbeat_at,expires_at=excluded.expires_at",
+            (base, "partitioned-workers", _PARTITION_GUARD_TOKEN, stamp, stamp, expires),
+        )
+    return True
+
+
+def release_worker_lease(db_path: Path, token: str, *, lane: str = "core", partition: str = "all") -> None:
+    lease_name = worker_lease_name(lane, partition)
+    with connect(db_path) as con:
+        removed = con.execute(
             "DELETE FROM worker_leases WHERE lease_name=? AND token=?",
             (lease_name, token),
         )
+        if removed.rowcount and partition != "all":
+            _refresh_partition_guard(con, lane, utc_stamp(datetime.now(timezone.utc)))
 
 
 class Worker:
@@ -284,13 +353,13 @@ class Worker:
         max_work_per_tick: int = DEFAULT_MAX_WORK_PER_TICK,
         max_outbox_per_tick: int = DEFAULT_MAX_OUTBOX_PER_TICK,
         lane: str = "core",
+        partition: str = "all",
         deferred_task_kinds: Sequence[str] = (),
         inference_usage_limits: Mapping[str, Any] | None = None,
     ) -> None:
         if max_work_per_tick < 0 or max_outbox_per_tick < 0:
             raise ValueError("per-tick bounds cannot be negative")
-        if lane not in WORK_LANES:
-            raise ValueError("unknown worker lane")
+        worker_lease_name(lane, partition)
         self.db_path = Path(db_path)
         self.task_handlers = dict(task_handlers or {})
         self.outbox_handlers = dict(outbox_handlers or {})
@@ -298,8 +367,9 @@ class Worker:
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
         self.max_work_per_tick = max_work_per_tick
-        self.max_outbox_per_tick = max_outbox_per_tick if lane == "core" else 0
+        self.max_outbox_per_tick = max_outbox_per_tick if lane == "core" and partition != "batch" else 0
         self.lane = lane
+        self.partition = partition
         self.deferred_task_kinds = tuple(sorted(set(deferred_task_kinds)))
         from .inference.usage import UsagePolicy
         self.inference_usage_policy = UsagePolicy.from_mapping(inference_usage_limits)
@@ -307,11 +377,14 @@ class Worker:
 
     @property
     def _lease_name(self) -> str:
-        return (
-            WORKER_LEASE_NAME
-            if self.lane == "core"
-            else f"{WORKER_LEASE_NAME}:{self.lane}"
-        )
+        return worker_lease_name(self.lane, self.partition)
+
+    def _partition_filter(self) -> tuple[str, tuple[str, ...]]:
+        if self.partition == "all":
+            return "", ()
+        marks = ",".join("?" for _ in BATCH_TASK_KINDS)
+        operator = "IN" if self.partition == "batch" else "NOT IN"
+        return f" AND task_kind {operator} ({marks})", BATCH_TASK_KINDS
 
     def _now(self) -> datetime:
         return as_utc(self.now_provider())
@@ -327,6 +400,10 @@ class Worker:
                 (stamp, expires, self._lease_name, self._worker_token),
             )
             owned = worker.rowcount == 1
+            if owned and self.partition != "all":
+                if not _refresh_partition_guard(con, self.lane, stamp):
+                    con.rollback()
+                    return False
             if work_id and lease_token:
                 item = con.execute(
                     "UPDATE work_items SET lease_expires_at=? "
@@ -338,14 +415,15 @@ class Worker:
 
     def _recover_expired(self, now: datetime) -> dict[str, int]:
         stamp = utc_stamp(now)
+        partition_sql, partition_parameters = self._partition_filter()
         with connect(self.db_path) as con:
             con.execute("BEGIN IMMEDIATE")
             # A remote invocation records its outcome before any submission. A lost
             # worker lease cannot authorize another POST while that outcome is unknown.
             uncertain = [row[0] for row in con.execute(
                 "SELECT work_id FROM work_items WHERE status='running' AND lane=? "
-                "AND lease_expires_at<=? AND external_outcome IN ('in_flight','unknown')",
-                (self.lane, stamp),
+                "AND lease_expires_at<=? AND external_outcome IN ('in_flight','unknown')" + partition_sql,
+                (self.lane, stamp, *partition_parameters),
             )]
             from .inference.usage import can_resume_work
             # Accepted IDs (and durable pre-POST reservations) can restart through
@@ -367,7 +445,8 @@ class Worker:
                 )
             exhausted = [row[0] for row in con.execute(
                 "SELECT work_id FROM work_items WHERE status='running' AND lane=? "
-                "AND lease_expires_at<=? AND attempts>=max_attempts", (self.lane, stamp),
+                "AND lease_expires_at<=? AND attempts>=max_attempts" + partition_sql,
+                (self.lane, stamp, *partition_parameters),
             )]
             if exhausted:
                 marks = ",".join("?" for _ in exhausted)
@@ -383,7 +462,8 @@ class Worker:
                 )
             work_ids = [row[0] for row in con.execute(
                 "SELECT work_id FROM work_items WHERE status='running' "
-                "AND lane=? AND lease_expires_at<=?", (self.lane, stamp),
+                "AND lane=? AND lease_expires_at<=?" + partition_sql,
+                (self.lane, stamp, *partition_parameters),
             )]
             if work_ids:
                 marks = ",".join("?" for _ in work_ids)
@@ -400,7 +480,7 @@ class Worker:
                     (stamp, *work_ids),
                 )
             outbox = 0
-            if self.lane == "core":
+            if self.lane == "core" and self.partition != "batch":
                 outbox = con.execute(
                     "UPDATE outbox_messages SET status='pending',available_at=?,"
                     "lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,"
@@ -415,11 +495,11 @@ class Worker:
         from .activation import disabled_tasks
 
         deferred = tuple(sorted(set(self.deferred_task_kinds) | set(disabled_tasks(con))))
-        deferred_sql = ""
-        parameters: list[Any] = [self.lane, stamp]
+        deferred_sql, partition_parameters = self._partition_filter()
+        parameters: list[Any] = [self.lane, stamp, *partition_parameters]
         if deferred:
             marks = ",".join("?" for _ in deferred)
-            deferred_sql = f" AND task_kind NOT IN ({marks})"
+            deferred_sql += f" AND task_kind NOT IN ({marks})"
             parameters.extend(deferred)
         return con.execute(
             "SELECT * FROM work_items WHERE lane=? AND status='queued' AND due_at<=?"
@@ -724,7 +804,8 @@ class Worker:
             )
         return status
 
-    def tick(self, *, now: datetime | None = None, should_stop: Callable[[], bool] = lambda: False) -> dict[str, Any]:
+    def tick(self, *, now: datetime | None = None, should_stop: Callable[[], bool] = lambda: False,
+             include_diagnostics: bool = True) -> dict[str, Any]:
         if should_stop():
             return {"acquired": False, "reason": "worker draining"}
         tick_now = as_utc(now or self._now())
@@ -738,6 +819,7 @@ class Worker:
             now=tick_now,
             lease_seconds=self.lease_seconds,
             lane=self.lane,
+            partition=self.partition,
         )
         if token is None:
             return {"acquired": False, "reason": "worker lease is held"}
@@ -747,6 +829,7 @@ class Worker:
                 "acquired": True,
                 "recovered": self._recover_expired(tick_now),
                 "lane": self.lane,
+                "partition": self.partition,
                 "materialized": (
                     materialize_due_schedules(self.db_path, tick_now)
                     if self.lane == "core"
@@ -836,11 +919,12 @@ class Worker:
                     status = self._fail_work(item, item_token, exc, current_time(),
                                              resources if resources["commands"] else None)
                     report["work"]["dead" if status == "dead" else "retried"] += 1
-            report["health"] = automation_health(self.db_path, current_time())
+            if include_diagnostics:
+                report["health"] = automation_health(self.db_path, current_time())
             report["more_due"] = self._more_due(current_time())
             return report
         finally:
-            release_worker_lease(self.db_path, token, lane=self.lane)
+            release_worker_lease(self.db_path, token, lane=self.lane, partition=self.partition)
             self._worker_token = ""
 
 
@@ -1194,6 +1278,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one bounded job-search worker tick")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--lane", choices=tuple(sorted(WORK_LANES)), default="core")
+    parser.add_argument("--partition", choices=tuple(sorted(WORK_PARTITIONS)), default="all")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--project-root", type=Path)
     parser.add_argument("--jobs-db", type=Path)
@@ -1256,6 +1341,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime = build_runtime(
             config,
             lane=args.lane,
+            partition=args.partition,
             max_work_per_tick=args.max_work,
             max_outbox_per_tick=args.max_outbox,
         )

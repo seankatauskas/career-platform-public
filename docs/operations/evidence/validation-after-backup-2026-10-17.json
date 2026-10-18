@@ -1,0 +1,188 @@
+{
+  "scope": "512 MiB fictional local fixture; no production performance or downtime measurement",
+  "baseline_commit": "4eeb34461b179222d1a14c45525dcfaca4b0296e",
+  "cases": {
+    "baseline": {
+      "aws_ops_sha256": "1f80f594432c265ea56a88c1c3477248242044495a1784b03140cc9c1b9c9225",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 0.3535277913324535,
+          "paused_snapshot_seconds": 0.24673533299937844,
+          "restore_verification_seconds": 0.28957162518054247,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 0,
+          "preparation_seconds": 0.33467870811000466,
+          "paused_snapshot_seconds": 0.2424349170178175,
+          "restore_verification_seconds": 0.2689027921296656,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 1,
+          "preparation_seconds": 0.30031433375552297,
+          "paused_snapshot_seconds": 0.22008041618391871,
+          "restore_verification_seconds": 0.2591716251336038,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 1,
+          "preparation_seconds": 0.29760883282870054,
+          "paused_snapshot_seconds": 0.22179612470790744,
+          "restore_verification_seconds": 0.25756933400407434,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 2,
+          "preparation_seconds": 0.2940914169885218,
+          "paused_snapshot_seconds": 0.22096787486225367,
+          "restore_verification_seconds": 0.25983558408915997,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 2,
+          "preparation_seconds": 0.29365924978628755,
+          "paused_snapshot_seconds": 0.21905349986627698,
+          "restore_verification_seconds": 0.26054833410307765,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        }
+      ]
+    },
+    "candidate": {
+      "aws_ops_sha256": "3f46b6519a5acb6d090ee878440d6dea22d14189b30f108a5104e332b6cf41eb",
+      "measurements": [
+        {
+          "mode": "cold",
+          "trial": 0,
+          "preparation_seconds": 0.3350497498176992,
+          "paused_snapshot_seconds": 0.26770133432000875,
+          "restore_verification_seconds": 0.2622536667622626,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 0,
+          "preparation_seconds": 0.24366516713052988,
+          "paused_snapshot_seconds": 0.22242591716349125,
+          "restore_verification_seconds": 0.2617777092382312,
+          "sqlite_checks": 0,
+          "validation": {
+            "checked": 0,
+            "reused": 4,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 1,
+          "preparation_seconds": 0.30543975019827485,
+          "paused_snapshot_seconds": 0.22373999981209636,
+          "restore_verification_seconds": 0.2629061248153448,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 1,
+          "preparation_seconds": 0.23130224971100688,
+          "paused_snapshot_seconds": 0.22353633306920528,
+          "restore_verification_seconds": 0.2628211248666048,
+          "sqlite_checks": 0,
+          "validation": {
+            "checked": 0,
+            "reused": 4,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "cold",
+          "trial": 2,
+          "preparation_seconds": 0.2994731250219047,
+          "paused_snapshot_seconds": 0.21729937521740794,
+          "restore_verification_seconds": 0.2526047918945551,
+          "sqlite_checks": 4,
+          "validation": {
+            "checked": 4,
+            "reused": 0,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        },
+        {
+          "mode": "after_backup",
+          "trial": 2,
+          "preparation_seconds": 0.2289942498318851,
+          "paused_snapshot_seconds": 0.21311666630208492,
+          "restore_verification_seconds": 0.2545742089860141,
+          "sqlite_checks": 0,
+          "validation": {
+            "checked": 0,
+            "reused": 4,
+            "not_sqlite": 3,
+            "discarded": 0
+          }
+        }
+      ]
+    }
+  },
+  "platform": "macOS-26.6.1-arm64-arm-64bit",
+  "sqlite": "3.53.1",
+  "fixture_mib": 512,
+  "os_cache": "not evicted"
+}

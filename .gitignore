@@ -67,6 +67,7 @@ salary-archives/
 openwiki/_plan.md
 
 !deploy/release-policy.json
+!deploy/compatible-backend.json
 
 # macOS workspace metadata is never application source.
 .DS_Store
