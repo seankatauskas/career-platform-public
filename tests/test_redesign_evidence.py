@@ -344,23 +344,17 @@ class EvidenceTest(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from job_search.applications.understanding import SharedAnalyzer
-        class Provider:
-            max_input_tokens = 100000
-            calls = 0
-            def count_tokens_upper_bound(self, text):
-                return len(text)
-            def generate(self, messages, **kwargs):
-                self.calls += 1
-                self.messages = messages
-                return SimpleNamespace(text=json.dumps(output()))
-        provider = Provider()
+        from tests.fixtures.mail_provider import StagedMailProvider
+        provider = StagedMailProvider(output())
         context = AnalysisInput((source(),), ({"id": "app-1"},))
-        self.assertEqual(SharedAnalyzer(provider).analyze(context), output())
-        self.assertEqual(provider.calls, 1)
+        result = SharedAnalyzer(provider).analyze(context)
+        self.assertEqual(result["facts"][0]["value"], {"status": "confirmed"})
+        self.assertEqual(result["facts"][0]["target_id"], "app-1")
+        self.assertEqual(len(provider.calls), 3)
         provider.max_input_tokens = 100
         with self.assertRaises(DomainError):
             SharedAnalyzer(provider).analyze(context)
-        self.assertEqual(provider.calls, 1)
+        self.assertEqual(len(provider.calls), 3)
 
     def test_strict_provider_schema_closes_nested_objects_and_decodes_offer_terms(self):
         import json
@@ -376,9 +370,12 @@ class EvidenceTest(unittest.TestCase):
         result["facts"] = [{"kind": "offer", "target_id": "app-1", "confidence": None,
                             "value": {"offer_id": None, "status": "offered", "terms": json.dumps(terms)},
                             "evidence": [span("Application received.")]}]
+        from tests.fixtures.mail_provider import StagedMailProvider
+        staged = StagedMailProvider(result)
         def transport(url, headers, body, timeout, maximum):
-            captured.append(json.loads(body))
-            return _completion(json.dumps(result))
+            request = json.loads(body)
+            captured.append(request)
+            return _completion(staged.generate(request['messages'], schema_name=request['response_format']['json_schema']['name']).text)
         provider = OpenAICompatibleStructuredGenerator(config, transport)
         context = AnalysisInput((source(),), ({"id": "app-1"},))
         decoded = SharedAnalyzer(provider).analyze(context)
@@ -522,38 +519,14 @@ class AnalyzerTransportTest(unittest.TestCase):
             "kind": "reply", "outcome": "Reply", "responsible_party": "applicant", "requirement": "required", "channel": "email",
             "target_id": None, "evidence": [evidence]}], "temporal_facts": [], "uncertainties": []}
 
-    def test_unique_exact_quote_repairs_unicode_counting_only_in_transport(self):
-        from job_search.applications.understanding import SharedAnalyzer
+    def test_domain_validator_still_requires_exact_unicode_offsets(self):
         original = source("🙂 e\u0301\nPlease reply.\nThanks")
         context = AnalysisInput((original,))
         value = self.finding(original, "Please reply.", start=0, end=2)
         with self.assertRaises(DomainError):
             validate_analysis(value, context)
-        decoded = SharedAnalyzer(self.provider(value)).analyze(context)
-        self.assertEqual(decoded["requests"][0]["evidence"][0], span("Please reply.", original))
-        validate_analysis(decoded, context)
-        self.assertEqual(value["requests"][0]["evidence"][0]["start"], 0)
-
-    def test_ambiguous_quote_wrong_source_and_revision_never_reanchor(self):
-        from job_search.applications.understanding import SharedAnalyzer
-        original = source("Please reply. Previous message: Please reply.")
-        context = AnalysisInput((original,))
-        for fields in ({"start": 1, "end": 2}, {"revision": "other-revision"}, {"source_id": "other-message"}, {"start": True}):
-            with self.subTest(fields=fields), self.assertRaises(DomainError) as error:
-                SharedAnalyzer(self.provider(self.finding(original, "Please reply.", **fields))).analyze(context)
-            self.assertEqual(error.exception.code, "evidence_mismatch")
-        exact = self.finding(original, "Please reply.")
-        self.assertEqual(SharedAnalyzer(self.provider(exact)).analyze(context), exact)
-
-    def test_quote_normalization_or_missing_words_are_not_repaired(self):
-        from job_search.applications.understanding import SharedAnalyzer
-        original = source("e\u0301 Please  reply.")
-        for quote in ("é Please  reply.", "e\u0301 Please reply.", "Invented reply."):
-            value = self.finding(original, "Please  reply.")
-            value["requests"][0]["evidence"][0]["quote"] = quote
-            with self.assertRaises(DomainError) as error:
-                SharedAnalyzer(self.provider(value)).analyze(AnalysisInput((original,)))
-            self.assertEqual(error.exception.code, "evidence_mismatch")
+        value['requests'][0]['evidence'][0] = span("Please reply.", original)
+        validate_analysis(value, context)
 
     def test_compact_prompt_retains_complete_email_and_semantic_context(self):
         import json
@@ -577,14 +550,19 @@ class AnalyzerTransportTest(unittest.TestCase):
         provider.generate = lambda value, **kwargs: messages.extend(value) or generate(value, **kwargs)
         SharedAnalyzer(provider).analyze(context)
         payload = json.loads(messages[1]["content"])
-        self.assertEqual(payload["sources"][0]["text"], text)
+        self.assertEqual("".join(b["text"] for b in payload["sources"][0]["blocks"]), text)
+        self.assertNotIn("candidates", payload)
+        from job_search.applications.understanding.analyzer import model_payload
+        payload = model_payload(context)
         self.assertEqual(payload["sources"][0]["sha256"], original.sha256)
         self.assertEqual(payload["candidates"][0]["job"]["job_url"], "https://example.test/role")
         self.assertEqual(payload["candidates"][0]["retrieval_reasons"], ["current_employer_partial"])
         self.assertEqual(payload["candidate_retrieval"], retrieval)
         self.assertIn("complete current email subject and body", messages[0]["content"])
-        self.assertIn("not evidence that two names identify the same employer", messages[0]["content"])
-        self.assertIn("leave target_id null", messages[0]["content"])
+        from job_search.applications.understanding.instructions import identity_instructions
+        self.assertIn("not evidence that two names identify the same employer", identity_instructions())
+        self.assertIn("leave target_id null", identity_instructions())
+        self.assertNotIn("not evidence that two names identify the same employer", messages[0]["content"])
         self.assertEqual(payload["records"]["app-1"]["interviews"][0]["start_at"], "2026-10-10T12:00:00Z")
         self.assertNotIn("answers", payload["records"]["app-1"]["submissions"][0])
         self.assertNotIn("closure_previews", payload)

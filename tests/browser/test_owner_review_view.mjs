@@ -67,10 +67,10 @@ try {
     }
   `});
   for(const file of ['review-view.js','owner-review-view.js']) await page.addScriptTag({content:await readFile(new URL('../../job_search/web/'+file,import.meta.url),'utf8')});
-  await page.evaluate(()=>{document.querySelector("#refresh-attention").addEventListener("click",()=>loadOwnerReviewQueue());return loadReviewQueue();});
+  await page.evaluate(()=>{ownerReviewWorkspace.mode='all';document.querySelector("#refresh-attention").addEventListener("click",()=>loadOwnerReviewQueue());return loadReviewQueue();});
   assert.equal(await page.locator('#attention-list > article').count(),3);
   assert.equal(await page.locator('#review-count').innerText(),'4');
-  assert.match(await page.locator('#review-summary').innerText(),/4 decisions · 1 system issues/);
+  assert.match(await page.locator('#review-summary').innerText(),/4 decisions · 1 system issue/);
   const group=page.locator('[data-review-key="evidence_group:email:mail1"]');
   assert.equal(await group.locator('[data-proposal-id]').count(),2);
   assert.equal(await group.getByText('Source evidence',{exact:true}).count(),1);
@@ -120,7 +120,7 @@ try {
   await page.getByRole('button',{name:'Enable automatic browser recording',exact:true}).click();
   await page.waitForFunction(()=>!ownerReviewState.busy);
   assert.equal(await page.getByText('Browser recording: automatic',{exact:true}).count(),1);
-  await page.getByRole('button',{name:'Load more evidence',exact:true}).click();
+  await page.getByRole('button',{name:'Load more emails',exact:true}).click();
   await page.waitForFunction(()=>!ownerReviewState.busy && ownerReviewState.groups.some(g=>g.id==='email:later'));
   assert.equal(await page.locator('[data-proposal-id="later"]').count(),1);
   await page.evaluate(()=>{failLoad=true;});
@@ -323,6 +323,73 @@ try {
   assert.equal(await picker.getByRole('button',{name:'Continue',exact:true}).isDisabled(),true);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  // Manually searched database roles are actionable, including roles omitted by analysis.
+  await page.evaluate(()=>{
+    groups=[{...evidenceGroup('email:manual-search',[proposal('manual-link',{application_id:null,blockers:['needs_target']})]),applications:[],application:null}];
+    discovery={employer:'Northwind',title:'Platform Engineer',reason:'Choose the matching collected role.',can_create:false,
+      jobs:[{company:'Northwind',title:'Platform Engineer'}],catalog_choices:[{id:'catalog:ashby:manual',match_digest:'manual-match',job:{employer:'Northwind',title:'Platform Engineer',location:'Remote'}}]};
+    return loadOwnerReviewQueue();
+  });
+  const manual=page.locator('[data-review-key="evidence_group:email:manual-search"]');
+  await manual.getByRole('button',{name:'None of these',exact:true}).click();
+  await manual.getByRole('button',{name:'Use this role and attach email',exact:true}).click();
+  await page.waitForFunction(()=>!ownerReviewState.busy);
+  const manualPayload=await page.evaluate(()=>JSON.parse(requests.filter(r=>r.path.endsWith('/create_application_from_review')).at(-1).options.body));
+  assert.deepEqual(manualPayload,{group_id:'email:manual-search',expected_digest:'digest-email:manual-search',expected_match_digest:'manual-match',
+    catalog_id:'catalog:ashby:manual',employer:'Northwind',title:'Platform Engineer',search_employer:'Northwind',search_title:'Platform Engineer'});
+
+  // Default workspace presents one source; refresh and actions preserve the source and scroll.
+  await page.evaluate(async()=>{
+    await installBundleFixture([proposal('follow-up',{operation:'record_request',input:{application_id:'app1',description:'Send portfolio'}})]);
+    groups[0].applications=[{...app,job:{employer:'Northwind',title:'Platform Engineer'}}];
+    groups[0].source={subject:'Your application to Northwind',occurred_at:'2026-10-19T18:00:00Z'};
+    groups[0].proposals.forEach(p=>p.evidence=[{...ref,quote:'Please send a link to your portfolio so our team can review your work.'}]);
+    groups.push({...evidenceGroup('email:next',[proposal('next-task',{input:{description:'Prepare interview'}})]),applications:[{...app,job:{employer:'Atlas Labs',title:'Software Engineer'}}]});
+    groups.push({...evidenceGroup('email:attention',[],[{...issue,issue_id:'attention',status:'open',version:1}]),applications:[],application:null});
+    ownerReviewWorkspace.mode='focused';ownerReviewWorkspace.filter='all';ownerReviewWorkspace.selected='evidence_group:email:bundle';
+    return loadOwnerReviewQueue();
+  });
+  await page.setViewportSize({width:1280,height:900});
+  assert.equal(await page.locator('#attention-list > article:visible').count(),1);
+  assert.equal(await page.locator('[data-queue-key][aria-current=true]').count(),1);
+  assert.equal(await page.locator('#owner-processing-section').isVisible(),false);
+  await page.evaluate(()=>loadOwnerReviewQueue());
+  assert.equal(await page.evaluate(()=>ownerReviewWorkspace.selected),'evidence_group:email:bundle');
+  const tallReview=await page.addStyleTag({content:'.owner-review-detail .review-outcome {min-height:900px;}'});
+  await page.evaluate(()=>{
+    document.querySelector('.owner-review-detail').scrollTop=90;
+    document.querySelector('.owner-review-detail').addEventListener('pointerdown',()=>{window.reviewPositionBefore={page:scrollY,panel:document.querySelector('.owner-review-detail').scrollTop};},{once:true});
+  });
+  await bundled.getByRole('button',{name:'Record receipt',exact:true}).click();
+  await page.waitForFunction(()=>!ownerReviewState.busy);
+  const preservedPosition=await page.evaluate(()=>({before:window.reviewPositionBefore,page:scrollY,panel:document.querySelector('.owner-review-detail').scrollTop}));
+  assert.equal(preservedPosition.page,preservedPosition.before.page);
+  assert.equal(preservedPosition.panel,preservedPosition.before.panel);
+  await tallReview.evaluate(el=>el.remove());
+  assert.equal(await page.evaluate(()=>ownerReviewWorkspace.selected),'evidence_group:email:bundle');
+  assert.equal(await bundled.getByRole('button',{name:'Add task',exact:true}).count(),1);
+  await page.screenshot({path:'.cache/review-workspace-desktop.png',fullPage:true});
+  await bundled.getByRole('button',{name:'Add task',exact:true}).click();
+  await page.waitForFunction(()=>!ownerReviewState.busy);
+  assert.equal(await page.evaluate(()=>ownerReviewWorkspace.selected),'evidence_group:email:next');
+  assert.equal(await page.locator('#attention-list > article:visible').count(),1);
+  await page.getByRole('button',{name:'Email attention',exact:true}).click();
+  assert.equal(await page.locator('#attention-list > article:visible').count(),0);
+  assert.equal(await page.locator('#owner-processing-section').isVisible(),true);
+  assert.equal(await page.evaluate(()=>ownerReviewWorkspace.selected),'evidence_group:email:attention');
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.screenshot({path:'.cache/review-workspace-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'All',exact:true}).click();
+  await page.locator('[data-queue-key="evidence_group:email:next"]').click();
+  assert.equal(await page.locator('#owner-processing-section').isVisible(),false);
+  // Selection changes never authorize an application command.
+  const beforeNavigation=await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length);
+  await page.locator('[data-queue-key="evidence_group:email:attention"]').click();
+  assert.equal(await page.evaluate(()=>requests.filter(r=>r.options?.method==='POST').length),beforeNavigation);
+  await page.getByRole('button',{name:'Show all items together',exact:true}).click();
+  assert.equal(await page.locator('#attention-list > article:visible').count(),1);
+  assert.equal(await page.locator('#owner-processing-section').isVisible(),true);
   assert.deepEqual(errors,[]);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);

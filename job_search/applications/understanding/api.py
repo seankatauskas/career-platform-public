@@ -8,7 +8,7 @@ from job_search.commands import DomainError, digest, encode
 from .contracts import validate_analysis
 from .recipes import fact_recipe
 from .reconciliation import non_actionable_outcome
-from . import processing
+from . import processing, checkpoints
 
 
 SCHEMA = """
@@ -46,6 +46,12 @@ _RECOVERY_STEPS = tuple(statement.strip() for statement in processing.RETRY_SCHE
 SCHEMA_MIGRATIONS = {(owner, old, hashlib.sha256(SCHEMA.encode()).hexdigest()): (*steps, *_RECOVERY_STEPS)
                      for (owner, old, _), steps in SCHEMA_MIGRATIONS.items()}
 SCHEMA_MIGRATIONS[("understanding", hashlib.sha256(_RECOVERY_PREVIOUS.encode()).hexdigest(), hashlib.sha256(SCHEMA.encode()).hexdigest())] = _RECOVERY_STEPS
+
+_CHECKPOINT_PREVIOUS = SCHEMA
+SCHEMA += checkpoints.SCHEMA
+SCHEMA_MIGRATIONS = {(owner, old, hashlib.sha256(SCHEMA.encode()).hexdigest()): (*steps, checkpoints.SCHEMA)
+                     for (owner, old, _), steps in SCHEMA_MIGRATIONS.items()}
+SCHEMA_MIGRATIONS[("understanding", hashlib.sha256(_CHECKPOINT_PREVIOUS.encode()).hexdigest(), hashlib.sha256(SCHEMA.encode()).hexdigest())] = (checkpoints.SCHEMA,)
 
 OPERATIONS = frozenset({"record_submission_receipt","link_message", "correct_association", "confirm_submission", "record_request",
     "create_task", "record_assessment", "update_assessment", "record_offer", "decide_offer",
@@ -202,6 +208,10 @@ class UnderstandingOperations:
                 return {"status": "persisted", "analysis_id": row["analysis_id"], "input_key": key}
             if row and row["status"] == "processing" and datetime.fromisoformat(row["lease_until"].replace("Z", "+00:00")) > datetime.fromisoformat(tx.now.replace("Z", "+00:00")):
                 return {"status": "busy", "input_key": key}
+            # Deferral/lease recovery reuses completed stages. A fresh explicit
+            # attempt after a terminal failure must be allowed new model output.
+            if row and row["status"] not in {"deferred", "processing"}:
+                tx.connection.execute("DELETE FROM understand_stage_checkpoints WHERE input_key=?", (key,))
             token = "claim_" + uuid.uuid4().hex
             until = (datetime.fromisoformat(tx.now.replace("Z", "+00:00")) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
             generation = row["generation"] + 1 if row else 1
@@ -275,13 +285,8 @@ class UnderstandingOperations:
                                   (analysis_id, key, context.fingerprint(), encode(context.descriptor()), schema_version,
                                    prompt_version, model_version, status, encode(validated) if validated else None, failure_code, tx.now))
             if validation_diagnostic is not None:
-                allowed_reasons = {"invalid_span", "invalid_identity", "invalid_source_or_bounds", "quote_not_unique", "quote_not_found"}
-                if (failure_code != "evidence_mismatch" or not isinstance(validation_diagnostic, dict)
-                    or set(validation_diagnostic) != {"category", "position", "reason"}
-                    or validation_diagnostic["category"] not in {"associations", "facts", "requests", "temporal_facts"}
-                    or type(validation_diagnostic["position"]) is not int or not 0 <= validation_diagnostic["position"] < 20
-                    or validation_diagnostic["reason"] not in allowed_reasons):
-                    raise DomainError("invalid_input", "Invalid bounded validation diagnostic")
+                from .validation import validate_diagnostic
+                validate_diagnostic(validation_diagnostic)
                 tx.connection.execute("INSERT INTO understand_validation_diagnostics VALUES(?,?)", (analysis_id, encode(validation_diagnostic)))
             if validated:
                 for category in ("associations", "facts", "requests", "temporal_facts"):
@@ -293,6 +298,7 @@ class UnderstandingOperations:
                         comparison = digest({"category": category, "sources": refs, "kind": content["kind"], "target": content.get("target_id")})
                         tx.connection.execute("INSERT INTO understand_findings VALUES(?,?,?,?,?,?,?)",
                                               (finding_id, analysis_id, category, position, encode(content), lineage, comparison))
+            tx.connection.execute("DELETE FROM understand_stage_checkpoints WHERE input_key=?", (key,))
             if held:
                 tx.connection.execute("UPDATE understand_claims SET status=?,analysis_id=? WHERE input_key=?", (status, analysis_id, key))
             tx.record("understanding", analysis_id, "record_analysis", None,

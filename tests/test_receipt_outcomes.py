@@ -103,17 +103,15 @@ class ReceiptOutcomeTest(unittest.TestCase):
         value = next(f['properties']['value'] for f in facts if f['properties']['kind']['enum'] == ['outcome'])
         self.assertEqual(value['type'], 'object')
         self.assertEqual(set(value['properties']['outcome']['enum']), {'accepted', 'rejected', 'withdrawn', 'stopped_pursuing'})
-        captured = {}
-        def generate(messages, **kwargs):
-            captured['prompt'] = messages[0]['content']
-            result = self.output(self.context)
-            result['facts'] = result['facts'][:1]
-            return SimpleNamespace(text=json.dumps(result), usage={})
-        provider = SimpleNamespace(max_input_tokens=200000, count_tokens_upper_bound=lambda text: len(text)//3, generate=generate)
+        from tests.fixtures.mail_provider import StagedMailProvider
+        value = self.output(self.context)
+        value['facts'] = value['facts'][:1]
+        provider = StagedMailProvider(value)
         result = SharedAnalyzer(provider).analyze(self.context)
         self.assertEqual([f['kind'] for f in result['facts']], ['submission'])
-        self.assertIn('adds no separate status, progress, contact, assessment, or outcome', captured['prompt'])
-        self.assertIn('independent, explicit applicant request', captured['prompt'])
+        prompt = provider.calls[0][0][0]['content']
+        self.assertIn('adds no separate status, progress, contact, assessment, or outcome', prompt)
+        self.assertIn('independent, explicit applicant request', prompt)
 
     def test_terminal_outcomes_remain_reviewable_and_unknowns_have_no_recipe(self):
         descriptor = {'versions': {}, 'context': {'closure_previews': {self.app['id']: {'expected_version': 1, 'expected_records': {}}}}}

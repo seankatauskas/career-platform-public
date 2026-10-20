@@ -1237,8 +1237,10 @@ def make_handler(
             self, exc: Exception, session: _Session, new_session: bool
         ) -> None:
             from .commands import DomainError
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                return  # The client left; a second error response cannot reach it.
             if isinstance(exc, DomainError):
-                status = 403 if exc.code == "not_authorized" else 404 if exc.code == "not_found" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved", "needs_reconciliation"} else 400
+                status = 503 if exc.code == 'database_busy' else 403 if exc.code == "not_authorized" else 404 if exc.code == "not_found" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved", "needs_reconciliation"} else 400
                 self._json({"error": exc.code, "message": str(exc)}, status=status, session=session, new_session=new_session, exact_text=True)
             elif isinstance(exc, _RequestTooLarge):
                 self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large", session, new_session)
@@ -1264,8 +1266,10 @@ def make_handler(
 
         def _handle_extension_exception(self, exc: Exception) -> None:
             from .commands import DomainError
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                return
             if isinstance(exc, DomainError):
-                status = 403 if exc.code == "not_authorized" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved"} else 400
+                status = 503 if exc.code == 'database_busy' else 403 if exc.code == "not_authorized" else 409 if exc.code in {"version_conflict", "idempotency_conflict", "dependency_unresolved"} else 400
                 self._json({"error": exc.code, "message": str(exc)}, status=status, exact_text=True)
             elif isinstance(exc, _RequestTooLarge):
                 self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")

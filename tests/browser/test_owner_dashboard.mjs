@@ -108,8 +108,9 @@ try {
   await page.locator('#shortlist').getByText('A role to explore.', {exact: true}).waitFor();
   assert.equal(new URL(page.url()).pathname, '/');
   await page.locator('.sidebar a[href="#review"]').click();
+  await page.locator('.review-queue-item').filter({hasText:'Other Company'}).waitFor();
+  await page.locator('.review-queue-item').filter({hasText:'example-labs'}).click();
   await page.locator('#attention-list').getByText('Complete the design exercise', {exact: true}).first().waitFor();
-  await page.locator('#attention-list').getByText('Review the product team.', {exact: true}).first().waitFor();
   await page.screenshot({path: path.join(output, 'review.png'), fullPage: true});
   const proposal = page.locator('#attention-list .review-card').filter({hasText: 'Complete the design exercise'});
   await proposal.getByRole('button', {name: 'Accept change', exact: true}).click();

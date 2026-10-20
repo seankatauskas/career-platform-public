@@ -16,6 +16,8 @@ class CreateApplicationFromReview:
     employer: str
     title: str
     catalog_id: str = None
+    search_employer: str = None
+    search_title: str = None
 
 
 class ApplicationDiscovery:
@@ -78,6 +80,7 @@ class ApplicationDiscovery:
         matches = self._matches(con, fields)
         result = {**fields, **matches, 'can_create': matches['complete'] and not matches['applications'] and not matches['jobs']}
         result['match_digest'] = digest({'group': group['preview_digest'], 'source': group['source'], **result})
+        result['catalog_choices'] = [self._catalog_choice(group, fields, job) for job in matches['jobs']]
         if result['can_create']:
             result['reason'] = 'No plausible existing role found. Create a Tracking application and attach this email. Proposed status changes and tasks remain in Review.'
         elif matches['applications'] or matches['jobs']:
@@ -86,6 +89,15 @@ class ApplicationDiscovery:
             result['reason'] = 'The application or jobs catalog check is incomplete. Creation is unavailable until both can be checked.'
         return result
 
+    @staticmethod
+    def _catalog_choice(group, fields, row):
+        choice = {'id': f"catalog:{row['ats']}:{row['id']}", 'job': {
+            'ats': row['ats'], 'source_id': row['id'], 'employer': row['company'],
+            'title': row['title'], 'location': row.get('location'),
+            'job_url': row.get('jobUrl'), 'closed_at': row.get('closed_at')}}
+        choice['match_digest'] = digest({'group': group['preview_digest'], 'search': fields, 'choice': choice})
+        return choice
+
     def preview(self, *, group_id, expected_digest, employer=None, title=None):
         with self.runtime.executor.read() as con:
             group, source = self._source(con, group_id, expected_digest)
@@ -93,7 +105,7 @@ class ApplicationDiscovery:
         content = self.runtime.mail_reader.read_review_source(source['id'], source['revision'], source['source_sha256'])
         fields = self._identity(employer, title) if employer is not None or title is not None else explicit_identity('', content.get('text') or '')
         if not content.get('coverage', {}).get('complete') or not all(fields.values()):
-            return {**fields, 'can_create': False, 'complete': False, 'applications': [], 'jobs': [],
+            return {**fields, 'can_create': False, 'complete': False, 'applications': [], 'jobs': [], 'catalog_choices': [],
                     'reason': 'Read the email and confirm its employer and role. Complete source evidence is required before suggesting creation.'}
         fields = self._identity(**fields)
         with self.runtime.executor.read() as con:
@@ -107,8 +119,16 @@ class ApplicationDiscovery:
             raise DomainError('not_authorized', 'Application discovery requires an exact human decision')
         group, source = self._source(tx.connection, value.group_id, value.expected_digest)
         fields = self._identity(value.employer, value.title)
+        if value.catalog_id is None and (value.search_employer is not None or value.search_title is not None):
+            raise DomainError('invalid_input', 'Catalog search identity requires a selected role')
         if value.catalog_id is not None:
-            candidate = next((c for c in group.get('catalog_candidates', []) if c['id'] == value.catalog_id), None)
+            if value.search_employer is not None or value.search_title is not None:
+                search = self._identity(value.search_employer, value.search_title)
+                matches = self._matches(tx.connection, search)
+                choices = [self._catalog_choice(group, search, row) for row in matches['jobs']]
+            else:
+                choices = group.get('catalog_candidates', [])
+            candidate = next((c for c in choices if c['id'] == value.catalog_id), None)
             if candidate is None or candidate['match_digest'] != value.expected_match_digest:
                 raise DomainError('version_conflict', 'The catalog choice changed. Refresh this review.')
             job = candidate['job']
@@ -116,7 +136,7 @@ class ApplicationDiscovery:
                 raise DomainError('invalid_input', 'The selected catalog identity does not match the reviewed role')
             try:
                 current = self.runtime.job_catalog.posting_summaries([(job['ats'], job['source_id'])]).get((job['ats'], job['source_id']))
-            except (ContractError, sqlite3.Error, OSError):
+            except (AttributeError, ContractError, sqlite3.Error, OSError):
                 current = None
             if not current or any(current.get(column) != job.get(field) for column, field in
                                   (('company', 'employer'), ('title', 'title'), ('location', 'location'), ('jobUrl', 'job_url'))):

@@ -1,5 +1,6 @@
 """Legacy and replacement writers cannot share an installation database."""
 import hashlib
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import stat
@@ -14,7 +15,7 @@ from tests.test_job_search_ledger import start
 
 
 def snapshot(path):
-    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as con:
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as con:
         schema = con.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
         counts = {name: con.execute('SELECT count(*) FROM "' + name.replace('"', '""') + '"').fetchone()[0]
                   for kind, name, _, _ in schema if kind == "table"}
@@ -35,7 +36,10 @@ class IsolationTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "candidate database"):
                 connect(path)
             self.assertEqual(snapshot(path), before)
-            self.assertFalse(Path(str(path) + "-wal").exists())
+            # Read-only SQLite may create an empty WAL/SHM for an existing WAL
+            # database. Legacy rejection must never append committed frames.
+            wal = Path(str(path) + '-wal')
+            self.assertEqual(wal.stat().st_size if wal.exists() else 0, 0)
 
     def test_candidate_rejects_legacy_database_without_changing_schema_or_rows(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -10,7 +10,7 @@ from job_search.application_runtime import ApplicationRuntime
 from job_search.application_transport import HumanApplicationAdapter, AgentApplicationAdapter
 from job_search.application_mail import capture_candidates
 from job_search.applications.review import ReviewService
-from job_search.applications.understanding.analyzer import understanding_schema, _anchor_evidence, SharedAnalyzer, model_payload
+from job_search.applications.understanding.analyzer import understanding_schema, SharedAnalyzer, model_payload
 from job_search.commands import CommandContext, Principal, DomainError
 from job_search.review_migration import apply
 

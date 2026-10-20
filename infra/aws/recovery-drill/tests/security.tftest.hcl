@@ -7,6 +7,14 @@ mock_provider "aws" {
     }
   }
 }
+run "medium_capacity_rehearsal" {
+  command = plan
+  variables { instance_type = "t3.medium" }
+  assert {
+    condition     = aws_instance.drill.instance_type == "t3.medium" && data.aws_instance.source.instance_type == "t3.large" && aws_instance.drill.credit_specification[0].cpu_credits == "standard"
+    error_message = "Use a Standard medium for the rehearsal without changing the source host."
+  }
+}
 variables {
   source_instance_id = "i-0123456789abcdef0"
   backup_bucket      = "career-platform-test-backups"
@@ -16,7 +24,7 @@ variables {
 run "isolated_replacement" {
   command = plan
   assert {
-    condition     = aws_instance.drill.ami == data.aws_instance.source.ami && aws_instance.drill.subnet_id == data.aws_instance.source.subnet_id && aws_instance.drill.iam_instance_profile == data.aws_instance.source.iam_instance_profile
+    condition     = aws_instance.drill.instance_type == data.aws_instance.source.instance_type && aws_instance.drill.ami == data.aws_instance.source.ami && aws_instance.drill.subnet_id == data.aws_instance.source.subnet_id && aws_instance.drill.iam_instance_profile == data.aws_instance.source.iam_instance_profile
     error_message = "Reuse the reviewed host configuration without changing production infrastructure."
   }
   assert {

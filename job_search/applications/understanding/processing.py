@@ -143,8 +143,10 @@ def record_projection(tx, analysis, *, status, failure_code=None):
     complete = analysis["descriptor"]["coverage"].get("complete") is True
     unresolved = analysis["output"] and analysis["output"].get("relevance") == "uncertain" and not tx.connection.execute(
         "SELECT 1 FROM understand_proposals WHERE analysis_id=? AND status IN ('pending','applied') AND json_array_length(blockers)=0 LIMIT 1", (analysis["id"],)).fetchone()
-    state = "succeeded" if cancelled_refresh or status == "succeeded" and (complete or unrelated) and not unresolved else "open"
-    code = None if cancelled_refresh else failure_code if status == "failed" else "relevance_uncertain" if unresolved else None if state == "succeeded" else "incomplete_coverage"
+    diagnostic = tx.connection.execute("SELECT diagnostic FROM understand_validation_diagnostics WHERE analysis_id=?", (analysis["id"],)).fetchone()
+    partial = bool(diagnostic and json.loads(diagnostic[0]).get("issues"))
+    state = "succeeded" if cancelled_refresh or status == "succeeded" and (complete or unrelated) and not unresolved and not partial else "open"
+    code = None if cancelled_refresh else failure_code if status == "failed" else "partial_analysis" if partial else "relevance_uncertain" if unresolved else None if state == "succeeded" else "incomplete_coverage"
     with tx.scope("understanding"):
         for source in analysis["descriptor"]["sources"]:
             issue = for_source(tx.connection, source["source_id"], source["revision"])

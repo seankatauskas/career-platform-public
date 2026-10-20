@@ -92,4 +92,5 @@ jobs:
       - run: terraform -chdir=infra/aws/recovery-drill init -backend=false -input=false
       - run: terraform -chdir=infra/aws/recovery-drill validate
       - run: terraform -chdir=infra/aws/recovery-drill test
+      - run: python3 -m tests.test_instance_size_plan
       - run: python3 infra/aws/tests/test_bootstrap.py

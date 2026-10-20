@@ -56,6 +56,48 @@ class ApplicationGatewayTest(unittest.TestCase):
     def save(self):
         return self.gateway.start_application(JobSnapshot(ats="greenhouse", job_id="12345", family_id="", company_slug="acme", title="Engineer", employer="Acme", job_url=URL), RecommendationProvenance(), MutationContext("save", "user", "dashboard", "owner"))["application"]
 
+    def test_database_pressure_returns_recoverable_http_response(self):
+        from unittest.mock import patch
+        import sqlite3
+        holder = sqlite3.connect(self.runtime.executor.path)
+        self.addCleanup(holder.close)
+        holder.execute('BEGIN IMMEDIATE')
+        payload = {'job_source': {'source': 'greenhouse', 'source_id': '12345'}}
+        headers = {'Idempotency-Key': 'busy-command'}
+        with patch('job_search.commands.transactions.BUSY_TIMEOUT_SECONDS', .01):
+            status, _, value = self.request('POST', '/api/v1/application-commands/save_job', payload, trusted=True, extra=headers)
+        self.assertEqual(status, 503)
+        self.assertEqual(value['error'], 'database_busy')
+        holder.rollback()
+        first = self.request('POST', '/api/v1/application-commands/save_job', payload, trusted=True, extra=headers)
+        second = self.request('POST', '/api/v1/application-commands/save_job', payload, trusted=True, extra=headers)
+        self.assertEqual(first[0], 200)
+        self.assertEqual(first[2], second[2])
+
+    def test_disconnected_clients_do_not_receive_a_second_error_response(self):
+        from unittest.mock import Mock
+        handler = object.__new__(self.server.RequestHandlerClass)
+        handler._error, handler._json = Mock(), Mock()
+        for error in (BrokenPipeError(), ConnectionResetError()):
+            handler._handle_exception(error, None, False)
+            handler._handle_extension_exception(error)
+        handler._error.assert_not_called()
+        handler._json.assert_not_called()
+
+    def test_legacy_read_lock_is_a_service_busy_response(self):
+        from unittest.mock import patch
+        import sqlite3
+        holder = sqlite3.connect(self.runtime.executor.path)
+        self.addCleanup(holder.close)
+        holder.execute('PRAGMA journal_mode=DELETE')
+        holder.execute('BEGIN EXCLUSIVE')
+        with patch('job_search.commands.transactions.BUSY_TIMEOUT_SECONDS', .01):
+            status, _, value = self.request('GET', '/api/v1/health')
+        self.assertEqual(status, 503)
+        self.assertEqual(value['error'], 'database_busy')
+        holder.rollback()
+        self.assertEqual(self.request('GET', '/api/v1/health')[0], 200)
+
     def test_real_dashboard_commands_keep_auth_and_never_touch_legacy_lifecycle(self):
         path = "/api/v1/application-commands/save_job"
         payload = {"job_source": {"source": "greenhouse", "source_id": "12345"}}

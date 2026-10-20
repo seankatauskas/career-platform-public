@@ -303,7 +303,19 @@ class ApplicationRuntime:
                     return self.executor.run(context_for("analyze_observation",uuid.uuid4().hex),"analyze_observation",
                         {"claim":claim},lambda tx:self.understanding.renew_analysis(tx,claim=claim))["renewed"]
                 with _analysis_heartbeat(renew_claim, heartbeat):
-                    output=analyzer.analyze(context)
+                    if hasattr(analyzer, "analyze_with_checkpoints"):
+                        from .applications.understanding import checkpoints
+                        def checkpoint(request_key, result=None):
+                            if result is None:
+                                with self.executor.read() as connection:
+                                    return checkpoints.read(connection, claim, request_key, self.executor.clock())
+                            return self.executor.run(context_for("record_analysis", claim["token"] + ":" + request_key),
+                                "record_analysis", {"claim": claim, "request_key": request_key},
+                                lambda tx: checkpoints.write(tx, claim, request_key, result))
+                        output=analyzer.analyze_with_checkpoints(context, checkpoint)
+                    else:
+                        output=analyzer.analyze(context)
+                    validation_diagnostic=getattr(output,"validation_diagnostic",None)
                 from .applications.understanding.contracts import validate_analysis
                 validate_analysis(output,context)
             except UsageDeferred as exc:
@@ -316,6 +328,8 @@ class ApplicationRuntime:
                         reason_code=exc.reason_code,retry_at=exc.retry_at))
                 raise
             except DomainError as exc:
+                if exc.code == 'database_busy':
+                    raise
                 validation_diagnostic=getattr(exc,"validation_diagnostic",None)
                 output=None
                 failure=exc.code if exc.code in {"incomplete_coverage", "context_budget_exceeded", "invalid_json",

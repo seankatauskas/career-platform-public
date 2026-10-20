@@ -170,6 +170,153 @@ class DiscoveryTest(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(len(result['jobs']), 20)
 
+    def catalog_command(self, source):
+        preview, command = self.preview(source, employer='Northwind', title='Platform Engineer')
+        self.assertFalse(preview['can_create'])
+        choice = preview['catalog_choices'][0]
+        return {**command, 'catalog_id': choice['id'], 'expected_match_digest': choice['match_digest'],
+                'employer': choice['job']['employer'], 'title': choice['job']['title'],
+                'search_employer': preview['employer'], 'search_title': preview['title']}
+
+    def add_catalog_role(self, identity='role-one'):
+        with sqlite3.connect(self.catalog.jobs_db) as con:
+            con.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)',
+                ('ashby', identity, 'Northwind Inc.', 'Senior Platform Engineer',
+                 'https://example.test/jobs/' + identity, '2025-01-01'))
+
+    def test_searched_catalog_role_can_be_selected_without_analysis_candidate(self):
+        source, original = self.message()
+        self.add_catalog_role()
+        self.assertEqual(self.group(source)['catalog_candidates'], [])
+        command = self.catalog_command(source)
+        self.assertEqual(self.runtime.queries.list_applications()['items'], [])
+        result = self.create(command)
+        self.assertEqual(result, self.create(command))
+        workspace = self.runtime.queries.workspace(result['application_id'])
+        self.assertEqual(workspace['progress']['stage'], 'tracking')
+        for kind in ('submissions', 'receipts', 'tasks', 'progress'):
+            self.assertEqual(workspace['records'][kind]['items'], [])
+        with self.runtime.executor.read() as con:
+            job = self.runtime.applications.get_job(con, result['job_id'])
+            self.assertEqual(job['sources'], [{'source': 'ashby', 'source_id': 'role-one'}])
+            self.assertEqual(job['recorded_snapshot']['job_url'], 'https://example.test/jobs/role-one')
+            self.assertEqual(self.runtime.correspondence.association(con, source['id'])['application_id'], result['application_id'])
+            self.assertEqual(self.runtime.understanding.get(con, original['id'])['status'], 'superseded')
+            self.assertTrue(result['pending_proposals'])
+            for identifier in result['pending_proposals']:
+                self.assertEqual(self.runtime.understanding.get(con, identifier)['status'], 'pending')
+
+    def test_catalog_selection_reuses_late_application_by_exact_posting_identity(self):
+        source, _ = self.message()
+        self.add_catalog_role()
+        command = self.catalog_command(source)
+        existing = self.human.command('save_job', {'job_source': {
+            'source': 'ashby', 'source_id': 'role-one', 'employer': 'Northwind Inc.',
+            'title': 'Senior Platform Engineer'}}, 'existing-catalog-role')
+        result = self.create(command)
+        self.assertEqual(result['application_id'], existing['id'])
+        self.assertEqual(len(self.runtime.queries.list_applications()['items']), 1)
+
+    def test_catalog_selection_binds_search_identity_and_selected_posting(self):
+        source, _ = self.message()
+        self.add_catalog_role()
+        self.add_catalog_role('role-two')
+        command = self.catalog_command(source)
+        variants = [dict(command, catalog_id='catalog:ashby:role-two'),
+                    dict(command, search_employer='Another employer'),
+                    dict(command, search_title='A different role'),
+                    dict(command, employer='Changed employer'),
+                    dict(command, search_title=None)]
+        for index, value in enumerate(variants):
+            with self.subTest(value=value), self.assertRaises(DomainError):
+                self.create(value, 'tampered-' + str(index))
+        self.assertEqual(self.runtime.queries.list_applications()['items'], [])
+
+    def test_catalog_selection_rejects_changed_or_removed_posting(self):
+        for field, value in [('title', 'Changed role'), ('jobUrl', 'https://example.test/changed'),
+                             ('closed_at', None), ('company', 'Different company')]:
+            with self.subTest(field=field):
+                source, _ = self.message('changed-' + field)
+                with sqlite3.connect(self.catalog.jobs_db) as con:
+                    con.execute('DELETE FROM jobs')
+                self.add_catalog_role()
+                command = self.catalog_command(source)
+                with sqlite3.connect(self.catalog.jobs_db) as con:
+                    con.execute(f'UPDATE jobs SET {field}=?', (value,))
+                with self.assertRaises(DomainError):
+                    self.create(command, 'stale-' + field)
+        self.assertEqual(self.runtime.queries.list_applications()['items'], [])
+
+    def test_catalog_selection_rolls_back_application_when_link_fails(self):
+        source, original = self.message()
+        self.add_catalog_role()
+        command = self.catalog_command(source)
+        with patch.object(self.runtime.workflows, 'review_changes', side_effect=DomainError('version_conflict', 'Link failed')):
+            with self.assertRaises(DomainError):
+                self.create(command)
+        self.assertEqual(self.runtime.queries.list_applications()['items'], [])
+        with self.runtime.executor.read() as con:
+            self.assertIsNone(self.runtime.correspondence.association(con, source['id']))
+            self.assertEqual(self.runtime.understanding.get(con, original['id'])['status'], 'pending')
+
+    def test_catalog_preview_retains_location_and_rejects_location_change(self):
+        source, _ = self.message()
+        with sqlite3.connect(self.catalog.jobs_db) as con:
+            con.execute('ALTER TABLE jobs ADD COLUMN location TEXT')
+            con.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?,?)',
+                ('ashby', 'located-role', 'Northwind', 'Platform Engineer',
+                 'https://example.test/job', None, 'Chicago'))
+        preview, _ = self.preview(source)
+        self.assertEqual(preview['catalog_choices'][0]['job']['location'], 'Chicago')
+        command = self.catalog_command(source)
+        with sqlite3.connect(self.catalog.jobs_db) as con:
+            con.execute('UPDATE jobs SET location=?', ('New York',))
+        with self.assertRaises(DomainError):
+            self.create(command)
+
+    def test_catalog_choice_flows_through_dashboard_gateway(self):
+        from job_search.application_gateway import ApplicationGateway
+        from job_search.service import JobSearchLedger
+        source, _ = self.message()
+        self.add_catalog_role()
+        gateway = ApplicationGateway(self.runtime, JobSearchLedger(Path(self.tmp.name) / 'gateway.db'), catalog=self.catalog)
+        group = self.group(source)
+        matched, result = gateway.http_query('/api/v1/application-owner/discovery-preview', {
+            'group_id': [group['id']], 'expected_digest': [group['preview_digest']],
+            'employer': ['Northwind'], 'title': ['Platform Engineer']})
+        self.assertTrue(matched)
+        choice = result['catalog_choices'][0]
+        command = {'group_id': group['id'], 'expected_digest': group['preview_digest'],
+                   'expected_match_digest': choice['match_digest'], 'catalog_id': choice['id'],
+                   'employer': choice['job']['employer'], 'title': choice['job']['title'],
+                   'search_employer': result['employer'], 'search_title': result['title']}
+        applied = gateway.command('create_application_from_review', command, 'catalog-gateway', 'authenticated-owner')
+        self.assertEqual(applied['status'], 'applied')
+        self.assertTrue(applied['pending_proposals'])
+
+    def test_review_source_subject_is_verified_without_an_extra_archive_read(self):
+        import hashlib
+        from job_search.mail.sanitizer import sanitize_mail
+        text = sanitize_mail('Northwind application update', 'Thank you for applying.').text
+        self.bodies['header'] = text
+        source = self.runtime.command(CommandContext(Principal('mail', 'worker', {'record_message'}), 'header', 'inferred'),
+            'record_message', {'account_id': 'personal', 'provider_message_id': 'header', 'source_version': 1,
+                'direction': 'incoming', 'authored_text': text, 'archive_ref': 'header',
+                'metadata': {'subject_hash': hashlib.sha256(b'Northwind application update').hexdigest()}})
+        archive = self.runtime.mail_reader.archive
+        with patch.object(archive, 'read_message', wraps=archive.read_message) as read:
+            result = self.runtime.mail_reader.read_review_source(source['id'], source['revision'], source['source_sha256'])
+        self.assertEqual(result['subject'], 'Northwind application update')
+        self.assertEqual(read.call_count, 1)
+        # Unstructured fixtures or headers without preserved hash never acquire
+        # an invented display subject.
+        other, _ = self.message('no-header')
+        result = self.runtime.mail_reader.read_review_source(other['id'], other['revision'], other['source_sha256'])
+        self.assertIsNone(result['subject'])
+        self.runtime.mail_reader.allowed_accounts = frozenset()
+        with self.assertRaises(DomainError):
+            self.runtime.mail_reader.read_review_source(source['id'], source['revision'], source['source_sha256'])
+
     def test_ambiguous_identity_is_manual_and_unavailable_catalog_stays_blocked(self):
         source, _ = self.message(text='Please contact our recruiting team.')
         result, _ = self.preview(source)

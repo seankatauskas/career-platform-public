@@ -9,6 +9,14 @@ class DomainError(ValueError):
         super().__init__(message)
 
 
+class DatabaseBusy(DomainError):
+    """A rolled-back local command can safely retry with its original key."""
+    retryable = True
+
+    def __init__(self):
+        super().__init__('database_busy', 'Application data is busy. Please retry the same action shortly.')
+
+
 @dataclass(frozen=True)
 class Principal:
     actor_id: str

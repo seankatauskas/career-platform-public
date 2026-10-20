@@ -1,9 +1,11 @@
 """Command invariants exercised through the real SQLite transaction boundary."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from job_search.commands import CommandContext, CommandExecutor, Delegation, DomainError, Principal, digest
 
@@ -40,6 +42,99 @@ class CommandsTest(unittest.TestCase):
         with self.executor.read() as con:
             self.assertEqual(con.execute("SELECT COUNT(*) FROM command_history").fetchone()[0],1)
             self.assertEqual(con.execute("SELECT COUNT(*) FROM command_work").fetchone()[0],1)
+
+    def test_review_snapshot_does_not_block_command_commit(self):
+        with self.executor.read() as snapshot:
+            self.assertEqual(snapshot.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+            self.assertEqual(snapshot.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 0)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(self.executor.run, self.ctx(), 'add_note', {}, self.write).result(timeout=3)
+            self.assertEqual(result['text'], 'exact e\u0301')
+            self.assertEqual(snapshot.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 0)
+        with self.executor.read() as current:
+            self.assertEqual(current.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 1)
+
+    def test_busy_writer_rolls_back_and_same_key_retries_exactly_once(self):
+        calls = []
+        def command(tx):
+            calls.append(True)
+            return self.write(tx)
+        holder = sqlite3.connect(self.executor.path)
+        self.addCleanup(holder.close)
+        holder.execute('BEGIN IMMEDIATE')
+        with patch('job_search.commands.transactions.BUSY_TIMEOUT_SECONDS', .01):
+            with self.assertRaises(DomainError) as caught:
+                self.executor.run(self.ctx(), 'add_note', {}, command)
+            with self.assertRaises(DomainError) as bridge:
+                self.executor.complete_work('pending-work', owner='applications', kind='note_added')
+        self.assertEqual(caught.exception.code, 'database_busy')
+        self.assertEqual(bridge.exception.code, 'database_busy')
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(calls, [])
+        holder.rollback()
+        first = self.executor.run(self.ctx(), 'add_note', {}, command)
+        self.assertEqual(self.executor.run(self.ctx(), 'add_note', {}, command), first)
+        self.assertEqual(calls, [True])
+
+    def test_strict_startup_preserves_journal_and_migration_enables_wal(self):
+        self.executor.run(self.ctx(), 'add_note', {}, self.write)
+        con = sqlite3.connect(self.executor.path)
+        con.execute('PRAGMA journal_mode=DELETE')
+        con.close()
+        schemas = {k:v for k,v in self.executor.schemas.items() if k not in {'commands', 'installation'}}
+        CommandExecutor(self.executor.path, schemas, require_schema=True)
+        con = sqlite3.connect(self.executor.path)
+        self.assertEqual(con.execute('PRAGMA journal_mode').fetchone()[0], 'delete')
+        con.close()
+        migrated = CommandExecutor(self.executor.path, schemas)
+        with migrated.read() as con:
+            self.assertEqual(con.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 1)
+
+    def test_legacy_commit_contention_rolls_back_receipt_and_effect(self):
+        con = sqlite3.connect(self.executor.path)
+        con.execute('PRAGMA journal_mode=DELETE')
+        con.close()
+        # Some macOS system SQLite builds return SQLITE_IOERR for a read-only
+        # file handle in DELETE mode. A query-only reader exercises the commit
+        # conflict on those builds as well as the production SQLite version.
+        with closing(sqlite3.connect(self.executor.path, isolation_level=None)) as snapshot:
+            snapshot.execute('PRAGMA query_only=ON')
+            snapshot.execute('BEGIN')
+            snapshot.execute('SELECT COUNT(*) FROM app_notes').fetchone()
+            with patch('job_search.commands.transactions.BUSY_TIMEOUT_SECONDS', .01):
+                with self.assertRaises(DomainError) as caught:
+                    self.executor.run(self.ctx(), 'add_note', {}, self.write)
+            self.assertEqual(caught.exception.code, 'database_busy')
+            self.assertEqual(snapshot.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 0)
+        with self.executor.read() as current:
+            self.assertEqual(current.execute('SELECT COUNT(*) FROM command_receipts').fetchone()[0], 0)
+        self.executor.run(self.ctx(), 'add_note', {}, self.write)
+        with self.executor.read() as current:
+            self.assertEqual(current.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 1)
+
+    def test_database_contention_is_retryable_worker_evidence(self):
+        from job_search.commands import DatabaseBusy
+        from job_search.worker import _failure_classification
+        self.assertEqual(_failure_classification(DatabaseBusy()), ('retryable', 1, False))
+
+    def test_exclusive_legacy_lock_reports_retryable_reads(self):
+        holder = sqlite3.connect(self.executor.path)
+        self.addCleanup(holder.close)
+        holder.execute('PRAGMA journal_mode=DELETE')
+        holder.execute('BEGIN EXCLUSIVE')
+        with patch('job_search.commands.transactions.BUSY_TIMEOUT_SECONDS', .01):
+            with self.assertRaises(DomainError) as caught:
+                with self.executor.read():
+                    self.fail('Exclusive lock must prevent a snapshot')
+        self.assertEqual(caught.exception.code, 'database_busy')
+        holder.rollback()
+        with self.executor.read() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM app_notes').fetchone()[0], 0)
+
+    def test_non_lock_sql_errors_are_not_classified_as_retryable(self):
+        with self.assertRaises(sqlite3.OperationalError):
+            self.executor.run(self.ctx(), 'add_note', {}, lambda tx: tx.connection.execute('SELECT * FROM missing_table'))
 
     def test_response_encoding_rolls_back_everything(self):
         def broken(tx):

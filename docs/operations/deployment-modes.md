@@ -120,6 +120,15 @@ check with `--offline`: it rejects nonempty WAL/rollback journals and nonregular
 databases/sidecars before using immutable reads, without creating sidecars. Never
 use `--offline` against a live application.
 
+Application-owner bootstrap and explicit migration enable WAL journaling so review
+snapshots can coexist with worker and user commits. Strict service startup preserves
+the installed journal policy. Owner connections bound lock waits to two seconds;
+contention rolls back the command and returns `database_busy` (HTTP 503). Retry a
+user action with its original idempotency key. Workers classify this as retryable
+storage contention, never as malformed model output. Snapshot and recovery retain
+their existing stopped-writer and sidecar checks; do not copy or remove live WAL
+files to resolve contention.
+
 A failed live precheck selects migration mode before cutover. A failed stopped
 recheck instead reverts/resumes the predecessor without snapshot or initialization;
 it does not attempt a new migration after selecting the compatible procedure.

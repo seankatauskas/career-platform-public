@@ -288,3 +288,17 @@ recovery time, or cost. Live acceptance requires a reviewed AWS plan and apply,
 SSM access, a failed application metadata-access probe from both network modes,
 private dashboard access, deployment/rollback, alarm delivery, and a replacement
 host restore drill. Record those results before making AWS reliability claims.
+
+## Existing-host capacity resize
+
+Use `scope=instance-size` in `aws-terraform.yml` after updating the production
+`AWS_TERRAFORM_VARS_JSON` instance_type to the reviewed t3.medium or t3.large.
+Run plan first. This scope preserves installed bootstrap data and permits only
+an in-place instance_type change on the configured host with Standard credits.
+The saved-plan guard rejects replacement, disk/network changes and dependency
+mutations. Pending bootstrap drift remains for a separate replacement decision.
+Before apply, retain a verified backup, drain active jobs/reviews and pause the
+application through job-search-ops. Terraform stops and restarts the same EC2
+instance; activate only after the data mount, metadata firewall and SSM recover.
+Verify services, schema, credit mode/balance and original disk IDs. Return to large
+through the same reviewed scope if medium acceptance fails. Retain private receipts.

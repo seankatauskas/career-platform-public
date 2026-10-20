@@ -11,7 +11,17 @@ from typing import Mapping
 import uuid
 
 from .authorization import authorize
-from .context import DomainError
+from .context import DatabaseBusy, DomainError
+
+
+BUSY_TIMEOUT_SECONDS = 2
+
+
+def _raise_if_busy(exc):
+    code = getattr(exc, 'sqlite_errorcode', None)
+    if (code is not None and (code & 255) in {5, 6}) or (
+            code is None and str(exc) in {'database is locked', 'database table is locked'}):
+        raise DatabaseBusy() from None
 
 
 SCHEMA = """
@@ -171,26 +181,43 @@ class CommandExecutor:
                 con.executescript(sql)
                 con.execute("INSERT INTO command_schema_versions VALUES(?,?)",(owner,checksum))
             con.commit()
+            # Journal policy changes belong to bootstrap/explicit migration,
+            # never the read-only production startup branch above. WAL lets a
+            # review snapshot coexist with committed worker/user commands.
+            if con.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() != 'wal':
+                raise RuntimeError('Application database requires WAL journaling')
             self._installation_id=self.installation_identity(con)
 
     def _connect(self, readonly=False):
         if readonly:
-            con = sqlite3.connect(self.path.resolve().as_uri()+"?mode=ro",uri=True,isolation_level=None)
-            con.execute("PRAGMA query_only=ON")
+            con = sqlite3.connect(self.path.resolve().as_uri()+"?mode=ro",uri=True,isolation_level=None,timeout=BUSY_TIMEOUT_SECONDS)
         else:
             # Disable statement caching: an authorization check must run in each owner scope.
-            con = sqlite3.connect(str(self.path),timeout=30,isolation_level=None,cached_statements=0)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys=ON")
-        if hasattr(self,"_installation_id"):
-            try:
+            con = sqlite3.connect(str(self.path),timeout=BUSY_TIMEOUT_SECONDS,isolation_level=None,cached_statements=0)
+        try:
+            con.execute('PRAGMA query_only=ON' if readonly else 'PRAGMA synchronous=FULL')
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA foreign_keys=ON")
+            if hasattr(self,"_installation_id"):
                 identity=con.execute("SELECT identity FROM installation_identity WHERE singleton=1").fetchone()
                 if identity is None or identity[0]!=self._installation_id:
                     raise DomainError("version_conflict","Application database identity changed")
-            except Exception:
-                con.close()
-                raise
+        except Exception as exc:
+            con.close()
+            if isinstance(exc, sqlite3.OperationalError):
+                _raise_if_busy(exc)
+            raise
         return con
+
+    @contextmanager
+    def _write_connection(self):
+        with closing(self._connect()) as con:
+            try:
+                yield con
+            except sqlite3.OperationalError as exc:
+                con.rollback()
+                _raise_if_busy(exc)
+                raise
 
     @contextmanager
     def read(self):
@@ -198,6 +225,9 @@ class CommandExecutor:
         try:
             con.execute("BEGIN")
             yield con
+        except sqlite3.OperationalError as exc:
+            _raise_if_busy(exc)
+            raise
         finally:
             con.rollback()
             con.close()
@@ -231,8 +261,10 @@ class CommandExecutor:
                     operation,context.idempotency_key,fingerprint,encoded,now))
             con.commit()
             return json.loads(encoded)
-        except Exception:
+        except Exception as exc:
             con.rollback()
+            if isinstance(exc, sqlite3.OperationalError):
+                _raise_if_busy(exc)
             raise
         finally:
             con.close()
@@ -281,7 +313,7 @@ class CommandExecutor:
         """Operator review only; never releases quarantined work or enables dispatch."""
         if type(expected_restore_revision) is not int or not isinstance(operator, str) or not operator.strip() or not isinstance(reason, str) or not reason.strip():
             raise DomainError("invalid_input", "An explicit restore review is required")
-        with closing(self._connect()) as con:
+        with self._write_connection() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 state = self.restore_status(con)
@@ -303,7 +335,7 @@ class CommandExecutor:
         """Operator composition only. Never registered as an application command/tool."""
         if type(paused) is not bool or type(expected_revision) is not int or not operator or not reason:
             raise DomainError("invalid_input", "Explicit activation decision required")
-        with closing(self._connect()) as con:
+        with self._write_connection() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 state = self.activation_status(con)
@@ -323,7 +355,7 @@ class CommandExecutor:
 
     def complete_work(self, work_id, *, owner, kind):
         """Trusted queue bridge acknowledgment; business effects commit before this call."""
-        with closing(self._connect()) as con:
+        with self._write_connection() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT owner,kind FROM command_work WHERE id=?",(work_id,)).fetchone()
             if row is None or row["owner"] != owner or row["kind"] != kind:

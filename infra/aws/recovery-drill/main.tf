@@ -22,6 +22,24 @@ variable "source_instance_id" {
   }
 }
 variable "backup_bucket" { type = string }
+variable "instance_type" {
+  type        = string
+  default     = null
+  description = "Optional capacity-rehearsal size; null retains the source instance type."
+  validation {
+    condition     = var.instance_type == null || contains(["t3.medium", "t3.large"], var.instance_type)
+    error_message = "Use a reviewed x86 t3.medium or t3.large rehearsal size."
+  }
+}
+variable "cpu_credits" {
+  type        = string
+  default     = "standard"
+  description = "Standard for qualification; unlimited permits explicitly measured cold-setup bursting on the disposable host only."
+  validation {
+    condition     = contains(["standard", "unlimited"], var.cpu_credits)
+    error_message = "Use standard or unlimited CPU credits."
+  }
+}
 variable "release_bucket" { type = string }
 variable "secret_arns" {
   type = map(string)
@@ -51,7 +69,7 @@ resource "aws_ebs_volume" "drill" {
 
 resource "aws_instance" "drill" {
   ami                    = data.aws_instance.source.ami
-  instance_type          = data.aws_instance.source.instance_type
+  instance_type          = coalesce(var.instance_type, data.aws_instance.source.instance_type)
   subnet_id              = data.aws_instance.source.subnet_id
   vpc_security_group_ids = data.aws_instance.source.vpc_security_group_ids
   iam_instance_profile   = data.aws_instance.source.iam_instance_profile
@@ -69,7 +87,7 @@ resource "aws_instance" "drill" {
     encrypted             = true
     delete_on_termination = true
   }
-  credit_specification { cpu_credits = "standard" }
+  credit_specification { cpu_credits = var.cpu_credits }
   user_data_replace_on_change = true
   user_data_base64 = base64gzip(join("\n", [templatefile("${path.module}/../templates/cloud-init.sh.tftpl", {
     region            = var.region

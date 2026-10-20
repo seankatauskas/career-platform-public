@@ -172,16 +172,17 @@ class CatalogUnderstandingTest(unittest.TestCase):
     def test_prompt_explains_catalog_caveat_and_full_evidence(self):
         self.posting()
         self.analyze()
-        captured = {}
-        def generate(messages, **kwargs):
-            captured['instructions'] = messages[0]['content']
-            captured['payload'] = json.loads(messages[1]['content'])
-            return SimpleNamespace(text=json.dumps(self.output), usage={})
-        provider = SimpleNamespace(max_input_tokens=200000, count_tokens_upper_bound=lambda text: len(text)//3, generate=generate)
-        self.assertEqual(SharedAnalyzer(provider).analyze(self.context), self.output)
-        self.assertIn('extension may have missed', captured['instructions'])
-        self.assertIn('never proof', captured['instructions'])
-        self.assertEqual(captured['payload']['sources'][0]['text'], self.bodies['one'])
+        from tests.fixtures.mail_provider import StagedMailProvider
+        provider = StagedMailProvider(self.output)
+        result = SharedAnalyzer(provider).analyze(self.context)
+        self.assertEqual(result['associations'][0]['target_id'], self.output['associations'][0]['target_id'])
+        self.assertIsNone(result['facts'][0]['target_id'])
+        prompt = provider.calls[-1][0][0]['content']
+        self.assertIn('extension may have missed', prompt)
+        self.assertIn('never proof', prompt)
+        payload = json.loads(provider.calls[0][0][1]['content'])
+        self.assertEqual(''.join(b['text'] for b in payload['sources'][0]['blocks']), self.bodies['one'])
+
 
 
 if __name__ == '__main__':

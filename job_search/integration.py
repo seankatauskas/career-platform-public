@@ -194,7 +194,7 @@ class LocalJobCatalog:
             companies = [row[0] for row in con.execute('SELECT DISTINCT company FROM jobs ORDER BY company')
                          if related_employer(employer, row[0] or '')]
             matches = []
-            fields = ','.join(name for name in ('ats', 'id', 'company', 'title', 'jobUrl', 'closed_at') if name in columns)
+            fields = ','.join(name for name in ('ats', 'id', 'company', 'title', 'location', 'jobUrl', 'closed_at') if name in columns)
             for start in range(0, len(companies), 200):
                 batch = companies[start:start + 200]
                 for row in con.execute(f'SELECT {fields} FROM jobs WHERE company IN ({",".join("?" for _ in batch)}) ORDER BY ats,id', batch):

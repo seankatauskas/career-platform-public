@@ -12,9 +12,9 @@ on:
         default: plan
         required: true
       scope:
-        description: 'Full infrastructure, existing health alarms, or monthly budget cost basis'
+        description: 'Full infrastructure or a bounded alarm, budget, or instance-size update'
         type: choice
-        options: [full, health-alarms, monthly-budget]
+        options: [full, health-alarms, monthly-budget, instance-size]
         default: full
         required: true
 
@@ -89,7 +89,7 @@ jobs:
       - run: terraform fmt -check -recursive infra/aws
       - run: terraform -chdir=infra/aws validate
       - name: Preserve installed bootstrap data for the bounded alarm update
-        if: inputs.scope == 'health-alarms'
+        if: inputs.scope == 'health-alarms' || inputs.scope == 'instance-size'
         run: |
           # This temporary override exists only for this targeted run. Full plans
           # continue to report bootstrap drift for a deliberate host replacement.
@@ -108,6 +108,8 @@ jobs:
             targets=('-target=aws_cloudwatch_metric_alarm.operations["health"]' '-target=aws_cloudwatch_metric_alarm.operations["domain"]' '-target=aws_cloudwatch_metric_alarm.operations["domain_stale"]')
           elif [[ "$PLAN_SCOPE" == monthly-budget ]]; then
             targets=('-target=aws_budgets_budget.monthly')
+          elif [[ "$PLAN_SCOPE" == instance-size ]]; then
+            targets=('-target=aws_instance.host')
           elif [[ "$PLAN_SCOPE" != full ]]; then
             echo 'Unsupported infrastructure scope'; exit 1
           fi
@@ -125,6 +127,11 @@ jobs:
           set -euo pipefail
           terraform -chdir=infra/aws show -json "$RUNNER_TEMP/aws.tfplan" | \
             python3 scripts/check-budget-plan.py
+      - name: Reject changes outside the existing instance size
+        if: inputs.scope == 'instance-size'
+        run: |
+          terraform -chdir=infra/aws show -json "$RUNNER_TEMP/aws.tfplan" | \
+            python3 scripts/check-instance-size-plan.py --instance-id "$INSTANCE_ID"
       - name: Apply the saved plan
         if: inputs.operation == 'apply'
         run: terraform -chdir=infra/aws apply -input=false -lock-timeout=5m "$RUNNER_TEMP/aws.tfplan"

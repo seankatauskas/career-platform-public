@@ -13,6 +13,28 @@ unrecognized raw blocks still require verified creation provenance and a short-l
 operator grant. After initialization, restore the input to false before another boot.
 Do not apply a changed bootstrap to an active recovery test: it replaces the drill host.
 
+For an explicitly authorized capacity rehearsal, set `instance_type="t3.medium"`
+in this separate root. Omitting it retains the source size. This changes only the
+new drill instance; it does not resize production. Keep Standard CPU credits and
+record the initial credit balance, since a new host's cold setup can exhaust its
+credits before workload measurements begin. See the
+[capacity qualification guide](../../../docs/operations/capacity-qualification.md)
+for the workload and acceptance requirements.
+
+If cold setup is credit-starved, `cpu_credits="unlimited"` can separate restore
+preparation from the workload test. It can incur surplus-credit charges. Review
+the plan to confirm that only the drill instance changes in place, record the
+interval, and apply `cpu_credits="standard"` again before collecting qualification
+results. Never combine these measurements without identifying the credit mode.
+
+A full-service capacity rehearsal needs additional isolation before starting any
+copied service: disable external automation, use synthetic provider credentials,
+block application egress (including host-networked processes), and make container
+bridge networks internal. Keep scheduled backup/status/cost timers disabled and
+write rehearsal backups locally. A restored catalog and synthetic credentials do
+not prove recovery of encrypted credentials or external-provider integrations.
+The ordinary replacement-host recovery procedure below still keeps workers stopped.
+
 Start the recovery clock before applying a saved, reviewed plan. Confirm it contains
 only the three drill resources and no production changes. Follow the [AWS recovery
 runbook](../../../docs/operations/aws-deployment.md#7-backup-rollback-and-replacement-host-recovery):

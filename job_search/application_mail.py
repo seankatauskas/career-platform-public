@@ -123,8 +123,19 @@ class ApplicationMailReader:
             evidence = self.runtime.correspondence.evidence(con, source_id, revision=revision,
                 archive=self.archive.for_account(source["account_id"]),
                 allowed_accounts=self.allowed_accounts, limit=limit)
+            # Display metadata comes only from the already authorized, verified
+            # archive text. Never decrypt the entire queue or persist plaintext
+            # headers in correspondence just to label a review card.
+            subject = None
+            text = evidence['text']
+            prefix = 'BEGIN UNTRUSTED EMAIL\nSUBJECT\n'
+            if isinstance(text, str) and text.startswith(prefix):
+                header, separator, _ = text[len(prefix):].partition('\nBODY\n')
+                expected = source['metadata'].get('subject_hash')
+                if separator and expected and hashlib.sha256(header.encode('utf-8')).hexdigest() == expected:
+                    subject = header
             return {"message_id": source_id, "revision": evidence["revision"], "sha256": sha256,
-                    "text": evidence["text"], "coverage": evidence["coverage"]}
+                    "text": text, "subject": subject, "coverage": evidence["coverage"]}
 
     def search_mail_page(self, query, limit=25, *, cursor=None):
         """Search at most 100 reviewed message bodies per page, without provider I/O."""
@@ -446,7 +457,9 @@ def build_application_mail_handlers(runtime, archive, account_id, analyzer, mode
         try:
             text = scoped.read_message(source["archive_ref"])
             candidates = capture_candidates(runtime, payload["message_id"], text)
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, DomainError) and exc.code == 'database_busy':
+                raise
             # Runtime records a bounded source-failure receipt using immutable refs.
             candidates = {"candidate_ids": [], "coverage": {"complete": False}}
         try:

@@ -26,6 +26,7 @@ node tests/browser/test_review_quality.mjs
 node tests/browser/test_owner_dashboard.mjs
 node tests/browser/test_owner_application_view.mjs
 node tests/browser/test_owner_review_view.mjs
+node tests/browser/test_mail_review_workspace.mjs
 ```
 
 `test_*.py` files are executable Python modules, discovered automatically by `scripts/check-system.py`. Add a new suite here and give it a `__main__` entry point that exits nonzero on failure. Import shared fixtures as `from tests.test_… import …`; use the repository root for source assets and `tests/fixtures/` for checked-in test data.

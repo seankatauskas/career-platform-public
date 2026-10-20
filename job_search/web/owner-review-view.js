@@ -1,5 +1,6 @@
 /* Owner Review uses the dashboard shell and the owners' explicit command contracts. */
 const ownerReviewState = {sources: new Map(), groups: [], totals: null, policy: null, items: [], pages: {}, loaded: false, error: '', epoch: 0, busy: false, stale: false, selections: new Map(), keys: new Map(), resolutions: new Map(), processingPending: new Map()};
+const ownerReviewWorkspace = {selected:null, index:0, filter:'all', mode:'focused', scrolls:new Map(), route:null, metadata:new Map(), sourceRequests:new Map()};
 const ownerDiscoveryState = new Map();
 const ownerTargetState = new Map();
 const ownerOperationTitles = {record_submission_receipt:'Record application receipt',add_note:'Add a note',create_task:'Create a task',record_request:'Record a request',record_submission:'Record a submission',confirm_submission:'Confirm application received',record_progress:'Update application progress',link_message:'Link this email',close_application:'Close application',reopen_application:'Reopen application',record_interview:'Record an interview',record_assessment:'Record an assessment',record_offer:'Record an offer',create_reminder:'Create a reminder',attach_submission_answers:'Attach application answers',send_reply:'Send reply',create_reply_draft:'Create reply draft',create_calendar_entry:'Create calendar entry'};
@@ -23,7 +24,7 @@ function ownerReviewCardItems() {
     status:'pending',raw:group})), ...ownerReviewNormalized().filter(item=>item.kind==='external_action')];
 }
 function ownerReviewFeedback(text) {
-  const box = document.querySelector('#review-feedback'); box.textContent = text; box.hidden = !text;
+  const box = document.querySelector('#review-feedback'); box.textContent = text; box.hidden = !text; box.setAttribute('role', 'status'); box.setAttribute('aria-live', 'polite');
 }
 function ownerReviewCount() {
   const badge = document.querySelector('#review-count');
@@ -112,12 +113,13 @@ function ownerReviewButton(label, operation, payload) {
   button.disabled = ownerReviewState.busy || ownerReviewState.stale;
   button.addEventListener('click', async () => {
     if (ownerReviewState.busy || ownerReviewState.stale) return;
+    const reviewedKey = ownerReviewWorkspace.selected;
     ownerReviewState.busy = true; renderOwnerReviewQueue();
     try {
       await ownerReviewCommand(operation, payload);
       ownerReviewState.selections.clear();
       await loadOwnerReviewQueue();
-      if (!ownerReviewState.error) ownerReviewFeedback('Saved.');
+      if (!ownerReviewState.error) ownerReviewFeedback(reviewedKey && reviewedKey !== ownerReviewWorkspace.selected ? 'Saved. Next email ready for review.' : 'Saved.');
     } catch (error) {
       if (error.status === 409) { ownerReviewState.stale = true; ownerReviewState.selections.clear(); }
       ownerReviewFeedback(error.status === 409 ? 'This review changed. No new decision was applied by this request. Refresh and review the current version.' :
@@ -190,6 +192,9 @@ function ownerReviewPresentation(proposal) {
   const input = proposal.input || {};
   if (proposal.operation === 'record_submission_receipt') return ['Application received', 'Record receipt', 'Record this email as confirmation that your application was received.'];
   if (proposal.operation === 'confirm_submission') return ['Application received', 'Confirm receipt', 'Confirm the recorded submission using this email.'];
+  if (proposal.operation === 'add_note') return ['Application note', 'Save note', input.note || input.text || input.description || 'Add this note to the application.'];
+  if (proposal.operation === 'create_task') return ['Next step', 'Add task', input.description || input.title || 'Add this task to the application.'];
+  if (proposal.operation === 'record_interview') return ['Interview update', 'Record interview', input.title || input.description || 'Record the interview details below.'];
   if (proposal.operation === 'record_request') return ['Action requested', 'Add task', input.description];
   if (proposal.operation === 'record_assessment') return ['Assessment update', 'Record assessment', input.description];
   if (proposal.operation === 'schedule_interview') return ['Interview update', 'Record interview', input.title || 'Record the interview details below.'];
@@ -294,6 +299,7 @@ function ownerActionCard(action, content, actions) {
   }
 }
 const ownerProcessingFailures = {
+  partial_analysis: 'Some findings need repair. Verified findings are available for your review; no application changes were approved.',
   context_budget_exceeded: 'The email and its context were too large to analyze in one request.',
   invalid_json: 'The analysis returned an unreadable response. No inferred application changes were accepted.',
   evidence_mismatch: 'The analysis cited words that could not be verified in the saved email. No inferred application changes were accepted.',
@@ -375,7 +381,7 @@ function ownerProcessingControls(issue, content, actions) {
 }
 function ownerProcessingCard(processing, content, actions, historical = false, grouped = false) {
   if (processing.recorded_at) content.append(node('p', 'meta', 'Last attempt: ' + (typeof displayDate === 'function' ? displayDate(processing.recorded_at) : processing.recorded_at)));
-  content.append(node('p', 'meta', ownerReviewLabel(processing.status)));
+  content.append(node('p', 'meta', ({open:'Needs attention',retry_queued:'Retry queued',retry_running:'Retry running',processing:'Analysis running'}[processing.status] || ownerReviewLabel(processing.status))));
   if (processing.failure_code) content.append(node('p', 'notice', ownerProcessingFailures[processing.failure_code] || 'This email could not be fully processed. Its source and earlier attempts remain available.'));
   if (processing.coverage?.complete === false) content.append(node('p', 'help', 'Missing evidence: ' + (processing.coverage.reasons || []).map(ownerReviewLabel).join(', ')));
   const currentIssue = processing.current_issue || processing;
@@ -407,7 +413,7 @@ function ownerGroupTarget(group, content) {
   const details = node('details', 'review-target'); details.open = unresolved;
   details.append(node('summary', '', unresolved ? 'Which role matches this email?' : 'Change application'));
   const form = node('form'), feedback = node('p', 'help'); feedback.setAttribute('role', 'status');
-  form.append(node('p', 'help', 'Choose the role using the full email. Continue prepares the revised update for your approval.'));
+  form.append(node('p', 'help', 'Link this email to the role you applied for. Application updates remain a separate approval.'));
   const label = node('label', '', 'Search applications'), search = node('input'); search.type = 'search'; search.value = saved.search;
   label.append(search); form.append(label);
   const selected = node('p', 'review-target-selected'), choices = node('div', 'review-target-choices');
@@ -428,23 +434,27 @@ function ownerGroupTarget(group, content) {
     if (!group.association && !group.applications.length) ownerGroupDiscovery(group, discovery);
     else discovery.append(node('p', 'help', 'Search all tracked applications above. To track a new role, add it in Applications, then refresh this review.'));
   }
-  none.addEventListener('click', () => {saved.none = true; showDiscovery();});
+  none.addEventListener('click', () => {saved.none = !saved.none; discovery.hidden = !saved.none; if (saved.none) showDiscovery(); draw();});
   if (saved.none) showDiscovery();
   function draw() {
     choices.replaceChildren();
     const locked = ownerReviewState.busy || ownerReviewState.stale || Boolean(saved.pending);
     search.disabled = scope.disabled = none.disabled = locked;
+    for (const element of [label,selected,choices,scopeDetails,feedback,save]) element.hidden = saved.none;
+    none.textContent = saved.none ? 'Search tracked applications instead' : 'None of these';
     const chosen = saved.apps.get(saved.selected);
     selected.textContent = chosen ? 'Selected: ' + ownerApplicationLabel(chosen) : 'No application selected.';
     const conflict = group.association && saved.selected && group.association.application_id !== saved.selected;
     save.disabled = ownerReviewState.busy || ownerReviewState.stale || (!saved.pending && (!chosen || conflict));
     save.textContent = saved.pending ? 'Retry same preview request' : 'Continue';
+    // An uncertain preview must remain recoverable even if catalog search was opened.
+    if (saved.pending) {save.hidden=false;feedback.hidden=false;}
     const terms = saved.search.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
     const matches = [...saved.apps.values()].filter(app => terms.every(t => ownerApplicationLabel(app).toLocaleLowerCase().includes(t)));
     for (const app of matches.slice(0, 50)) {
       const row = node('label', 'review-target-option'), radio = node('input'); radio.type = 'radio'; radio.name = 'target-' + group.id; radio.value = app.id;
       radio.checked = saved.selected === app.id; radio.disabled = locked;
-      radio.addEventListener('change', () => {saved.selected = app.id; draw(); choices.querySelector('input:checked')?.focus();});
+      radio.addEventListener('change', () => {saved.selected = app.id; draw(); choices.querySelector('input:checked')?.focus({preventScroll:true});});
       row.append(radio, node('span', '', ownerApplicationLabel(app))); choices.append(row);
     }
     feedback.textContent = saved.pending ? 'The preview request could not be confirmed. Retry the same request before changing your selection.'
@@ -490,7 +500,7 @@ function ownerGroupTarget(group, content) {
       ownerReviewFeedback(error.status === 409 ? 'This review changed. Your selection is saved. Refresh and preview again.' : error.message);
     } finally {
       ownerReviewState.busy = false; renderOwnerReviewQueue();
-      if (prepared) [...document.querySelectorAll('#attention-list [data-review-key]')].find(c => c.dataset.reviewKey === 'evidence_group:' + group.id)?.focus();
+      if (prepared) [...document.querySelectorAll('#attention-list [data-review-key]')].find(c => c.dataset.reviewKey === 'evidence_group:' + group.id)?.focus({preventScroll:true});
     }
   });
   const buttons = node('div', 'actions'); buttons.append(save, none);
@@ -503,7 +513,7 @@ function ownerGroupDiscovery(group, content) {
   if (!saved) { saved = {employer:'', title:'', preview:null, digest:null, pending:null}; ownerDiscoveryState.set(group.id, saved); }
   if (saved.digest !== group.preview_digest) { saved.preview = null; saved.digest = group.preview_digest; }
   const section = node('section', 'review-discovery');
-  section.append(node('h4', '', 'Track an unlisted role'));
+  section.append(node('h4', '', 'Find a role in the jobs database'));
   const feedback = node('p', 'help', 'Checking whether this email identifies a role outside your tracked applications and jobs catalog…');
   feedback.setAttribute('role', 'status');
   const form = node('form', 'controls');
@@ -555,13 +565,25 @@ function ownerGroupDiscovery(group, content) {
     content.insertBefore(catalog, section);
   }
   function display(result) {
-    feedback.textContent = result.reason;
+    feedback.textContent = result.catalog_choices?.length ? 'Select the matching database role to create or reuse its tracking record and attach this email. Proposed updates still need approval.' : result.reason;
     choices.replaceChildren();
     for (const app of result.applications || []) {
       const link = node('a', 'review-context-link', `Review existing application: ${app.employer || ''} · ${app.title || ''}`);
       link.href = '#applications/' + encodeURIComponent(app.id); choices.append(link);
     }
-    for (const job of result.jobs || []) choices.append(jobPreviewButton(job, `Review matching role: ${job.company} · ${job.title}`));
+    if (result.catalog_choices?.length) {
+      for (const candidate of result.catalog_choices) {
+        const job = candidate.job, row = node('section', 'review-catalog-choice');
+        row.append(node('h5', '', job.title), node('p', 'meta', [job.employer,job.location].filter(Boolean).join(' · ')));
+        const attach = node('button', '', 'Use this role and attach email'); attach.type = 'button';
+        attach.disabled = ownerReviewState.busy || ownerReviewState.stale || Boolean(saved.pending);
+        attach.addEventListener('click', () => create({group_id:group.id,expected_digest:group.preview_digest,
+          expected_match_digest:candidate.match_digest,catalog_id:candidate.id,employer:job.employer,title:job.title,
+          search_employer:result.employer,search_title:result.title}));
+        row.append(node('p', 'help', 'Creates or reuses a tracking record and attaches this email. Application updates still need approval.'), attach);
+        choices.append(row);
+      }
+    } else for (const job of result.jobs || []) choices.append(jobPreviewButton(job, `Review matching role: ${job.company} · ${job.title}`));
     if (result.can_create) {
       const button = node('button', '', 'Create application record'); button.type = 'button';
       button.disabled = ownerReviewState.busy || ownerReviewState.stale;
@@ -595,9 +617,10 @@ function ownerGroupDiscovery(group, content) {
 function ownerEvidenceGroupCard(group) {
   const card = node('article', 'stack-item review-card evidence-group'), content = node('div', 'review-card-content');
   card.dataset.reviewKey = 'evidence_group:' + group.id; card.tabIndex = -1;
-  content.append(node('p', 'review-card-kind', group.source_type === 'browser' ? 'Browser application attempt' : group.source_type === 'email' ? 'Email evidence' : 'Proposed application change'));
+  content.append(node('p', 'review-card-kind', group.source_type === 'browser' ? 'Browser application attempt' : group.source_type === 'email' ? 'Email review' : 'Proposed application change'));
   const title = group.applications.map(a => [a.job?.employer,a.job?.title].filter(Boolean).join(' · ')).join(' / ');
-  content.append(node('h3', '', title || (group.catalog_candidates?.length ? 'Review matching catalog roles' : 'Choose the application for this evidence')));
+  content.append(node('h3', '', title || (group.catalog_candidates?.length ? 'Review matching catalog roles' : 'Match this email to a role')));
+  ownerReviewSourceHeading(group, content);
   const choices = new Map(group.proposals.map(p => [p.id, {bundle:ownerReviewBundle(group, p), presentation:ownerReviewPresentation(p)}])
     .filter(([, choice]) => choice.bundle && choice.presentation));
   const includedLinks = new Set([...choices.values()].flatMap(choice => choice.bundle.filter(p => p.operation === 'link_message').map(p => p.id)));
@@ -627,7 +650,7 @@ function ownerEvidenceGroupCard(group) {
   if (!needsTarget) ownerReviewSources(content, group.evidence.map(({quote, ...ref}) => ref), choices.size ? 'View email' : 'Source evidence');
   if (group.processing.length) {
     const link = node('a', 'review-context-link', 'Analysis needs attention · View system issue'); link.href = '#review/evidence_group/' + encodeURIComponent(group.id);
-    link.addEventListener('click', event => {event.preventDefault(); document.getElementById('system-' + group.id)?.focus();}); content.append(link);
+    link.addEventListener('click', event => {event.preventDefault(); document.getElementById('system-' + group.id)?.focus({preventScroll:true});}); content.append(link);
   }
   if (group.source_type === 'email' && group.proposals.some(p => p.blockers.length) && !group.processing.some(p => p.status === 'retry_queued')) {
     proposalContent.append(ownerReviewButton('Refresh analysis', 'refresh_review_group', {group_id:group.id,expected_digest:group.preview_digest}));
@@ -639,17 +662,20 @@ function ownerEvidenceGroupCard(group) {
 }
 function renderOwnerReviewQueue() {
   const list = document.querySelector('#attention-list'); if (!list) return;
+  const position = ownerReviewCapturePosition();
   const disclosures = captureReviewDisclosures(document.querySelector('#attention')); list.replaceChildren(); list.classList.remove('empty');
+  document.querySelector('.review-workspace-preferences')?.remove();
   const oldProcessing = document.querySelector('#owner-processing-section'); if (oldProcessing) oldProcessing.remove();
   const oldHeading = document.querySelector('#owner-review-decision-heading'); if (oldHeading) oldHeading.remove();
   const legacyHistory = document.querySelector('#review-history'); if (legacyHistory) legacyHistory.hidden = true;
   const totals = ownerReviewState.totals || {cards:0,operations:0,processing:0};
-  document.querySelector('#review-summary').textContent = `${totals.decisions ?? ownerReviewCardItems().length} decisions · ${totals.processing} system issues`;
+  const decisionCount = totals.decisions ?? ownerReviewCardItems().length;
+  document.querySelector('#review-summary').textContent = `${decisionCount} decision${decisionCount===1?'':'s'} · ${totals.processing} system issue${totals.processing===1?'':'s'}`;
   const policy = ownerReviewState.policy;
   if (policy) {
     const settings = node('details', 'browser-recording-preference'); settings.append(node('summary', '', 'Browser recording: ' + (policy.enabled ? 'automatic' : 'review first')));
     settings.append(node('p', 'help', 'Automatically record unambiguous paired-browser submission attempts, website acknowledgments, and captured answers. Conflicting or incomplete evidence still needs review. Email changes remain manual.'));
-    settings.append(ownerReviewButton(policy.enabled ? 'Review future browser evidence manually' : 'Enable automatic browser recording', 'configure_browser_recording', {enabled:!policy.enabled,expected_version:policy.version})); list.append(settings);
+    settings.append(ownerReviewButton(policy.enabled ? 'Review future browser evidence manually' : 'Enable automatic browser recording', 'configure_browser_recording', {enabled:!policy.enabled,expected_version:policy.version})); settings.classList.add('review-workspace-preferences'); document.querySelector('#attention').append(settings);
   }
   for (const group of ownerReviewState.groups.filter(g => g.proposals.length)) { const card = ownerEvidenceGroupCard(group); list.append(card); restoreReviewDisclosures(card, disclosures); }
   const actions = ownerReviewNormalized().filter(i => i.kind === 'external_action');
@@ -665,9 +691,10 @@ function renderOwnerReviewQueue() {
       card.id = 'system-' + group.id; card.tabIndex = -1;
       card.dataset.reviewKey = (group.proposals.length ? 'processing_group:' : 'evidence_group:') + group.id;
       content.append(node('h4', '', group.applications.map(ownerApplicationLabel).join(' / ') || 'Email analysis needs attention'));
+      ownerReviewSourceHeading(group, content);
       if (group.proposals.length) {
         const link = node('a', 'review-context-link', 'View proposed updates'); link.href = '#review/evidence_group/' + encodeURIComponent(group.id);
-        link.addEventListener('click', event => {event.preventDefault(); [...list.querySelectorAll('[data-review-key]')].find(c => c.dataset.reviewKey === 'evidence_group:' + group.id)?.focus();}); content.append(link);
+        link.addEventListener('click', event => {event.preventDefault(); [...list.querySelectorAll('[data-review-key]')].find(c => c.dataset.reviewKey === 'evidence_group:' + group.id)?.focus({preventScroll:true});}); content.append(link);
       } else ownerReviewSources(content, group.evidence);
       for (const issue of group.processing) {
         const row = node('div'), buttons = node('div', 'actions'); ownerProcessingCard(issue, row, buttons, false, true); row.append(buttons); content.append(row);
@@ -686,8 +713,166 @@ function renderOwnerReviewQueue() {
     const card=node('article','stack-item review-card'), content=node('div','review-card-content'), buttons=node('div','actions'); card.dataset.reviewKey=item.key;
     content.append(node('h3','',item.title)); ownerProcessingCard(item.raw,content,buttons,true); card.append(content); history.append(card); restoreReviewDisclosures(card,previous);
   }
-  for (const [group,page] of Object.entries(ownerReviewState.pages)) if (page?.next_cursor) { const more=node('button','quiet',group==='groups'?'Load more evidence':group==='external_actions'?'Load more external actions':'Load more processing history'); more.disabled=ownerReviewState.busy; more.addEventListener('click',()=>loadOwnerReviewQueue(group)); (group==='processing_history'?history:list).append(more); }
+  for (const [group,page] of Object.entries(ownerReviewState.pages)) if (page?.next_cursor) { const more=node('button','quiet',group==='groups'?'Load more emails':group==='external_actions'?'Load more external actions':'Load more processing history'); more.dataset.reviewPage=group; more.disabled=ownerReviewState.busy; more.addEventListener('click',()=>loadOwnerReviewQueue(group)); (group==='processing_history'?history:list).append(more); }
   const route=location.hash.split('?')[0].split('/');
   if (route[2]) { const id=decodeURIComponent(route[2]); const selected=ownerReviewState.groups.find(g => g.id===id || g.proposals.some(p=>p.id===id)); if(selected) [...document.querySelectorAll('#attention article')].find(c=>c.dataset.reviewKey==='evidence_group:'+selected.id)?.classList.add('review-selected'); }
   ownerReviewCount();
+  ownerReviewBuildWorkspace(true);
+  ownerReviewRestorePosition(position);
+}
+
+// Keep the source being reviewed stable across busy renders, refresh, and corrections.
+// A completed source advances to the following queue position; pending siblings stay put.
+function ownerReviewCapturePosition() {
+  const panel = document.querySelector('.owner-review-detail');
+  const active = document.activeElement;
+  const card = active?.closest('[data-review-key]');
+  const buttons = card ? [...card.querySelectorAll('button,input,select,textarea,summary,a')] : [];
+  return {x:window.scrollX,y:window.scrollY,panel:panel?.scrollTop || 0,
+    key:card?.dataset.reviewKey, control:buttons.indexOf(active), label:active?.textContent, selected:ownerReviewWorkspace.selected};
+}
+function ownerReviewRestorePosition(position) {
+  const panel = document.querySelector('.owner-review-detail');
+  if (panel) panel.scrollTop = position.selected === ownerReviewWorkspace.selected ? position.panel : 0;
+  if (position.key) {
+    const card = [...document.querySelectorAll('#attention [data-review-key]')].find(c => c.dataset.reviewKey === position.key && !c.hidden);
+    const control = card && [...card.querySelectorAll('button,input,select,textarea,summary,a')][position.control];
+    if (control && !control.disabled && control.textContent === position.label) control.focus({preventScroll:true});
+    else card?.focus({preventScroll:true});
+  }
+  window.scrollTo(position.x,position.y);
+}
+function ownerReviewPrimarySource(group) {
+  if (group.source_type !== 'email') return null;
+  return group.evidence.find(e => e.owner === 'correspondence' && e.source_id === group.id.slice(6));
+}
+function ownerReviewSourceMetadata(group) {
+  const ref = ownerReviewPrimarySource(group);
+  return ref && ownerReviewWorkspace.metadata.get(JSON.stringify([ref.source_id,ref.revision,ref.sha256]));
+}
+function ownerReviewSourceHeading(group, content) {
+  const source = {...(group.source || {}), ...(ownerReviewSourceMetadata(group) || {})};
+  const subject = node('p', 'review-source-subject', source.subject || ''); subject.hidden = !source.subject; subject.dataset.sourceGroup = group.id; content.append(subject);
+  const date = source.occurred_at || group.source_at;
+  const sender = typeof source.sender === 'string' ? source.sender : source.sender?.address;
+  if (sender || date) content.append(node('p', 'meta review-source-meta', [sender, date && (typeof displayDate === 'function' ? displayDate(date) : new Date(date).toLocaleString())].filter(Boolean).join(' · ')));
+}
+function ownerReviewWorkspaceRows() {
+  const rows = ownerReviewState.groups.filter(g => g.proposals.length || g.processing.length).map(group => {
+    const app = group.applications[0];
+    const title = app?.job?.employer || ownerReviewSourceMetadata(group)?.subject || group.source?.subject || group.catalog_candidates?.[0]?.job?.employer || 'Unmatched email';
+    const quote = group.evidence.find(e => e.quote)?.quote?.replace(/\s+/g,' ').trim();
+    const detail = app?.job?.title || ownerReviewSourceMetadata(group)?.subject || ownerReviewSourceMetadata(group)?.excerpt || group.source?.subject || quote || 'Open the saved email to identify its role';
+    const changes = [...new Set(group.proposals.filter(p => p.operation !== 'link_message')
+      .map(p => ownerReviewPresentation(p)?.[0] || ownerReviewTitle(p.operation)))];
+    return {key:'evidence_group:'+group.id,title,detail,group,
+      attention:Boolean(group.processing.length), decision:Boolean(group.proposals.length),
+      label:group.proposals.length ? (ownerGroupNeedsTarget(group) ? 'Match role' : changes.slice(0,2).join(' · ') || 'Link email') : 'Email attention'};
+  });
+  for (const action of ownerReviewNormalized().filter(i => i.kind === 'external_action')) rows.push({key:action.key,title:action.title,detail:'Check exact content and recipient',label:'External action',decision:true,attention:false});
+  return rows;
+}
+function ownerReviewChoose(key) {
+  ownerReviewFeedback('');
+  ownerReviewWorkspace.selected = key;
+  const panel = document.querySelector('.owner-review-detail');
+  if (panel) panel.scrollTop = 0;
+  ownerReviewBuildWorkspace();
+  const card = [...document.querySelectorAll('#attention [data-review-key]')].find(c => !c.hidden && c.dataset.reviewKey === key);
+  card?.focus({preventScroll:true});
+}
+function ownerReviewBuildWorkspace(fresh = false) {
+  const list = document.querySelector('#attention-list');
+  let workspace = document.querySelector('#owner-review-workspace');
+  if (!workspace) {
+    workspace = node('div', 'owner-review-workspace'); workspace.id = 'owner-review-workspace';
+    const rail = node('aside', 'owner-review-rail'); rail.setAttribute('aria-label','Review queue');
+    const detail = node('div', 'owner-review-detail'); detail.setAttribute('aria-label','Selected review');
+    list.before(workspace); workspace.append(rail,detail); detail.append(document.querySelector('#review-feedback'),list);
+  }
+  const rail = workspace.querySelector('.owner-review-rail'), detail = workspace.querySelector('.owner-review-detail');
+  const processing = document.querySelector('#owner-processing-section'); if (processing) detail.append(processing);
+  const allRows = ownerReviewWorkspaceRows();
+  const route = location.hash.split('?')[0];
+  if (ownerReviewWorkspace.route !== route) {
+    ownerReviewWorkspace.route = route;
+    const id = decodeURIComponent(route.split('/')[2] || '');
+    const linked = allRows.find(row => row.group && (row.group.id === id || row.group.proposals.some(p => p.id === id)));
+    if (linked) { ownerReviewWorkspace.selected = linked.key; ownerReviewWorkspace.filter = 'all'; }
+  }
+  const filtered = allRows.filter(row => ownerReviewWorkspace.filter === 'all' || (ownerReviewWorkspace.filter === 'decisions' ? row.decision : row.attention));
+  let selected = filtered.find(row => row.key === ownerReviewWorkspace.selected);
+  if (!selected && filtered.length) selected = filtered[Math.min(ownerReviewWorkspace.index,filtered.length - 1)];
+  ownerReviewWorkspace.selected = selected?.key || null;
+  ownerReviewWorkspace.index = Math.max(0,filtered.indexOf(selected));
+  if (selected?.group && ownerReviewWorkspace.mode === 'focused') ownerReviewLoadSelectedSource(selected.group);
+  const pageButtons = [...(fresh ? list : workspace).querySelectorAll('[data-review-page]')];
+  const queueScroll = rail.querySelector('.review-queue-items')?.scrollTop || 0;
+  rail.replaceChildren();
+  const heading = node('div','review-queue-heading'); heading.append(node('h3','','Review queue'),node('p','help','Choose an email. Check its role and proposed result.'));
+  rail.append(heading);
+  const filters = node('div','review-queue-filters'); filters.setAttribute('role','group'); filters.setAttribute('aria-label','Filter reviews');
+  for (const [value,label] of [['all','All'],['decisions','Decisions'],['attention','Email attention']]) {
+    const button = node('button','quiet',label); button.setAttribute('aria-pressed',String(ownerReviewWorkspace.filter === value));
+    button.addEventListener('click',()=>{ownerReviewFeedback('');ownerReviewWorkspace.filter=value;ownerReviewBuildWorkspace();workspace.querySelector('.review-queue-filters [aria-pressed=true]')?.focus({preventScroll:true});}); filters.append(button);
+  }
+  rail.append(filters);
+  const queue = node('div','review-queue-items'); queue.setAttribute('role','list');
+  for (const row of filtered) {
+    const item = node('div'); item.setAttribute('role','listitem');
+    const button = node('button','review-queue-item'); button.type='button'; button.dataset.queueKey=row.key;
+    button.setAttribute('aria-current',String(selected?.key === row.key));
+    button.append(node('span','review-queue-status',row.label),node('strong','',row.title),node('span','review-queue-description',row.detail));
+    button.addEventListener('click',()=>ownerReviewChoose(row.key)); item.append(button); queue.append(item);
+  }
+  if (!filtered.length) queue.append(node('p','empty',ownerReviewState.loaded?'No items in this view.':'Loading review…'));
+  rail.append(queue); queue.scrollTop = queueScroll;
+  for (const button of pageButtons) rail.append(button);
+  const mode = node('button','quiet review-display-mode',ownerReviewWorkspace.mode === 'focused' ? 'Show all items together' : 'Review one item at a time');
+  mode.addEventListener('click',()=>{ownerReviewWorkspace.mode=ownerReviewWorkspace.mode==='focused'?'all':'focused';ownerReviewBuildWorkspace();workspace.querySelector('.review-display-mode')?.focus({preventScroll:true});}); rail.append(mode);
+  workspace.classList.toggle('review-workspace-all',ownerReviewWorkspace.mode === 'all');
+  for (const card of list.querySelectorAll(':scope > [data-review-key]')) card.hidden = ownerReviewWorkspace.mode === 'focused' && card.dataset.reviewKey !== selected?.key;
+  for (const card of processing?.querySelectorAll('[data-review-key]') || []) {
+    const sourceKey = card.dataset.reviewKey.replace(/^processing_group:/,'evidence_group:');
+    card.hidden = ownerReviewWorkspace.mode === 'focused' && sourceKey !== selected?.key;
+  }
+  if (processing) processing.hidden = ownerReviewWorkspace.mode === 'focused' && !selected?.attention;
+  for (const paragraph of list.querySelectorAll(':scope > .empty')) paragraph.hidden = ownerReviewWorkspace.mode === 'focused' && Boolean(selected?.attention) && !selected?.decision;
+  workspace.classList.toggle('review-workspace-processing',ownerReviewWorkspace.mode === 'focused' && Boolean(selected?.attention) && !selected?.decision);
+  // Loading, empty states and pagination stay in the workspace, never in the queue rail.
+  let empty = detail.querySelector(':scope > .review-workspace-empty');
+  if (!empty) {empty=node('p','empty review-workspace-empty','Choose a review from the queue.');detail.append(empty);}
+  empty.hidden = Boolean(selected) || !allRows.length || ownerReviewWorkspace.mode === 'all';
+}
+
+// Fetch only the selected source through the authorized, revision-bound reader.
+// Queue labels improve when private archived subject metadata is available.
+async function ownerReviewLoadSelectedSource(group) {
+  const ref = ownerReviewPrimarySource(group);
+  if (!ref) return;
+  const sourceKey = JSON.stringify([ref.source_id,ref.revision,ref.sha256]);
+  if (ownerReviewWorkspace.sourceRequests.has(sourceKey)) return;
+  ownerReviewWorkspace.sourceRequests.set(sourceKey,true);
+  try {
+    const query = new URLSearchParams({source_id:ref.source_id,revision:String(ref.revision),sha256:ref.sha256 || ''});
+    const result = await api('/api/v1/application-owner/review-source?' + query);
+    const excerpt = (result.text || result.excerpt || '').replace(/\s+/g,' ').trim().slice(0,180);
+    ownerReviewWorkspace.metadata.set(sourceKey,{subject:result.subject || null,excerpt});
+    const current = ownerReviewState.groups.find(g => g.id === group.id);
+    if (!current?.evidence.some(e => e.owner === 'correspondence' && JSON.stringify([e.source_id,e.revision,e.sha256]) === sourceKey)) return;
+    if (!group.applications.length) for (const button of document.querySelectorAll('[data-queue-key]')) if (button.dataset.queueKey === 'evidence_group:'+group.id) button.querySelector('.review-queue-description').textContent=result.subject || excerpt || button.querySelector('.review-queue-description').textContent;
+    if (result.subject) {
+      for (const subject of document.querySelectorAll('.review-source-subject')) if (subject.dataset.sourceGroup === group.id) {subject.textContent=result.subject;subject.hidden=false;}
+      if (!group.applications.length) for (const button of document.querySelectorAll('[data-queue-key]')) if (button.dataset.queueKey === 'evidence_group:'+group.id) button.querySelector('strong').textContent=result.subject;
+    }
+    let text = result.text || result.excerpt || result.body || (result.available ? 'This message has no text.' : 'This source is unavailable.');
+    if (result.coverage?.complete === false || result.truncated) text += '\n\nSome source content is unavailable.';
+    ownerReviewState.sources.set(sourceKey,text);
+    for (const card of document.querySelectorAll('[data-review-key]')) if (card.dataset.reviewKey.endsWith(group.id)) {
+      for (const body of card.querySelectorAll('.review-message .message-body')) if (!body.textContent) body.textContent=text;
+    }
+  } catch (_) {
+    // The explicit reader remains available to retry; metadata never gates a decision.
+    ownerReviewWorkspace.sourceRequests.delete(sourceKey);
+  }
 }
