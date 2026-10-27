@@ -81,6 +81,43 @@ class ParityProtocolTests(unittest.TestCase):
         self.assertEqual(final['output'][0], call())
         self.assertEqual(final['usage']['input_tokens_details']['cached_tokens'], 50)
 
+    def test_keepalive_preserves_native_stream_and_completion(self):
+        # Both production failures had this two-field transport event before
+        # otherwise completed tool output, not a new model/tool capability.
+        events = [json.loads(part[6:]) for part in stream().decode().strip().split('\n\n')]
+        for index in (0, 1, 2, len(events) - 1):
+            with self.subTest(index=index):
+                values = deepcopy(events)
+                values.insert(index, {'type': 'keepalive', 'sequence_number': index})
+                raw = ''.join('data: ' + json.dumps(e) + '\n\n' for e in values).encode()
+                self.assertIs(protocol.validate_response(raw), raw)
+                self.assertEqual(protocol.completion(raw), protocol.completion(stream()))
+
+    def test_keepalive_does_not_replace_completion_or_relax_validation(self):
+        heartbeat = b'data: {"type":"keepalive","sequence_number":2}\n\n'
+        for raw in (heartbeat, heartbeat * 3, stream() + heartbeat,
+                    heartbeat + stream(done_item=dict(call(), input='changed')),
+                    heartbeat + stream(dict(call(), namespace='collaboration', name='spawn_agent')),
+                    heartbeat + b'data: {"type":"unexpected_event"}\n\n' + stream(),
+                    heartbeat + b'data: {"type":"response.failed"}\n\n' + stream(),
+                    heartbeat + b'data: {"type":"response.incomplete"}\n\n' + stream()):
+            with self.subTest(raw=raw), self.assertRaises(GatewayRejected):
+                protocol.validate_response(raw)
+        repeated = heartbeat * 3 + stream()
+        self.assertIs(protocol.validate_response(repeated), repeated)
+
+    def test_keepalive_rejects_malformed_sequence_or_embedded_payloads(self):
+        for fields in ({}, {'sequence_number': None}, {'sequence_number': True},
+                       {'sequence_number': -1}, {'sequence_number': 1.5},
+                       {'sequence_number': '2'},
+                       {'sequence_number': 2, 'item': call()},
+                       {'sequence_number': 2, 'response': {'status': 'completed', 'output': [call()]}},
+                       {'sequence_number': 2, 'metadata': {}},
+                       {'sequence_number': 2, 'delta': 'hidden content'}):
+            with self.subTest(fields=fields), self.assertRaises(GatewayRejected):
+                raw = ('data: ' + json.dumps({'type': 'keepalive', **fields}) + '\n\n').encode()
+                protocol.validate_response(raw + stream())
+
     def test_response_metadata_preserves_stream_without_becoming_output(self):
         events = [json.loads(part[6:]) for part in stream().decode().strip().split('\n\n')]
         metadata = {'type': 'response.metadata', 'sequence_number': 88,

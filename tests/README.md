@@ -78,6 +78,14 @@ remain separate obligations.
 
 Browser demo fixtures use `requirements/demo.txt`. The system runner passes its Python interpreter to the demo and fixture commands; standalone browser runs use `uv` to provision the demo dependencies.
 
+Production acceptance can reuse a previously verified PDF toolchain across clean
+checkouts. Place `tectonic` and `tectonic.bundle` in
+`~/.cache/career-platform/acceptance-toolchain`, or pass `--seed-dir` to
+`scripts/prepare-acceptance-toolchain.py`. The assembler verifies the pinned binary
+hash and every bundled file against the checked-in manifest before use. Missing or
+mismatched bytes still require a verified download; the seed directory is read-only
+to the assembler, and TLS validation is unchanged.
+
 For a loopback preview of the complete v2 review flow, run
 `python3 -m tests.fixtures.review_quality_demo` and open the printed URL plus a
 printed list's `dashboard_path`. It uses fictional facts and postings, simulated

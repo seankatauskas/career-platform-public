@@ -31,7 +31,8 @@ class Model(http.server.BaseHTTPRequestHandler):
     'input':'text(await tools.exec_command({cmd:"python -c \\\"from pathlib import Path; Path(\'/output/probe.txt\').write_text(\'native shell works\'); print(\'done\')\\\""}));'}
   else:
    item={'type':'message','id':'msg_probe','role':'assistant','status':'completed','content':[{'type':'output_text','text':'done','annotations':[]}]}
-  events=[{'type':'response.output_item.done','output_index':0,'item':item},
+  events=[{'type':'keepalive','sequence_number':0},
+   {'type':'response.output_item.done','output_index':0,'item':item},
    {'type':'response.metadata','metadata':{'probe':True}},
    {'type':'response.completed','response':{'id':'resp_probe','status':'completed','output':[item],'usage':{'input_tokens':1,'output_tokens':1,'total_tokens':2}}}]
   body=''.join('data: '+json.dumps(event)+'\n\n' for event in events).encode()
@@ -83,7 +84,8 @@ def host_runtime_probe(image):
         else:
             item = {'type': 'message', 'id': 'msg_host_probe', 'role': 'assistant', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'done', 'annotations': []}]}
-        events = [{'type': 'response.output_item.done', 'output_index': 0, 'item': item},
+        events = [{'type': 'keepalive', 'sequence_number': 0},
+                  {'type': 'response.output_item.done', 'output_index': 0, 'item': item},
                   {'type': 'response.metadata', 'metadata': {'probe': True}},
                   {'type': 'response.completed', 'response': {'id': 'resp_host_probe', 'status': 'completed',
                    'output': [item], 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}]

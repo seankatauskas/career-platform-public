@@ -21,13 +21,38 @@ class ToolchainTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.value = b"public fixture content"
         self.binary = b"fixture engine"
+        self.seed = self.root / "seed"
+        self.seed.mkdir()
         (self.root / "tectonic").write_bytes(self.binary)
         (self.root / "acceptance-tex-files.tsv").write_text("fixture.tex\t100\t" + str(len(self.value)) + "\t" + toolchain.digest(self.value) + "\n")
 
     def prepare(self, fetch):
-        with patch.object(toolchain, "__file__", str(self.root / "prepare.py")), patch.object(toolchain, "BINARY_SHA", toolchain.digest(self.binary)), patch.object(toolchain, "fetch", side_effect=fetch), patch("sys.argv", ["prepare", "--output", str(self.root)]), redirect_stdout(io.StringIO()):
+        with patch.object(toolchain, "__file__", str(self.root / "prepare.py")), patch.object(toolchain, "BINARY_SHA", toolchain.digest(self.binary)), patch.object(toolchain, "fetch", side_effect=fetch), patch("sys.argv", ["prepare", "--output", str(self.root), "--seed-dir", str(self.seed)]), redirect_stdout(io.StringIO()):
             toolchain.main()
         return json.loads((self.root / "receipt.json").read_text())
+
+    def test_persistent_seed_rebuilds_clean_output_without_downloads(self):
+        first = self.prepare(lambda *args: self.value)
+        for name in ("tectonic", "tectonic.bundle"):
+            (self.root / name).rename(self.seed / name)
+        before = {p.name: p.read_bytes() for p in self.seed.iterdir()}
+        second = self.prepare(lambda *args: self.fail("verified seeds should not download"))
+        self.assertEqual(first, second)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.seed.iterdir()})
+
+    def test_tampered_seed_binary_requires_verified_download(self):
+        (self.root / "tectonic").unlink()
+        (self.seed / "tectonic").write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "archive SHA256 mismatch"):
+            self.prepare(lambda *args: b"also tampered")
+        self.assertFalse((self.root / "tectonic").exists())
+
+    def test_tampered_seed_bundle_cannot_supply_unverified_files(self):
+        with zipfile.ZipFile(self.seed / "tectonic.bundle", "w") as archive:
+            archive.writestr("fixture.tex", b"x" * len(self.value))
+        with self.assertRaisesRegex(ValueError, "public TeX file SHA256 mismatch"):
+            self.prepare(lambda *args: b"y" * len(self.value))
+        self.assertFalse((self.root / "tectonic.bundle").exists())
 
     def test_verified_cache_is_deterministic_and_needs_no_network(self):
         def fetch(url, maximum, byte_range):

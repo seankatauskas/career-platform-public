@@ -21,6 +21,7 @@ from .reviewer_api import encode_json
 DECLARED_FUNCTIONS = frozenset(('wait', 'request_user_input', 'request_user_input_async'))
 OPAQUE_ITEM_METADATA = ('metadata', 'internal_chat_message_metadata_passthrough')
 EVENTS = frozenset((
+    'keepalive',
     'response.created', 'response.in_progress', 'response.completed',
     'response.output_item.added', 'response.output_item.done',
     'response.content_part.added', 'response.content_part.done',
@@ -207,6 +208,14 @@ def completion(data):
                 raise gateway.GatewayRejected('native response incomplete', reason='incomplete_stream')
             if event_type not in EVENTS:
                 raise gateway.GatewayRejected('unsupported native event', reason='unsupported_capability')
+            if event_type == 'keepalive':
+                # Observed subscription transport heartbeat. It carries no model
+                # output and cannot stand in for response.completed or a tool.
+                gateway._exact(event, ('type', 'sequence_number'))
+                sequence = event.get('sequence_number')
+                if type(sequence) is not int or sequence < 0:
+                    raise gateway.GatewayRejected('invalid native keepalive')
+                continue
             # Subscription responses can include a separate informational metadata
             # event before completion. Preserve it for Codex, but never interpret
             # its opaque contents as output, a tool declaration, or completion.
@@ -319,6 +328,7 @@ def schema_diagnostic(data, error):
                   'invalid encrypted reasoning': 'invalid_encrypted_reasoning',
                   'invalid native response': 'invalid_response',
                   'invalid native response metadata': 'invalid_response_metadata',
+                  'invalid native keepalive': 'invalid_keepalive',
                   'invalid native completion': 'invalid_completion',
                   'unapproved native tool': 'unapproved_tool',
                   'unsupported native event': 'unsupported_event',

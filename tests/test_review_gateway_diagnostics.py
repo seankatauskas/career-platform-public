@@ -29,6 +29,29 @@ def upstream(raw):
 
 
 class GatewayDiagnosticTests(unittest.TestCase):
+    def test_keepalive_passes_real_gateway_without_becoming_a_rejection(self):
+        values = [json.loads(part[6:]) for part in stream().decode().strip().split('\n\n')]
+        values.insert(1, {'type': 'response.in_progress', 'response': {'output': []}})
+        values.insert(2, {'type': 'keepalive', 'sequence_number': 2})
+        raw = events(*values)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); metrics = []
+            with diagnostic_log(root) as diagnostics, \
+                 patch.object(protocol.http.client, 'HTTPSConnection', return_value=upstream(raw)), \
+                 gateway_server(root/'model.sock', FakeAuth(), kind='old_method', native_codex=True,
+                                diagnostic_callback=diagnostics, telemetry_callback=metrics.append):
+                connection = UnixHTTPConnection(root/'model.sock')
+                connection.request('POST', '/v1/responses', json.dumps(request()))
+                reply = connection.getresponse()
+                self.assertEqual(reply.status, 200)
+                self.assertEqual(reply.read(), raw)
+                connection.close()
+            records = [json.loads(line) for line in (root/'gateway.jsonl').read_text().splitlines()]
+            self.assertEqual(records[-1]['outcome'], 'completed')
+            self.assertEqual(metrics[-1]['input_tokens'], 100)
+            self.assertNotIn('gateway_response_rejected_count', metrics[-1])
+            self.assertFalse((root/'gateway-failure.json').exists())
+
     def test_metadata_event_passes_native_transport_and_gateway_without_private_logging(self):
         values = [json.loads(part[6:]) for part in stream().decode().strip().split('\n\n')]
         values.insert(-1, {'type': 'response.metadata', 'sequence_number': 88,
@@ -54,6 +77,8 @@ class GatewayDiagnosticTests(unittest.TestCase):
 
     def test_native_rejections_are_classified_and_persisted_through_real_gateway(self):
         cases = [
+            ({'type': 'keepalive', 'sequence_number': 'PRIVATE_SEQUENCE'},
+             'validation', 'invalid_keepalive'),
             ({'type': 'response.failed', 'response': {'error': {'code': 'server_error', 'message': 'PRIVATE_ERROR'}}},
              'upstream_failed', 'upstream_failed'),
             ({'type': 'response.incomplete', 'response': {'incomplete_details': {'reason': 'max_output_tokens'}}},

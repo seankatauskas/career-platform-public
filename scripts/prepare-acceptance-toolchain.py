@@ -50,6 +50,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(".cache/acceptance-toolchain"))
     parser.add_argument("--seed-bundle", type=Path, help="optional existing ZIP; every cached file is still SHA256-verified")
+    parser.add_argument("--seed-dir", type=Path,
+                        default=Path.home() / ".cache/career-platform/acceptance-toolchain",
+                        help="persistent seed directory for pinned tectonic and tectonic.bundle files; all bytes are reverified")
     args = parser.parse_args()
     target = args.output.resolve()
     target.mkdir(parents=True, exist_ok=True)
@@ -63,6 +66,13 @@ def main():
             raise ValueError("invalid bundle filename")
         entries.append({"name": name, "offset": int(offset), "size": int(size), "sha256": sha})
     binary = target / "tectonic"
+    seed_binary = args.seed_dir / "tectonic"
+    if (not binary.exists() or digest(binary.read_bytes()) != BINARY_SHA) and seed_binary.is_file():
+        value = seed_binary.read_bytes()
+        if digest(value) == BINARY_SHA:
+            if binary.exists():
+                binary.chmod(0o600)
+            binary.write_bytes(value)
     if not binary.exists() or digest(binary.read_bytes()) != BINARY_SHA:
         archive = fetch(TECTONIC_URL, 16 * 1024 * 1024)
         if digest(archive) != ARCHIVE_SHA:
@@ -80,6 +90,8 @@ def main():
     binary.chmod(0o555)
     files = {}
     seed = args.seed_bundle or (target / "tectonic.bundle")
+    if args.seed_bundle is None and not seed.exists():
+        seed = args.seed_dir / "tectonic.bundle"
     if seed.exists():
         with zipfile.ZipFile(seed) as archive:
             for entry in entries:
